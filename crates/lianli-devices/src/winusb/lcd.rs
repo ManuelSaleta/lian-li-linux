@@ -273,7 +273,6 @@ impl WinUsbLcdDevice {
         let mut read_buf = vec![0u8; 64 * 1024];
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         let mut next_deadline = std::time::Instant::now() + frame_interval;
-        let mut frame_count: u32 = 0;
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -290,15 +289,6 @@ impl WinUsbLcdDevice {
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if !au.is_empty() {
                     self.send_h264_au(&au)?;
-
-                    frame_count += 1;
-                    if frame_count % 30 == 0 {
-                        if let Some(level) = self.query_block() {
-                            if level > 3 {
-                                self.wait_buffer(2);
-                            }
-                        }
-                    }
 
                     let now = std::time::Instant::now();
                     if now < next_deadline {
@@ -351,10 +341,8 @@ impl WinUsbLcdDevice {
     }
 
     /// Lean per-frame send for live H.264 streaming via StartPlay (0x79).
-    /// Writes one packet with full short-write handling and does a
-    /// non-blocking ack drain. Buffer backpressure is handled by
-    /// `tx_write_full` — if the device can't accept data, the write
-    /// times out and `try_recover` kicks in.
+    /// Writes one packet with full short-write handling, then reads the ack
+    /// and checks the device buffer level from byte 8 of the response.
     fn send_h264_au(&mut self, data: &[u8]) -> Result<()> {
         let header = self.builder.start_play_header_winusb(data.len(), false);
         let total = 512 + data.len();
@@ -372,7 +360,15 @@ impl WinUsbLcdDevice {
                 self.note_write_success();
             }
         }
-        self.tx_read_flush();
+        let mut buf = [0u8; 512];
+        match self.tx_read(&mut buf, Duration::from_millis(10)) {
+            Ok(n) if n > 0 => {
+                if buf[8] > 3 {
+                    self.wait_buffer(2);
+                }
+            }
+            _ => self.tx_read_flush(),
+        }
         Ok(())
     }
 
