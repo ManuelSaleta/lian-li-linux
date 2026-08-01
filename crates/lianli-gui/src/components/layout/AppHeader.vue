@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useRoute } from "vue-router";
-import { RefreshCw, Save } from "lucide-vue-next";
+import { Moon, RefreshCw, Save, Sun } from "lucide-vue-next";
 import { useDaemonStore } from "@/stores/daemon";
 import { useConfigStore } from "@/stores/config";
+import { useThemeStore } from "@/stores/theme";
 import { MAIN_ROUTES } from "@/router";
 
 const daemon = useDaemonStore();
 const config = useConfigStore();
+const theme = useThemeStore();
 const route = useRoute();
 
 const title = computed(
@@ -32,12 +34,28 @@ async function onSave() {
   await config.save();
   (document.activeElement as HTMLElement | null)?.blur();
 }
+
+function onToggleTheme() {
+  theme.toggle();
+  (document.activeElement as HTMLElement | null)?.blur();
+}
 </script>
 
 <template>
   <header class="header">
     <h1 class="title">{{ title }}</h1>
     <div class="spacer" />
+    <n-button
+      quaternary
+      size="small"
+      :title="theme.isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+      @click="onToggleTheme"
+    >
+      <template #icon>
+        <Sun v-if="theme.isDark" :size="15" />
+        <Moon v-else :size="15" />
+      </template>
+    </n-button>
     <n-button
       quaternary
       size="small"

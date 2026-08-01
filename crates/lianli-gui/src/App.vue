@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
-import { darkTheme, type GlobalThemeOverrides } from "naive-ui";
+import { darkTheme, type GlobalTheme, type GlobalThemeOverrides } from "naive-ui";
 import { useDaemonStore } from "@/stores/daemon";
 import { useConfigStore } from "@/stores/config";
+import { useThemeStore } from "@/stores/theme";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppHeader from "@/components/layout/AppHeader.vue";
 
 const daemon = useDaemonStore();
 const config = useConfigStore();
+const theme = useThemeStore();
 const route = useRoute();
 
 // Secondary windows (editor/browser) render standalone, without the shell.
@@ -16,7 +18,7 @@ const isSecondaryWindow = computed(
   () => route.name === "editor" || route.name === "browser",
 );
 
-const themeOverrides: GlobalThemeOverrides = {
+const darkOverrides: GlobalThemeOverrides = {
   common: {
     bodyColor: "#0f1117",
     cardColor: "#1a1d27",
@@ -42,6 +44,39 @@ const themeOverrides: GlobalThemeOverrides = {
   },
 };
 
+const lightOverrides: GlobalThemeOverrides = {
+  common: {
+    bodyColor: "#f4f6f9",
+    cardColor: "#ffffff",
+    modalColor: "#ffffff",
+    popoverColor: "#ffffff",
+    primaryColor: "#2f7acc",
+    primaryColorHover: "#2569b0",
+    primaryColorPressed: "#1d5499",
+    textColorBase: "#1a1d27",
+    textColor1: "#1a1d27",
+    textColor2: "#3d4452",
+    textColor3: "#565d6b",
+    placeholderColor: "#868f9e",
+    dividerColor: "#e2e6ee",
+    borderColor: "#e2e6ee",
+    inputColor: "#ffffff",
+    inputColorDisabled: "#eef1f6",
+    actionColor: "#eef1f6",
+    tableHeaderColor: "#f4f6f9",
+    hoverColor: "rgba(47, 122, 204, 0.12)",
+    borderRadius: "8px",
+    borderRadiusSmall: "6px",
+  },
+};
+
+const naiveTheme = computed<GlobalTheme | null>(() =>
+  theme.isDark ? darkTheme : null,
+);
+const themeOverrides = computed(() =>
+  theme.isDark ? darkOverrides : lightOverrides,
+);
+
 onMounted(async () => {
   // Kick off the initial config load + polling loop.
   await config.load().catch(() => undefined);
@@ -50,7 +85,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider :theme="darkTheme" :theme-overrides="themeOverrides">
+  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-dialog-provider>
         <n-notification-provider>
