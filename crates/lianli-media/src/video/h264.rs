@@ -80,7 +80,7 @@ impl EncoderKind {
 }
 
 pub(super) fn hw_video_enabled() -> bool {
-    !std::env::var("LIANLI_DISABLE_HW_VIDEO")
+    std::env::var("LIANLI_ENABLE_HW_VIDEO")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -99,7 +99,6 @@ pub(super) fn encoder_chain() -> &'static [EncoderKind] {
         &[EncoderKind::Libx264]
     }
 }
-
 pub(super) fn hwaccel_input_args(kind: EncoderKind) -> Vec<String> {
     match kind {
         EncoderKind::Vaapi => vec!["-vaapi_device".into(), "/dev/dri/renderD128".into()],
