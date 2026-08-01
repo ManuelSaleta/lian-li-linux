@@ -116,7 +116,13 @@ The GUI connects over `$XDG_RUNTIME_DIR/lianli-daemon.sock`.
 yay -S lianli-linux-git
 ```
 
-Or with any AUR helper (`paru`, `trizen`, etc.). This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and attempts to start it in the current session — no manual `systemctl` step is required.
+You can also build from the PKGBUILD in case AUR is inaccessible:
+```bash
+git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && cd lian-li-linux/packaging/archlinux
+makepkg -si
+```
+
+This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and attempts to start it in the current session — no manual `systemctl` step is required.
 
 The daemon runs as a systemd user service and reads `~/.config/lianli/config.json`. If you want it to stay active when no desktop session is logged in, enable linger: `sudo loginctl enable-linger $USER`.
 
