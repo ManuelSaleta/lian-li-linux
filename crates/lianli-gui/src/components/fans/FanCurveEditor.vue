@@ -241,7 +241,7 @@ function pointPx(pt: [number, number]) {
   width: auto;
   max-width: 100%;
   margin: 0 auto;
-  background: #14171f;
+  background: var(--bg-base);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   user-select: none;

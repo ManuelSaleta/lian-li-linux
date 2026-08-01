@@ -41,6 +41,28 @@
   --radius-lg: 12px;
 }
 
+/* Light-mode palette. Activated by `data-theme="light"` on <html>. */
+[data-theme="light"] {
+  --bg-base: #f4f6f9;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #eef1f6;
+  --border: #e2e6ee;
+  --border-strong: #cdd3de;
+  --text-primary: #1a1d27;
+  --text-secondary: #565d6b;
+  --text-muted: #868f9e;
+  --accent: #2f7acc;
+  --accent-hover: #2569b0;
+  --accent-soft: rgba(47, 122, 204, 0.12);
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --purple: #7c3aed;
+  --teal: #0d9488;
+  --pink: #db2777;
+}
+
 * {
   box-sizing: border-box;
 }
