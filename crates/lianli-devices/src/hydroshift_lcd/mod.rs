@@ -12,10 +12,12 @@
 //! LCD: 480x480 pixels, 24fps. Pump/fan PWM: 0-100%.
 //! Coolant temperature sensor available.
 
+use std::sync::Arc;
 mod controller;
 mod protocol;
 mod rgb;
 
+pub(crate) use controller::find_au_split;
 pub use controller::HydroShiftLcdController;
 pub use rgb::AioLcdRgbController;
 
@@ -68,6 +70,23 @@ impl AioLcdVariant {
             Self::Galahad2Lcd | Self::Galahad2Vision => (1, 5),
         }
     }
+
+    /// Whether this variant has fan control.
+    /// TL variant has no fan control.
+    pub fn has_fan_control(&self) -> bool {
+        !matches!(self, Self::HydroShiftLcdTl)
+    }
+
+    /// Per-variant pump RPM envelope for clamping/translation.
+    pub fn pump_envelope(&self) -> lianli_shared::aio::PumpEnvelope {
+        use lianli_shared::aio::PumpEnvelope;
+        match self {
+            Self::HydroShiftLcd | Self::Galahad2Lcd => PumpEnvelope::HYDROSHIFT_LCD,
+            Self::Galahad2Vision => PumpEnvelope::GALAHAD2_VISION,
+            Self::HydroShiftLcdRgb => PumpEnvelope::HYDROSHIFT_LCD_RGB,
+            Self::HydroShiftLcdTl => PumpEnvelope::HYDROSHIFT_LCD_TL,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -108,4 +127,58 @@ pub struct AioHandshake {
     pub pump_rpm: u16,
     pub temp_valid: bool,
     pub coolant_temp: f32,
+}
+
+/// Driver entry point for the HydroShift LCD / Galahad2 LCD / Vision family.
+pub struct HydroShiftLcdDriver;
+
+impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
+    fn family(&self) -> lianli_shared::device_id::DeviceFamily {
+        lianli_shared::device_id::DeviceFamily::HydroShiftLcd
+    }
+
+    fn open(
+        &self,
+        ctx: &crate::registry::OpenContext,
+    ) -> anyhow::Result<crate::registry::OpenedDevice> {
+        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
+            ctx.device.clone(),
+            ctx.hid_usage_page,
+            ctx.vid,
+            ctx.pid,
+            ctx.bus,
+            ctx.device.port_numbers().unwrap_or_default(),
+        )?;
+        let pid = ctx.pid;
+        let variant = AioLcdVariant::from_pid(pid).unwrap_or(AioLcdVariant::HydroShiftLcd);
+        let family = match variant {
+            AioLcdVariant::Galahad2Lcd | AioLcdVariant::Galahad2Vision => {
+                lianli_shared::device_id::DeviceFamily::Galahad2Lcd
+            }
+            _ => lianli_shared::device_id::DeviceFamily::HydroShiftLcd,
+        };
+
+        let mut lcd_ctrl = HydroShiftLcdController::new(std::sync::Arc::clone(&backend), pid)?;
+        crate::traits::LcdDevice::initialize(&mut lcd_ctrl)?;
+        let firmware = lcd_ctrl.firmware_version_str().map(|s| s.to_string());
+        let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
+        let lcd_arc = std::sync::Arc::new(lcd_ctrl);
+
+        Ok(crate::registry::OpenedDevice {
+            id: ctx.device_id(),
+            family,
+            capabilities: family.capabilities(),
+            transport_kind: lianli_shared::device_id::TransportKind::Hid,
+            model_name: variant.name().to_string(),
+            firmware,
+            fan: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
+            lcd: None,
+            rgb: vec![(
+                String::new(),
+                Arc::new(rgb_ctrl) as Arc<dyn crate::traits::RgbDevice>,
+            )],
+            aio: Some(Box::new(lcd_arc)),
+            shared_hid: Some(backend),
+        })
+    }
 }

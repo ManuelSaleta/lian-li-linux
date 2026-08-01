@@ -1,22 +1,24 @@
+use super::renderers::{
+    AsyncCustomH264Renderer, AsyncCustomRenderer, AsyncSensorH264Renderer, AsyncSensorRenderer,
+    AsyncVideoPlayer,
+};
 use super::DaemonEvent;
 use lianli_devices::crypto::PacketBuilder;
 use lianli_devices::slv3_lcd::Slv3LcdDevice;
 use lianli_devices::traits::LcdDevice;
-use lianli_devices::winusb_lcd::WinUsbLcdDevice;
+use lianli_devices::winusb::lcd::WinUsbLcdDevice;
 use lianli_devices::wireless::WirelessController;
-use lianli_media::sensor::FrameInfo;
-use lianli_media::video::LiveH264Encoder;
-use lianli_media::{CustomAsset, MediaAsset, MediaAssetKind, SensorAsset};
+use lianli_media::{MediaAsset, MediaAssetKind};
 use lianli_shared::config::ConfigKey;
 use lianli_shared::screen::ScreenInfo;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::process::ChildStdout;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 pub(super) type SharedHidLcd = Arc<Mutex<Box<dyn LcdDevice>>>;
@@ -30,13 +32,15 @@ pub(super) enum LcdBackend {
 impl LcdBackend {
     fn send_frame(
         &mut self,
-        wireless: &WirelessController,
+        wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
         frame: &[u8],
     ) -> anyhow::Result<()> {
         match self {
             Self::Slv3(d) => {
-                wireless.ensure_video_mode()?;
+                if let Some(w) = wireless {
+                    w.ensure_video_mode()?;
+                }
                 d.send_frame(builder, frame)
             }
             Self::WinUsb(d) => d.send_frame(frame),
@@ -46,7 +50,7 @@ impl LcdBackend {
 
     fn send_frame_verified(
         &mut self,
-        wireless: &WirelessController,
+        wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
         frame: &[u8],
     ) -> anyhow::Result<()> {
@@ -57,17 +61,31 @@ impl LcdBackend {
         }
     }
 
-    fn start_h264_stream(
+    pub(super) fn set_brightness(
+        &mut self,
+        wireless: Option<&WirelessController>,
+        builder: &mut PacketBuilder,
+        brightness: u8,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Slv3(d) => {
+                if let Some(w) = wireless {
+                    w.ensure_video_mode()?;
+                }
+                d.set_brightness(builder, brightness).map_err(Into::into)
+            }
+            Self::WinUsb(sender) => sender.set_brightness(brightness),
+            Self::HidLcd(d) => d.lock().set_brightness(brightness).map_err(Into::into),
+        }
+    }
+
+    pub(super) fn start_h264_stream(
         &self,
         stdout: ChildStdout,
         stop: Arc<AtomicBool>,
         fps: f32,
     ) -> anyhow::Result<Option<JoinHandle<()>>> {
         match self {
-            Self::WinUsb(sender) => {
-                sender.stream_h264_reader(stdout, fps)?;
-                Ok(None)
-            }
             Self::HidLcd(lcd) => {
                 let lcd = Arc::clone(lcd);
                 let mut stdout = stdout;
@@ -79,12 +97,66 @@ impl LcdBackend {
                 });
                 Ok(Some(handle))
             }
+            Self::WinUsb(sender) => {
+                sender.stream_h264_reader(stdout, fps)?;
+                Ok(None)
+            }
             _ => anyhow::bail!("h264 streaming not supported on this backend"),
+        }
+    }
+
+    /// Create a restart-capable handle that can be moved into a render thread
+    /// to start a new h264 stream after encoder failure.
+    pub(super) fn stream_restarter(&self) -> Option<StreamRestarter> {
+        match self {
+            Self::HidLcd(lcd) => Some(StreamRestarter::HidLcd(Arc::clone(lcd))),
+            Self::WinUsb(sender) => Some(StreamRestarter::WinUsb(
+                sender.tx.clone(),
+                Arc::clone(&sender.h264_stop),
+            )),
+            Self::Slv3(_) => None,
         }
     }
 }
 
-enum LcdThreadMsg {
+/// Cloneable handle for restarting an h264 stream from inside a render thread.
+pub(super) enum StreamRestarter {
+    HidLcd(SharedHidLcd),
+    WinUsb(std::sync::mpsc::SyncSender<LcdThreadMsg>, Arc<AtomicBool>),
+}
+
+impl StreamRestarter {
+    /// Start a new h264 stream reading from the given stdout. The old stream
+    /// (if any) is signalled to stop first.
+    pub(super) fn start_stream(
+        &self,
+        stdout: ChildStdout,
+        stop: Arc<AtomicBool>,
+        fps: f32,
+    ) -> anyhow::Result<Option<JoinHandle<()>>> {
+        match self {
+            Self::HidLcd(lcd) => {
+                let lcd = Arc::clone(lcd);
+                let mut stdout = stdout;
+                let handle = thread::spawn(move || {
+                    let mut guard = lcd.lock();
+                    if let Err(e) = guard.stream_h264_reader(&mut stdout, &stop, fps) {
+                        warn!("HID h264 stream restart error: {e:#}");
+                    }
+                });
+                Ok(Some(handle))
+            }
+            Self::WinUsb(tx, h264_stop) => {
+                h264_stop.store(true, Ordering::Relaxed);
+                tx.send(LcdThreadMsg::StreamH264Reader(stdout, fps))
+                    .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))?;
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub(super) enum LcdThreadMsg {
     Frame(Vec<u8>),
     FrameVerified(Vec<u8>, std::sync::mpsc::SyncSender<anyhow::Result<()>>),
     StreamH264 {
@@ -92,8 +164,9 @@ enum LcdThreadMsg {
         looping: bool,
         fps: f32,
     },
-    StreamH264Reader(ChildStdout, f32),
+    StreamH264Reader(std::process::ChildStdout, f32),
     SwitchDesktop(std::sync::mpsc::SyncSender<anyhow::Result<()>>),
+    SetBrightness(u8),
     Stop,
 }
 
@@ -129,13 +202,18 @@ impl ThreadedWinUsbSender {
                     LcdThreadMsg::StreamH264Reader(mut stdout, fps) => {
                         stop_clone.store(false, Ordering::Relaxed);
                         if let Err(e) = device.stream_h264_reader(&mut stdout, &stop_clone, fps) {
-                            warn!("LCD[{index}] live h264 stream error: {e}");
+                            warn!("LCD[{index}] h264 live stream error: {e}");
                         }
                     }
                     LcdThreadMsg::SwitchDesktop(reply) => {
                         let result = device.switch_to_desktop_mode();
                         let _ = reply.send(result);
                         break;
+                    }
+                    LcdThreadMsg::SetBrightness(val) => {
+                        if let Err(e) = device.set_brightness_val(val) {
+                            warn!("LCD[{index}] set_brightness error: {e}");
+                        }
                     }
                     LcdThreadMsg::Stop => break,
                 }
@@ -157,12 +235,29 @@ impl ThreadedWinUsbSender {
         Ok(())
     }
 
-    fn stream_h264_reader(&self, stdout: ChildStdout, fps: f32) -> anyhow::Result<()> {
+    fn stream_h264_reader(
+        &self,
+        stdout: std::process::ChildStdout,
+        fps: f32,
+    ) -> anyhow::Result<()> {
         self.h264_stop.store(true, Ordering::Relaxed);
         self.tx
             .send(LcdThreadMsg::StreamH264Reader(stdout, fps))
             .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))?;
         Ok(())
+    }
+
+    fn set_brightness(&self, brightness: u8) -> anyhow::Result<()> {
+        match self.tx.try_send(LcdThreadMsg::SetBrightness(brightness)) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                warn!("LCD sender busy, brightness command dropped");
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("LCD sender thread exited")
+            }
+        }
     }
 
     fn send_frame(&self, frame: &[u8]) -> anyhow::Result<()> {
@@ -227,7 +322,7 @@ pub(crate) struct ActiveTarget {
     // `media` must drop before `lcd`: tearing down a live h264 pipeline closes
     // the encoder's stdin, ffmpeg flushes its trailer to stdout, and the WinUsb
     // thread (owned by `lcd`) needs to still be alive to drain it.
-    media: MediaRuntime,
+    media: Box<dyn FrameSource>,
     pub(super) lcd: LcdBackend,
     pub(super) asset: Arc<MediaAsset>,
     pub(super) screen: ScreenInfo,
@@ -251,8 +346,7 @@ impl ActiveTarget {
         custom_h264: bool,
         tx: Option<Sender<DaemonEvent>>,
     ) -> Self {
-        let media =
-            MediaRuntime::from_asset(Arc::clone(&asset), tx.clone(), &lcd, &screen, custom_h264);
+        let media = make_frame_source(Arc::clone(&asset), tx.clone(), &lcd, &screen, custom_h264);
         let recovery_stop = Arc::new(AtomicBool::new(false));
         let recovery_thread = match &lcd {
             LcdBackend::HidLcd(d) => {
@@ -306,9 +400,15 @@ impl ActiveTarget {
     }
 
     /// Replace the media asset without reopening the LCD transport.
-    pub(super) fn swap_media(&mut self, asset: Arc<MediaAsset>, tx: Option<Sender<DaemonEvent>>) {
+    pub(super) fn swap_media(
+        &mut self,
+        asset: Arc<MediaAsset>,
+        custom_h264: bool,
+        tx: Option<Sender<DaemonEvent>>,
+    ) {
         self.asset = Arc::clone(&asset);
-        self.media = MediaRuntime::from_asset(asset, tx, &self.lcd, &self.screen, self.custom_h264);
+        self.custom_h264 = custom_h264;
+        self.media = make_frame_source(asset, tx, &self.lcd, &self.screen, custom_h264);
         self.frame_counter = 0;
         info!(
             "[devices] LCD[{}] media swapped (keeping transport)",
@@ -316,56 +416,46 @@ impl ActiveTarget {
         );
     }
 
+    /// Apply a `custom_h264` toggle change without reloading media or
+    /// reopening the transport. Rebuilds only the frame source so the live
+    /// H.264 pipeline engages/disengages immediately on save.
+    pub(super) fn update_custom_h264(
+        &mut self,
+        custom_h264: bool,
+        tx: Option<Sender<DaemonEvent>>,
+    ) {
+        if self.custom_h264 == custom_h264 {
+            return;
+        }
+        self.custom_h264 = custom_h264;
+        self.media = make_frame_source(
+            Arc::clone(&self.asset),
+            tx,
+            &self.lcd,
+            &self.screen,
+            custom_h264,
+        );
+        self.frame_counter = 0;
+        info!(
+            "[devices] LCD[{}] custom_h264 -> {custom_h264} (frame source rebuilt)",
+            self.index
+        );
+    }
+
     pub(super) fn send_frame(
         &mut self,
-        wireless: &WirelessController,
+        wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
     ) -> Result<bool, SendError> {
-        // H264: start the stream on the LCD thread, then it runs autonomously
-        if let MediaRuntime::H264 {
-            path,
-            looping,
-            fps,
-            started,
-            hid_thread,
-            hid_stop,
-        } = &mut self.media
-        {
-            if !*started {
-                match &self.lcd {
-                    LcdBackend::WinUsb(sender) => {
-                        sender
-                            .stream_h264(path.clone(), *looping, *fps)
-                            .map_err(|e| SendError::Other(e))?;
-                    }
-                    LcdBackend::HidLcd(hid) => {
-                        let lcd = Arc::clone(hid);
-                        let path = path.clone();
-                        let looping = *looping;
-                        let fps = *fps;
-                        let stop = Arc::clone(hid_stop);
-                        *hid_thread = Some(thread::spawn(move || {
-                            stream_h264_file_to_hid(lcd, path, looping, fps, stop);
-                        }));
-                    }
-                    _ => {}
-                }
-                *started = true;
-            }
+        // H.264 / autonomous sources: kick off streaming on the first call,
+        // then short-circuit (their threads push frames directly to the LCD).
+        if self.media.is_autonomous() {
+            self.media.start(&self.lcd).map_err(SendError::Other)?;
             return Ok(true);
         }
 
-        // CustomH264 / SensorH264 were already kicked off when the runtime was
-        // built; their dedicated render + encode threads run autonomously.
-        if matches!(
-            self.media,
-            MediaRuntime::CustomH264 { .. } | MediaRuntime::SensorH264 { .. }
-        ) {
-            return Ok(true);
-        }
-
-        let is_static = matches!(self.media, MediaRuntime::Static { .. });
-        let frame = match self.media.next_frame_bytes() {
+        let is_static = self.media.is_static();
+        let frame = match self.media.next_frame() {
             Some(bytes) => bytes,
             None => return Ok(false),
         };
@@ -400,56 +490,269 @@ impl Drop for ActiveTarget {
     }
 }
 
-enum MediaRuntime {
-    Static {
-        frame: Arc<Vec<u8>>,
-    },
-    Video {
-        #[allow(dead_code)]
-        player: Arc<AsyncVideoPlayer>,
-        frames: Arc<Vec<Vec<u8>>>,
-        sent_frame_index: usize,
-    },
-    Sensor {
-        renderer: Arc<AsyncSensorRenderer>,
-        cached_frame: Vec<u8>,
-        sent_frame_index: usize,
-    },
-    H264 {
-        path: PathBuf,
-        looping: bool,
-        fps: f32,
-        started: bool,
-        hid_thread: Option<JoinHandle<()>>,
-        hid_stop: Arc<AtomicBool>,
-    },
-    Custom {
-        renderer: Arc<AsyncCustomRenderer>,
-        cached_frame: Vec<u8>,
-        sent_frame_index: usize,
-    },
-    CustomH264 {
-        #[allow(dead_code)]
-        renderer: Arc<AsyncCustomH264Renderer>,
-    },
-    SensorH264 {
-        #[allow(dead_code)]
-        renderer: Arc<AsyncSensorH264Renderer>,
-    },
+/// A source of JPEG frames to push to an LCD, or an autonomous H.264
+/// pipeline that streams directly to the device.
+///
+/// Every `MediaRuntime` variant is now one of these. The trait lets
+/// `ActiveTarget::send_frame` dispatch without a 7-arm match.
+trait FrameSource: Send {
+    /// Called on the first `send_frame` after the source is attached. For
+    /// H.264 file streaming, this kicks off the streaming thread.
+    fn start(&mut self, _lcd: &LcdBackend) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Poll for the next JPEG frame. Returns `None` when no new frame has
+    /// been rendered since the last call, or when the source is autonomous.
+    fn next_frame(&mut self) -> Option<&[u8]> {
+        None
+    }
+
+    /// `true` if the source produces a single unchanging frame (uses the
+    /// verified-send path that tolerates a dropped USB write).
+    fn is_static(&self) -> bool {
+        false
+    }
+
+    /// `true` if the source pushes frames on its own thread and `send_frame`
+    /// should skip the JPEG path entirely.
+    fn is_autonomous(&self) -> bool {
+        false
+    }
 }
 
-impl Drop for MediaRuntime {
-    fn drop(&mut self) {
-        if let MediaRuntime::H264 {
-            hid_stop,
-            hid_thread,
-            ..
-        } = self
-        {
-            hid_stop.store(true, Ordering::Relaxed);
-            if let Some(t) = hid_thread.take() {
-                let _ = t.join();
+// ─── JPEG sources ──────────────────────────────────────────────────────
+
+struct StaticSource {
+    frame: Arc<Vec<u8>>,
+}
+impl FrameSource for StaticSource {
+    fn next_frame(&mut self) -> Option<&[u8]> {
+        Some(self.frame.as_slice())
+    }
+    fn is_static(&self) -> bool {
+        true
+    }
+}
+
+struct VideoSource {
+    player: Arc<AsyncVideoPlayer>,
+    frames: Arc<Vec<Vec<u8>>>,
+    sent_index: usize,
+}
+impl FrameSource for VideoSource {
+    fn next_frame(&mut self) -> Option<&[u8]> {
+        let idx = self.player.get_frame_index();
+        if idx <= self.sent_index || self.frames.is_empty() {
+            return None;
+        }
+        let ret = Some(self.frames[idx % self.frames.len()].as_slice());
+        self.sent_index = idx;
+        ret
+    }
+}
+
+struct SensorSource {
+    renderer: Arc<AsyncSensorRenderer>,
+    cached: Vec<u8>,
+    sent_index: usize,
+}
+impl FrameSource for SensorSource {
+    fn next_frame(&mut self) -> Option<&[u8]> {
+        let idx = self.renderer.get_frame_index();
+        if idx <= self.sent_index {
+            return None;
+        }
+        self.cached = self.renderer.get_current_frame();
+        self.sent_index = idx;
+        Some(self.cached.as_slice())
+    }
+}
+
+struct CustomSource {
+    renderer: Arc<AsyncCustomRenderer>,
+    cached: Vec<u8>,
+    sent_index: usize,
+}
+impl FrameSource for CustomSource {
+    fn next_frame(&mut self) -> Option<&[u8]> {
+        let idx = self.renderer.get_frame_index();
+        if idx <= self.sent_index {
+            return None;
+        }
+        self.cached = self.renderer.get_current_frame();
+        self.sent_index = idx;
+        Some(self.cached.as_slice())
+    }
+}
+
+// ─── H.264 autonomous sources ──────────────────────────────────────────
+
+struct H264FileSource {
+    path: PathBuf,
+    looping: bool,
+    fps: f32,
+    started: bool,
+    hid_thread: Option<JoinHandle<()>>,
+    hid_stop: Arc<AtomicBool>,
+}
+
+impl H264FileSource {
+    fn new(path: PathBuf, looping: bool, fps: f32) -> Self {
+        Self {
+            path,
+            looping,
+            fps,
+            started: false,
+            hid_thread: None,
+            hid_stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl FrameSource for H264FileSource {
+    fn start(&mut self, lcd: &LcdBackend) -> anyhow::Result<()> {
+        if self.started {
+            return Ok(());
+        }
+        match lcd {
+            LcdBackend::WinUsb(sender) => {
+                sender.stream_h264(self.path.clone(), self.looping, self.fps)?;
             }
+            LcdBackend::HidLcd(hid) => {
+                let lcd = Arc::clone(hid);
+                let (path, looping, fps) = (self.path.clone(), self.looping, self.fps);
+                let stop = Arc::clone(&self.hid_stop);
+                self.hid_thread = Some(thread::spawn(move || {
+                    stream_h264_file_to_hid(lcd, path, looping, fps, stop);
+                }));
+            }
+            _ => {}
+        }
+        self.started = true;
+        Ok(())
+    }
+    fn is_autonomous(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for H264FileSource {
+    fn drop(&mut self) {
+        self.hid_stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.hid_thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+struct CustomH264Source {
+    #[allow(dead_code)]
+    renderer: Arc<AsyncCustomH264Renderer>,
+}
+impl FrameSource for CustomH264Source {
+    fn is_autonomous(&self) -> bool {
+        true
+    }
+}
+
+struct SensorH264Source {
+    #[allow(dead_code)]
+    renderer: Arc<AsyncSensorH264Renderer>,
+}
+impl FrameSource for SensorH264Source {
+    fn is_autonomous(&self) -> bool {
+        true
+    }
+}
+
+/// Construct the appropriate `FrameSource` for a given media asset + LCD combo.
+fn make_frame_source(
+    asset: Arc<MediaAsset>,
+    tx: Option<Sender<DaemonEvent>>,
+    lcd: &LcdBackend,
+    screen: &ScreenInfo,
+    custom_h264: bool,
+) -> Box<dyn FrameSource> {
+    match &asset.kind {
+        MediaAssetKind::Static { frame } => Box::new(StaticSource {
+            frame: Arc::clone(frame),
+        }),
+        MediaAssetKind::Video { frames, .. } => {
+            let player = Arc::new(AsyncVideoPlayer::new(tx, Arc::clone(&asset)));
+            Box::new(VideoSource {
+                player,
+                frames: Arc::clone(frames),
+                sent_index: 0,
+            })
+        }
+        MediaAssetKind::Sensor {
+            asset: sensor_asset,
+        } => {
+            if screen.h264 {
+                match AsyncSensorH264Renderer::new(Arc::clone(sensor_asset), lcd, screen) {
+                    Ok(renderer) => {
+                        info!("Sensor mode using live h264 pipeline");
+                        return Box::new(SensorH264Source {
+                            renderer: Arc::new(renderer),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Sensor h264 pipeline unavailable, falling back to JPEG: {e}");
+                    }
+                }
+            }
+            let renderer = Arc::new(AsyncSensorRenderer::new(
+                tx,
+                Arc::clone(sensor_asset),
+                Arc::clone(&asset),
+                screen.needs_keepalive,
+            ));
+            let cached = renderer.get_current_frame();
+            Box::new(SensorSource {
+                renderer,
+                cached,
+                sent_index: 0,
+            })
+        }
+        MediaAssetKind::H264Stream {
+            path, looping, fps, ..
+        } => Box::new(H264FileSource::new(path.clone(), *looping, *fps)),
+        MediaAssetKind::Custom {
+            asset: custom_asset,
+        } => {
+            if custom_h264 && screen.h264 {
+                match AsyncCustomH264Renderer::new(
+                    Arc::clone(custom_asset),
+                    lcd,
+                    screen,
+                    custom_asset.canvas_width(),
+                    custom_asset.canvas_height(),
+                    custom_asset.total_rotation_deg(),
+                ) {
+                    Ok(renderer) => {
+                        info!("Custom mode using live h264 pipeline");
+                        return Box::new(CustomH264Source {
+                            renderer: Arc::new(renderer),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Custom h264 pipeline unavailable, falling back to JPEG: {e}");
+                    }
+                }
+            }
+            let renderer = Arc::new(AsyncCustomRenderer::new(
+                tx,
+                Arc::clone(custom_asset),
+                Arc::clone(&asset),
+                screen.needs_keepalive,
+            ));
+            let cached = renderer.get_current_frame();
+            Box::new(CustomSource {
+                renderer,
+                cached,
+                sent_index: 0,
+            })
         }
     }
 }
@@ -489,596 +792,7 @@ fn stream_h264_file_to_hid(
     }
 }
 
-struct AsyncSensorRenderer {
-    #[allow(dead_code)] // We'd like to keep the SensorAsset, who knows if we'll need it
-    asset: Arc<SensorAsset>,
-    current_frame: Arc<Mutex<FrameInfo>>,
-    stop_flag: Arc<AtomicBool>,
-    _thread: Option<JoinHandle<()>>,
-}
-
-impl AsyncSensorRenderer {
-    fn new(
-        tx: Option<Sender<DaemonEvent>>,
-        asset: Arc<SensorAsset>,
-        baseasset: Arc<MediaAsset>,
-        keep_alive_on_no_change: bool,
-    ) -> Self {
-        let initial = match asset.render_frame(true) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => asset.blank_frame(),
-            Err(err) => {
-                warn!("sensor initial render failed: {err}");
-                asset.blank_frame()
-            }
-        };
-
-        let current_frame = Arc::new(Mutex::new(initial));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let update_interval = asset.update_interval();
-
-        let asset_clone = Arc::clone(&asset);
-        let frame_clone = Arc::clone(&current_frame);
-        let stop_clone = Arc::clone(&stop_flag);
-
-        let asset_for_thread = Arc::clone(&baseasset);
-        let tx_for_thread = tx.clone();
-
-        let thread = thread::spawn(move || {
-            while !stop_clone.load(Ordering::Relaxed) {
-                thread::sleep(update_interval);
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                match asset_clone.render_frame(keep_alive_on_no_change) {
-                    Ok(Some(new_frame)) => {
-                        *frame_clone.lock() = new_frame;
-                    }
-                    Ok(None) => {
-                        frame_clone.lock().frame_index += 1;
-                    }
-                    Err(err) => {
-                        warn!("sensor background render failed: {err}");
-                        continue;
-                    }
-                }
-                if let Some(ref tx) = tx_for_thread {
-                    let event = DaemonEvent::FrameFinished {
-                        asset: Arc::clone(&asset_for_thread),
-                    };
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        Self {
-            asset,
-            current_frame,
-            stop_flag,
-            _thread: Some(thread),
-        }
-    }
-
-    fn get_frame_index(&self) -> usize {
-        self.current_frame.lock().frame_index
-    }
-
-    fn get_current_frame(&self) -> Vec<u8> {
-        self.current_frame.lock().data.clone()
-    }
-}
-
-impl Drop for AsyncSensorRenderer {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-    }
-}
-
-struct AsyncVideoPlayer {
-    stop_flag: Arc<AtomicBool>,
-    _thread: Option<JoinHandle<()>>,
-    frame_index: Arc<AtomicUsize>,
-}
-
-impl AsyncVideoPlayer {
-    fn new(tx: Option<Sender<DaemonEvent>>, asset: Arc<MediaAsset>) -> Self {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop_flag);
-
-        let tx_for_thread = tx.clone();
-
-        let asset_for_thread = Arc::clone(&asset);
-
-        let min_dur = Duration::from_millis(10);
-        let std_dur = Duration::from_millis(100);
-
-        let frame_durations: Vec<Duration> = if let MediaAssetKind::Video {
-            frame_durations, ..
-        } = &asset.kind
-        {
-            frame_durations.iter().map(|&d| d.max(min_dur)).collect()
-        } else {
-            vec![min_dur; 1]
-        };
-
-        let frame_index: Arc<AtomicUsize> = Arc::new(0.into());
-        let frame_index_cloned = frame_index.clone();
-
-        let thread = thread::spawn(move || {
-            while !stop_clone.load(Ordering::Relaxed) {
-                let mut frame_cnt = 0;
-                if let Some(ref tx) = tx_for_thread {
-                    frame_cnt = frame_index.fetch_add(1, Ordering::SeqCst);
-                    let event = DaemonEvent::FrameFinished {
-                        asset: Arc::clone(&asset_for_thread),
-                    };
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
-
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let millis = frame_durations.get(frame_cnt % frame_durations.len());
-                thread::sleep(*millis.unwrap_or(&std_dur));
-            }
-        });
-
-        Self {
-            stop_flag,
-            _thread: Some(thread),
-            frame_index: frame_index_cloned,
-        }
-    }
-
-    fn get_frame_index(&self) -> usize {
-        self.frame_index.load(Ordering::SeqCst)
-    }
-}
-
-impl Drop for AsyncVideoPlayer {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-    }
-}
-
-struct AsyncCustomRenderer {
-    current_frame: Arc<Mutex<FrameInfo>>,
-    stop_flag: Arc<AtomicBool>,
-    _thread: Option<JoinHandle<()>>,
-}
-
-impl AsyncCustomRenderer {
-    fn new(
-        tx: Option<Sender<DaemonEvent>>,
-        asset: Arc<CustomAsset>,
-        baseasset: Arc<MediaAsset>,
-        keep_alive_on_no_change: bool,
-    ) -> Self {
-        let initial = match asset.render_frame(true) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => asset.blank_frame(),
-            Err(err) => {
-                warn!("Custom initial render failed: {err}");
-                asset.blank_frame()
-            }
-        };
-
-        let current_frame = Arc::new(Mutex::new(initial));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let update_interval = asset.update_interval();
-
-        let asset_clone = Arc::clone(&asset);
-        let frame_clone = Arc::clone(&current_frame);
-        let stop_clone = Arc::clone(&stop_flag);
-
-        let asset_for_thread = Arc::clone(&baseasset);
-        let tx_for_thread = tx.clone();
-
-        let thread = thread::spawn(move || {
-            let mut next_deadline = Instant::now() + update_interval;
-            while !stop_clone.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                if now < next_deadline {
-                    thread::sleep(next_deadline - now);
-                }
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                next_deadline += update_interval;
-                if next_deadline < Instant::now() {
-                    next_deadline = Instant::now() + update_interval;
-                }
-                match asset_clone.render_frame(keep_alive_on_no_change) {
-                    Ok(Some(new_frame)) => {
-                        *frame_clone.lock() = new_frame;
-                        if let Some(ref tx) = tx_for_thread {
-                            let event = DaemonEvent::FrameFinished {
-                                asset: Arc::clone(&asset_for_thread),
-                            };
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!("Custom background render failed: {err}");
-                    }
-                }
-            }
-        });
-
-        Self {
-            current_frame,
-            stop_flag,
-            _thread: Some(thread),
-        }
-    }
-
-    fn get_frame_index(&self) -> usize {
-        self.current_frame.lock().frame_index
-    }
-
-    fn get_current_frame(&self) -> Vec<u8> {
-        self.current_frame.lock().data.clone()
-    }
-}
-
-impl Drop for AsyncCustomRenderer {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-    }
-}
-
-struct AsyncCustomH264Renderer {
-    stop_flag: Arc<AtomicBool>,
-    _encoder: Arc<Mutex<LiveH264Encoder>>,
-    _thread: Option<JoinHandle<()>>,
-    _stream_thread: Option<JoinHandle<()>>,
-}
-
-impl AsyncCustomH264Renderer {
-    fn new(
-        asset: Arc<CustomAsset>,
-        lcd: &LcdBackend,
-        screen: &ScreenInfo,
-        canvas_w: u32,
-        canvas_h: u32,
-        rotation_deg: u16,
-    ) -> anyhow::Result<Self> {
-        let fps = screen.max_fps as f32;
-        let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, rotation_deg, screen)
-            .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
-        let stdout = encoder
-            .take_stdout()
-            .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
-
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
-        let stop_clone = Arc::clone(&stop_flag);
-        let encoder = Arc::new(Mutex::new(encoder));
-        let encoder_clone = Arc::clone(&encoder);
-        let frame_interval =
-            Duration::from_secs_f32(1.0 / fps.max(1.0)).max(Duration::from_millis(16));
-
-        let thread = thread::spawn(move || {
-            let mut next_deadline = Instant::now() + frame_interval;
-            while !stop_clone.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                if now < next_deadline {
-                    thread::sleep(next_deadline - now);
-                }
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                next_deadline += frame_interval;
-                if next_deadline < Instant::now() {
-                    next_deadline = Instant::now() + frame_interval;
-                }
-
-                let outcome = asset.render_frame_rgba_with(true, |rgba| {
-                    let mut enc = encoder_clone.lock();
-                    enc.write_frame(rgba)
-                });
-                match outcome {
-                    Ok(Some(Ok(()))) => {}
-                    Ok(Some(Err(e))) => {
-                        warn!("custom h264 encoder write failed: {e}");
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!("custom h264 render failed: {err}");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            stop_flag,
-            _encoder: encoder,
-            _thread: Some(thread),
-            _stream_thread: stream_thread,
-        })
-    }
-}
-
-impl Drop for AsyncCustomH264Renderer {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(t) = self._thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-struct AsyncSensorH264Renderer {
-    stop_flag: Arc<AtomicBool>,
-    _encoder: Arc<Mutex<LiveH264Encoder>>,
-    _thread: Option<JoinHandle<()>>,
-    _stream_thread: Option<JoinHandle<()>>,
-}
-
-impl AsyncSensorH264Renderer {
-    fn new(
-        asset: Arc<lianli_media::SensorAsset>,
-        lcd: &LcdBackend,
-        screen: &ScreenInfo,
-    ) -> anyhow::Result<Self> {
-        let initial = match asset.render_frame_rgba(true)? {
-            Some(img) => img,
-            None => {
-                anyhow::bail!("sensor produced no initial frame");
-            }
-        };
-        let canvas_w = initial.width();
-        let canvas_h = initial.height();
-        let fps = screen.max_fps as f32;
-        let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, 0, screen)
-            .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
-        let stdout = encoder
-            .take_stdout()
-            .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
-
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
-        let stop_clone = Arc::clone(&stop_flag);
-        let encoder = Arc::new(Mutex::new(encoder));
-        let encoder_clone = Arc::clone(&encoder);
-        let frame_interval =
-            Duration::from_secs_f32(1.0 / fps.max(1.0)).max(Duration::from_millis(16));
-
-        if let Err(e) = encoder_clone.lock().write_frame(initial.as_raw()) {
-            warn!("sensor h264 initial frame write failed: {e}");
-        }
-
-        let thread = thread::spawn(move || {
-            let mut next_deadline = Instant::now() + frame_interval;
-            while !stop_clone.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                if now < next_deadline {
-                    thread::sleep(next_deadline - now);
-                }
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                next_deadline += frame_interval;
-                if next_deadline < Instant::now() {
-                    next_deadline = Instant::now() + frame_interval;
-                }
-
-                match asset.render_frame_rgba(true) {
-                    Ok(Some(rgba)) => {
-                        let mut enc = encoder_clone.lock();
-                        if let Err(e) = enc.write_frame(rgba.as_raw()) {
-                            warn!("sensor h264 encoder write failed: {e}");
-                            break;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!("sensor h264 render failed: {err}");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            stop_flag,
-            _encoder: encoder,
-            _thread: Some(thread),
-            _stream_thread: stream_thread,
-        })
-    }
-}
-
-impl Drop for AsyncSensorH264Renderer {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(t) = self._thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-impl MediaRuntime {
-    fn from_asset(
-        asset: Arc<MediaAsset>,
-        tx: Option<Sender<DaemonEvent>>,
-        lcd: &LcdBackend,
-        screen: &ScreenInfo,
-        custom_h264: bool,
-    ) -> Self {
-        match &asset.kind {
-            MediaAssetKind::Static { frame } => Self::Static {
-                frame: Arc::clone(frame),
-            },
-            MediaAssetKind::Video { frames, .. } => {
-                let player = Arc::new(AsyncVideoPlayer::new(tx, Arc::clone(&asset)));
-
-                Self::Video {
-                    player,
-                    frames: Arc::clone(frames),
-                    sent_frame_index: 0,
-                }
-            }
-
-            MediaAssetKind::Sensor {
-                asset: sensor_asset,
-            } => {
-                if screen.h264 && matches!(lcd, LcdBackend::WinUsb(_) | LcdBackend::HidLcd(_)) {
-                    match AsyncSensorH264Renderer::new(Arc::clone(sensor_asset), lcd, screen) {
-                        Ok(renderer) => {
-                            info!("Sensor mode using live h264 pipeline");
-                            return Self::SensorH264 {
-                                renderer: Arc::new(renderer),
-                            };
-                        }
-                        Err(e) => {
-                            warn!("Sensor h264 pipeline unavailable, falling back to JPEG: {e}");
-                        }
-                    }
-                }
-                let renderer = Arc::new(AsyncSensorRenderer::new(
-                    tx,
-                    Arc::clone(sensor_asset),
-                    Arc::clone(&asset),
-                    screen.needs_keepalive,
-                ));
-                let cached_frame = renderer.get_current_frame();
-                Self::Sensor {
-                    renderer,
-                    cached_frame,
-                    sent_frame_index: 0,
-                }
-            }
-            MediaAssetKind::H264Stream {
-                path, looping, fps, ..
-            } => Self::H264 {
-                path: path.clone(),
-                looping: *looping,
-                fps: *fps,
-                started: false,
-                hid_thread: None,
-                hid_stop: Arc::new(AtomicBool::new(false)),
-            },
-            MediaAssetKind::Custom {
-                asset: custom_asset,
-            } => {
-                if custom_h264 && screen.h264 {
-                    if matches!(lcd, LcdBackend::WinUsb(_) | LcdBackend::HidLcd(_)) {
-                        match AsyncCustomH264Renderer::new(
-                            Arc::clone(custom_asset),
-                            lcd,
-                            screen,
-                            custom_asset.canvas_width(),
-                            custom_asset.canvas_height(),
-                            custom_asset.total_rotation_deg(),
-                        ) {
-                            Ok(renderer) => {
-                                info!("Custom mode using live h264 pipeline");
-                                return Self::CustomH264 {
-                                    renderer: Arc::new(renderer),
-                                };
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Custom h264 pipeline unavailable, falling back to JPEG: {e}"
-                                );
-                            }
-                        }
-                    }
-                }
-
-                let renderer = Arc::new(AsyncCustomRenderer::new(
-                    tx,
-                    Arc::clone(custom_asset),
-                    Arc::clone(&asset),
-                    screen.needs_keepalive,
-                ));
-
-                let cached_frame = renderer.get_current_frame();
-                Self::Custom {
-                    renderer,
-                    cached_frame,
-                    sent_frame_index: 0,
-                }
-            }
-        }
-    }
-
-    fn next_frame_bytes(&mut self) -> Option<&[u8]> {
-        match self {
-            MediaRuntime::Static { frame } => Some(frame.as_slice()),
-            MediaRuntime::Video {
-                player,
-                frames,
-                sent_frame_index,
-                ..
-            } => {
-                let rendered_frame_index = player.get_frame_index();
-                if rendered_frame_index <= *sent_frame_index || frames.is_empty() {
-                    return None;
-                }
-                let ret = Some(frames[rendered_frame_index % frames.len()].as_slice());
-                *sent_frame_index = rendered_frame_index;
-                ret
-            }
-            MediaRuntime::Sensor {
-                renderer,
-                cached_frame,
-                sent_frame_index,
-                ..
-            } => {
-                let rendered_frame_index = renderer.get_frame_index();
-                if rendered_frame_index <= *sent_frame_index {
-                    return None;
-                }
-                *cached_frame = renderer.get_current_frame();
-                *sent_frame_index = rendered_frame_index;
-                Some(cached_frame.as_slice())
-            }
-            MediaRuntime::Custom {
-                renderer,
-                cached_frame,
-                sent_frame_index,
-                ..
-            } => {
-                let rendered_frame_index = renderer.get_frame_index();
-                if rendered_frame_index <= *sent_frame_index {
-                    return None;
-                }
-                *cached_frame = renderer.get_current_frame();
-                *sent_frame_index = rendered_frame_index;
-                Some(cached_frame.as_slice())
-            }
-            MediaRuntime::H264 { .. } => None,
-            MediaRuntime::CustomH264 { .. } => None,
-            MediaRuntime::SensorH264 { .. } => None,
-        }
-    }
-}
-
 pub(super) enum SendError {
     Usb(lianli_transport::TransportError),
     Other(anyhow::Error),
-}
-
-pub(super) fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return None;
-    }
-    let mut mac = [0u8; 6];
-    for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16).ok()?;
-    }
-    Some(mac)
 }

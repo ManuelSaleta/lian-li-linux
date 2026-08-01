@@ -3,7 +3,7 @@ use super::framing::{build_config_packet, build_power_off, fragment_stream_a, pa
 use super::vendor_caps::{parse_vendor_desc, Mode, VendorCaps};
 use super::{STREAM_B_FINAL, VID};
 use anyhow::{bail, Context, Result};
-use lianli_transport::usb::{UsbTransport, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
+use lianli_transport::usb::{RusbBulk, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -13,7 +13,7 @@ const READY_STATUS_BIT: u8 = 0x10;
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 pub struct TurzxDisplay {
-    transport: UsbTransport,
+    transport: RusbBulk,
     pid: u16,
     caps: VendorCaps,
     edid: [u8; 128],
@@ -33,11 +33,7 @@ pub struct DeviceIdentity {
 impl TurzxDisplay {
     pub fn open(pid: u16) -> Result<Self> {
         let mut transport =
-            UsbTransport::open(VID, pid).with_context(|| format!("opening {VID:04x}:{pid:04x}"))?;
-        if let Err(e) = transport.reset() {
-            warn!("TURZX {VID:04x}:{pid:04x} reset failed (continuing): {e}");
-        }
-        std::thread::sleep(Duration::from_millis(300));
+            RusbBulk::open(VID, pid).with_context(|| format!("opening {VID:04x}:{pid:04x}"))?;
         transport
             .detach_and_configure(&format!("turzx-{pid:04x}"))
             .context("claiming interface 0")?;
@@ -162,18 +158,10 @@ impl TurzxDisplay {
     }
 }
 
-fn write_full(transport: &UsbTransport, data: &[u8]) -> Result<()> {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        let n = transport
-            .write(&data[offset..], STREAM_WRITE_TIMEOUT)
-            .with_context(|| format!("usb bulk write at offset {offset}/{}", data.len()))?;
-        if n == 0 {
-            bail!("zero-byte USB write at offset {offset}/{}", data.len());
-        }
-        offset += n;
-    }
-    Ok(())
+fn write_full(transport: &RusbBulk, data: &[u8]) -> Result<()> {
+    transport
+        .write_full(data, STREAM_WRITE_TIMEOUT)
+        .with_context(|| format!("usb bulk write {} bytes", data.len()))
 }
 
 fn fnv1a_u32(input: &[u8]) -> u32 {
@@ -185,7 +173,7 @@ fn fnv1a_u32(input: &[u8]) -> u32 {
     hash
 }
 
-fn resolve_identity(transport: &UsbTransport, pid: u16) -> DeviceIdentity {
+fn resolve_identity(transport: &RusbBulk, pid: u16) -> DeviceIdentity {
     let handle = transport.inner();
     let device = handle.device();
     let desc = device.device_descriptor().ok();

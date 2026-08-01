@@ -10,7 +10,7 @@
 use crate::traits::LcdDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use lianli_transport::HidBackend;
+use lianli_transport::RusbHid;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -31,8 +31,14 @@ const CMD_GET_PRODUCT_INFO: u8 = 61;
 const CMD_READ_SERIAL: u8 = 62;
 const CMD_WRITE_SERIAL: u8 = 63;
 const CMD_LCD_CONTROL: u8 = 64;
-const CMD_WRITE_JPG: u8 = 65;
-const CMD_WRITE_SYNC_JPG: u8 = 70;
+const CMD_WRITE_JPG: u8 = 0x41;
+#[allow(dead_code)]
+const CMD_WRITE_AVI: u8 = 0x45;
+#[allow(dead_code)]
+const CMD_WRITE_BOOT_AVI: u8 = 0x47;
+#[allow(dead_code)]
+const CMD_WRITE_BOOT_JPG: u8 = 0x48;
+const CMD_WRITE_SYNC_JPG: u8 = 0x46;
 
 /// LCD control mode.
 #[derive(Debug, Clone, Copy)]
@@ -86,7 +92,7 @@ pub struct TlLcdIdentity {
 /// Wraps an opened HID device for a TLLCD fan (0x04FC:0x7393).
 /// Provides LCD streaming via 512-byte HID output reports.
 pub struct TlLcdDevice {
-    device: Arc<Mutex<HidBackend>>,
+    device: Arc<Mutex<RusbHid>>,
     identity: Option<TlLcdIdentity>,
     brightness: u8,
     rotation: ScreenRotation,
@@ -95,7 +101,7 @@ pub struct TlLcdDevice {
 
 impl TlLcdDevice {
     /// Create a new TLLCD device from an opened HID device handle.
-    pub fn new(device: Arc<Mutex<HidBackend>>) -> Self {
+    pub fn new(device: Arc<Mutex<RusbHid>>) -> Self {
         Self {
             device,
             identity: None,
@@ -280,6 +286,12 @@ impl TlLcdDevice {
             if read_response {
                 dev.read_timeout(&mut ack_buf, READ_TIMEOUT_MS)
                     .context("TLLCD: read packet ack")?;
+                if ack_buf.len() > 1 && ack_buf[1] != cmd {
+                    anyhow::bail!(
+                        "TLLCD: ack mismatch (expected 0x{cmd:02x}, got 0x{:02x})",
+                        ack_buf[1]
+                    );
+                }
             }
 
             offset += chunk_len;
@@ -459,25 +471,69 @@ fn payload_length(pkt: &[u8]) -> usize {
 /// hasn't been claimed by us yet.
 fn looks_like_unique_serial(s: &str) -> bool {
     let s = s.trim();
-    if let Some(hex) = s.strip_prefix("lcd-") {
-        hex.len() >= 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
-    } else {
-        false
-    }
+    s.len() == 36
+        && s.as_bytes()[8] == b'-'
+        && s.as_bytes()[13] == b'-'
+        && s.as_bytes()[18] == b'-'
+        && s.as_bytes()[23] == b'-'
 }
 
-/// Build a UUID-like serial fitting in 32 ASCII bytes.
 fn generate_unique_serial() -> String {
+    if let Ok(bytes) = std::fs::read("/proc/sys/kernel/random/uuid") {
+        let s = String::from_utf8_lossy(&bytes).trim().to_string();
+        if looks_like_unique_serial(&s) {
+            return s;
+        }
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let mut entropy: u64 = nanos as u64;
-    if let Ok(bytes) = std::fs::read("/proc/sys/kernel/random/uuid") {
-        for b in bytes.iter().take(32) {
-            entropy = entropy.wrapping_mul(1099511628211).wrapping_add(*b as u64);
-        }
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        nanos as u32,
+        (nanos >> 16) as u16,
+        (nanos >> 32) as u16,
+        (nanos >> 48) as u16,
+        nanos as u64 & 0xFFFFFFFFFFFF
+    )
+}
+
+/// Driver entry point for the TL LCD fan.
+pub struct TlLcdDriver;
+
+impl crate::registry::DeviceDriver for TlLcdDriver {
+    fn family(&self) -> lianli_shared::device_id::DeviceFamily {
+        lianli_shared::device_id::DeviceFamily::TlLcd
     }
-    format!("lcd-{:016x}{:08x}", entropy, nanos as u32)
+
+    fn open(
+        &self,
+        ctx: &crate::registry::OpenContext,
+    ) -> anyhow::Result<crate::registry::OpenedDevice> {
+        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
+            ctx.device.clone(),
+            ctx.hid_usage_page,
+            ctx.vid,
+            ctx.pid,
+            ctx.bus,
+            ctx.device.port_numbers().unwrap_or_default(),
+        )?;
+        let mut lcd = TlLcdDevice::new(backend);
+        crate::traits::LcdDevice::initialize(&mut lcd)?;
+        Ok(crate::registry::OpenedDevice {
+            id: ctx.device_id(),
+            family: lianli_shared::device_id::DeviceFamily::TlLcd,
+            capabilities: lianli_shared::device_id::DeviceFamily::TlLcd.capabilities(),
+            transport_kind: lianli_shared::device_id::TransportKind::Hid,
+            model_name: "UNI FAN TL LCD".to_string(),
+            firmware: None,
+            fan: None,
+            lcd: Some(Box::new(lcd)),
+            rgb: Vec::new(),
+            aio: None,
+            shared_hid: None,
+        })
+    }
 }

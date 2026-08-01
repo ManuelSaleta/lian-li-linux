@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use lianli_media::CustomAsset;
 use lianli_shared::screen::ScreenInfo;
 use lianli_shared::sensors::SensorInfo;
+use lianli_shared::template::catalog::template_preview_path;
 use lianli_shared::template::LcdTemplate;
-use lianli_shared::template_catalog::template_preview_path;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -63,15 +63,6 @@ pub fn all_templates(user: &[LcdTemplate], _sensors: &[SensorInfo]) -> Vec<LcdTe
     user.to_vec()
 }
 
-#[allow(dead_code)]
-pub fn resolve_template(
-    id: &str,
-    user: &[LcdTemplate],
-    _sensors: &[SensorInfo],
-) -> Option<LcdTemplate> {
-    user.iter().find(|t| t.id == id).cloned()
-}
-
 pub fn regenerate_template_previews(templates: &[LcdTemplate], sensors: &[SensorInfo]) {
     for template in templates {
         if let Err(e) = render_template_preview(template, sensors) {
@@ -91,6 +82,7 @@ fn render_template_preview(template: &LcdTemplate, sensors: &[SensorInfo]) -> Re
         max_payload: 4 * 1024 * 1024,
         h264: false,
         needs_keepalive: false,
+        png: false,
     };
     let asset =
         CustomAsset::new(template, 0.0, &screen, sensors, false).context("CustomAsset::new")?;

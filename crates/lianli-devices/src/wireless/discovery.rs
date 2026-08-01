@@ -1,10 +1,10 @@
 use super::transport::with_transport_recovery;
 use super::{WirelessFanType, RX_IDS, USB_CMD_SEND_RF};
 use anyhow::{bail, Context, Result};
-use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
+use lianli_transport::usb::{RusbBulk, USB_TIMEOUT};
 use parking_lot::Mutex;
 use std::fmt;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -19,6 +19,10 @@ pub struct DiscoveredDevice {
     pub rx_type: u8,
     pub device_type: u8,
     pub fan_count: u8,
+    /// True when the bind group chains right-to-left (SL-INF daisy-chain
+    /// with `fan_num >= 10` reported). Per-fan PWM/RGB ordering must be
+    /// reversed before sending.
+    pub is_inf_right_attach: bool,
     pub fan_types: [u8; 4],
     pub fan_rpms: [u16; 4],
     pub current_pwm: [u8; 4],
@@ -31,6 +35,9 @@ pub struct DiscoveredDevice {
     /// device-default if the firmware resets idle; compare against the desired
     /// effect_index to detect that and re-send the RGB packet.
     pub effect_index: [u8; 4],
+    /// Status flags decoded from `fans_speed[0]` bitfield.
+    pub is_sync_mb_light: bool,
+    pub is_pwm_line_on: bool,
 }
 
 impl DiscoveredDevice {
@@ -124,16 +131,26 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
 
     let channel = data[12];
     let rx_type = data[13];
-    let fan_count = data[19].min(4);
+    // fan_num >= 10 flags SL-INF right-attach (chains right-to-left).
+    let raw_fan_count = data[19];
+    let (fan_count, is_inf_right_attach) = if raw_fan_count >= 10 {
+        (raw_fan_count.saturating_sub(10).min(4), true)
+    } else {
+        (raw_fan_count.min(4), false)
+    };
 
     let mut fan_types = [0u8; 4];
     fan_types.copy_from_slice(&data[24..28]);
 
+    let status_byte = data[28];
+    let is_sync_mb_light = (status_byte & 0x40) != 0;
+    let is_pwm_line_on = (status_byte & 0x20) != 0;
+
     let fan_rpms = [
-        u16::from_be_bytes([data[28], data[29]]),
-        u16::from_be_bytes([data[30], data[31]]),
-        u16::from_be_bytes([data[32], data[33]]),
-        u16::from_be_bytes([data[34], data[35]]),
+        u16::from_be_bytes([data[28] & 0x0F, data[29]]),
+        u16::from_be_bytes([data[30] & 0x0F, data[31]]),
+        u16::from_be_bytes([data[32] & 0x0F, data[33]]),
+        u16::from_be_bytes([data[34] & 0x0F, data[35]]),
     ];
 
     let mut current_pwm = [0u8; 4];
@@ -171,6 +188,7 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
         rx_type,
         device_type,
         fan_count,
+        is_inf_right_attach,
         fan_types,
         fan_rpms,
         current_pwm,
@@ -179,6 +197,8 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
         list_index,
         coolant_temp_c,
         effect_index,
+        is_sync_mb_light,
+        is_pwm_line_on,
     })
 }
 
@@ -187,14 +207,27 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
 /// Sends GetDev command (0x10, page=1) and parses the response into
 /// full 42-byte device records.
 pub(super) fn poll_and_discover(
-    rx: &Arc<Mutex<UsbTransport>>,
+    rx: &Arc<Mutex<RusbBulk>>,
     discovered_devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
     mobo_pwm: &Arc<AtomicU16>,
+    fg_sync: &Arc<AtomicBool>,
     master_mac: &Arc<Mutex<[u8; 6]>>,
 ) -> Result<()> {
     let mut cmd = vec![0u8; 64];
     cmd[0] = USB_CMD_SEND_RF;
     cmd[1] = 0x01;
+
+    if fg_sync.load(Ordering::Relaxed) {
+        let rpm = discovered_devices
+            .lock()
+            .iter()
+            .flat_map(|d| d.fan_rpms.iter())
+            .copied()
+            .find(|&r| r > 0)
+            .unwrap_or(0);
+        cmd[2] = (rpm >> 8) as u8;
+        cmd[3] = (rpm & 0xFF) as u8;
+    }
 
     with_transport_recovery(rx, &RX_IDS, "RX", |handle| {
         handle.read_flush();

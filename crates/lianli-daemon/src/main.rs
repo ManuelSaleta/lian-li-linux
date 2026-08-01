@@ -1,12 +1,12 @@
-mod aio_controller;
+mod controllers;
 mod desktop_display;
-mod fan_controller;
-mod ipc_server;
+mod ipc;
 mod openrgb_server;
+mod persistence;
 mod pidlock;
-mod rgb_controller;
 mod service;
 mod template_store;
+mod thermal_alert;
 
 use clap::Parser;
 use std::path::PathBuf;

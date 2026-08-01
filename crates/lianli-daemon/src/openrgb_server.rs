@@ -1,10 +1,10 @@
 //! OpenRGB SDK server: exposes Lian Li devices to OpenRGB/SignalRGB clients.
 //!
-//! Implements the OpenRGB network protocol (TCP, port 6742 by default).
+//! Implements the OpenRGB network protocol (TCP, port 6743 by default).
 //! Each physical device is exposed as an OpenRGB controller with its native
 //! LED modes. Clients can enumerate devices, set modes, and update per-LED colors.
 
-use crate::rgb_controller::{DirectColorBuffer, RgbController};
+use crate::controllers::rgb::{DirectColorBuffer, RgbController};
 use lianli_shared::rgb::{RgbDeviceCapabilities, RgbDirection, RgbEffect, RgbMode};
 use parking_lot::Mutex;
 use std::io::{Read, Write};
@@ -302,8 +302,8 @@ impl ClientHandler {
             }
 
             PKT_SET_CUSTOM_MODE => {
-                // Client wants to switch to direct/custom mode. No-op for us.
-                debug!("OpenRGB SetCustomMode for device {dev_idx}");
+                debug!("OpenRGB SetCustomMode for device {dev_idx} — direct mode active");
+                self.rgb.lock().set_openrgb_active(true);
             }
 
             PKT_UPDATE_LEDS => {
@@ -328,8 +328,19 @@ impl ClientHandler {
             }
 
             PKT_RESIZE_ZONE => {
-                // Ignore zone resize — our zones are fixed hardware
-                debug!("OpenRGB ResizeZone for device {dev_idx} (ignored)");
+                let zone_idx = if payload.len() >= 4 {
+                    u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4]))
+                } else {
+                    0
+                };
+                let actual_size = self
+                    .caps()
+                    .get(dev_idx as usize)
+                    .and_then(|cap| cap.zones.get(zone_idx as usize))
+                    .map(|z| z.led_count as u32)
+                    .unwrap_or(0);
+                let resp: Vec<u8> = [zone_idx.to_le_bytes(), actual_size.to_le_bytes()].concat();
+                self.send_packet(dev_idx, PKT_RESIZE_ZONE, &resp)?;
             }
 
             _ => {
@@ -356,7 +367,6 @@ impl ClientHandler {
         if let Some(cap) = self.caps().get(dev_idx as usize) {
             let device_id = cap.device_id.clone();
             let zones: Vec<_> = cap.zones.iter().map(|z| z.led_count as usize).collect();
-            // Buffer colors per zone — writer thread will flush asap
             let mut buf = self.direct_buffer.lock();
             let mut offset = 0;
             for (zone_idx, count) in zones.iter().enumerate() {
@@ -434,15 +444,13 @@ impl ClientHandler {
 
         // Parse the mode data to extract what we need
         if let Some(effect) = self.parse_mode_data(mode_data) {
-            // Direct mode is controlled exclusively via UpdateLEDs/UpdateZoneLEDs.
-            // Applying it here would overwrite per-LED colors with defaults (all black).
             if effect.mode == RgbMode::Direct {
                 debug!("OpenRGB UpdateMode: mode=Direct (ignored — use UpdateLEDs)");
                 return Ok(());
             }
 
-            // UpdateMode is rare (not streaming hot path), so lock is fine here
-            let caps = self.rgb.lock().capabilities();
+            let mut rgb = self.rgb.lock();
+            let caps = rgb.capabilities();
             if let Some(cap) = caps.get(dev_idx as usize) {
                 let device_id = cap.device_id.clone();
                 debug!(
@@ -450,11 +458,7 @@ impl ClientHandler {
                     effect.mode
                 );
                 for zone_idx in 0..cap.zones.len() {
-                    if let Err(e) = self
-                        .rgb
-                        .lock()
-                        .set_effect(&device_id, zone_idx as u8, &effect)
-                    {
+                    if let Err(e) = rgb.set_effect(&device_id, zone_idx as u8, &effect) {
                         debug!("OpenRGB UpdateMode error for {device_id} zone {zone_idx}: {e}");
                     }
                 }
@@ -552,7 +556,11 @@ impl ClientHandler {
         buf.extend_from_slice(&0u32.to_le_bytes());
 
         // device_type
-        let dev_type = if cap.device_name.contains("Galahad") || cap.device_name.contains("AIO") {
+        let dev_type = if cap.device_name.contains("Galahad")
+            || cap.device_name.contains("AIO")
+            || cap.device_name.contains("HydroShift")
+            || cap.device_name.contains("Pump")
+        {
             DEVICE_TYPE_COOLER
         } else {
             DEVICE_TYPE_LED_STRIP
@@ -714,8 +722,16 @@ impl ClientHandler {
         buf.extend_from_slice(&(DIR_RIGHT).to_le_bytes()); // direction
         buf.extend_from_slice(&color_mode.to_le_bytes());
 
-        // colors: empty by default for new modes
-        buf.extend_from_slice(&0u16.to_le_bytes()); // 0 colors
+        // colors: include defaults when colors_min > 0
+        if colors_min > 0 {
+            let n = colors_min.max(1);
+            buf.extend_from_slice(&(n as u16).to_le_bytes());
+            for _ in 0..n {
+                buf.extend_from_slice(&[255, 255, 255, 0]);
+            }
+        } else {
+            buf.extend_from_slice(&0u16.to_le_bytes());
+        }
 
         buf
     }
@@ -791,42 +807,9 @@ fn parse_colors(data: &[u8], count: usize) -> Vec<[u8; 3]> {
 
 /// Map an OpenRGB mode name (from our own exposed modes) back to RgbMode.
 fn mode_from_openrgb_name(name: &str, value: u32) -> RgbMode {
-    // First try by name
-    match name {
-        "Direct" => return RgbMode::Direct,
-        "Static" => return RgbMode::Static,
-        "Rainbow" => return RgbMode::Rainbow,
-        "Rainbow Morph" => return RgbMode::RainbowMorph,
-        "Breathing" => return RgbMode::Breathing,
-        "Runway" => return RgbMode::Runway,
-        "Meteor" => return RgbMode::Meteor,
-        "Color Cycle" => return RgbMode::ColorCycle,
-        "Staggered" => return RgbMode::Staggered,
-        "Tide" => return RgbMode::Tide,
-        "Mixing" => return RgbMode::Mixing,
-        "Voice" => return RgbMode::Voice,
-        "Door" => return RgbMode::Door,
-        "Render" => return RgbMode::Render,
-        "Ripple" => return RgbMode::Ripple,
-        "Reflect" => return RgbMode::Reflect,
-        "Tail Chasing" => return RgbMode::TailChasing,
-        "Paint" => return RgbMode::Paint,
-        "Ping Pong" => return RgbMode::PingPong,
-        "Stack" => return RgbMode::Stack,
-        "Cover Cycle" => return RgbMode::CoverCycle,
-        "Wave" => return RgbMode::Wave,
-        "Racing" => return RgbMode::Racing,
-        "Lottery" => return RgbMode::Lottery,
-        "Intertwine" => return RgbMode::Intertwine,
-        "Meteor Shower" => return RgbMode::MeteorShower,
-        "Collide" => return RgbMode::Collide,
-        "Electric Current" => return RgbMode::ElectricCurrent,
-        "Kaleidoscope" => return RgbMode::Kaleidoscope,
-        "Big Bang" => return RgbMode::BigBang,
-        "Vortex" => return RgbMode::Vortex,
-        "Pump" => return RgbMode::Pump,
-        "Colors Morph" => return RgbMode::ColorsMorph,
-        _ => {}
+    // First try by display name (covers every mode we expose to OpenRGB).
+    if let Some(mode) = RgbMode::from_display_name(name) {
+        return mode;
     }
 
     // Fall back to TL mode byte value

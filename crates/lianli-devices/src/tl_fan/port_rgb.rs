@@ -169,14 +169,44 @@ impl RgbDevice for TlFanPortDevice {
             .map(|hs| hs.port_fan_counts)
             .unwrap_or([0; 4]);
 
-        let dummy_effect = RgbEffect::default();
+        // Zero-filled effect data is sent when toggling MB sync — the firmware
+        // ignores effect fields in sync mode. Match that to avoid stale data.
+        let zero_effect = RgbEffect {
+            mode: RgbMode::Static,
+            colors: vec![],
+            speed: 0,
+            brightness: 0,
+            direction: Default::default(),
+            scope: Default::default(),
+            disabled: false,
+        };
         for (port, &fan_count) in port_fan_counts.iter().enumerate() {
             for fan in 0..fan_count {
                 self.controller
-                    .set_fan_light(port as u8, fan, &dummy_effect, enabled)?;
+                    .set_fan_light(port as u8, fan, &zero_effect, enabled)?;
             }
         }
         debug!("Set MB RGB sync (all ports): enabled={enabled}");
         Ok(())
+    }
+
+    fn ping(&self, _zone: u8) -> Result<()> {
+        self.controller.test_port_light(self.port)
+    }
+
+    fn set_direct_colors(&self, zone: u8, colors: &[[u8; 3]]) -> Result<()> {
+        if zone >= self.fan_count {
+            bail!("Zone {zone} out of range");
+        }
+        let color = colors.first().copied().unwrap_or([255, 255, 255]);
+        let effect = RgbEffect {
+            mode: RgbMode::Static,
+            colors: vec![color],
+            brightness: 4,
+            speed: 0,
+            ..RgbEffect::default()
+        };
+        self.controller
+            .set_fan_light_noread(self.port, zone, &effect, false)
     }
 }

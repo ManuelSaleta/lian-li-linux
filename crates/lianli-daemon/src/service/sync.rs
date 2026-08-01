@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 impl ServiceManager {
     /// Sync current config to IPC shared state.
     pub(super) fn sync_ipc_state(&self) {
-        let mut ipc_state = self.ipc_state.lock();
+        let mut ipc_state = self.ipc.state.lock();
         ipc_state.config = self.config.clone();
     }
 
@@ -35,12 +35,12 @@ impl ServiceManager {
             .filter(|d| d.family == DeviceFamily::TlLcd)
             .map(|d| d.device_id())
             .collect();
-        let cached_ids: HashSet<String> = self.tl_lcd_port_index.keys().cloned().collect();
+        let cached_ids: HashSet<String> = self.registry.tl_lcd_port_index.keys().cloned().collect();
         if current_ids == cached_ids {
             return;
         }
         let probed = probe_tl_lcd_port_indices_rusb(usb_devices);
-        self.tl_lcd_port_index.clear();
+        self.registry.tl_lcd_port_index.clear();
 
         let mut entries: Vec<(String, Vec<u8>, (u8, u8))> = Vec::new();
         for det in usb_devices
@@ -85,11 +85,18 @@ impl ServiceManager {
 
         for (device_id, _, pi) in entries {
             debug!("TL LCD port_index cached: {device_id} -> {pi:?}");
-            self.tl_lcd_port_index.insert(device_id, pi);
+            self.registry.tl_lcd_port_index.insert(device_id, pi);
         }
     }
 
     fn build_usb_device_cache(&mut self, usb_devices: Vec<lianli_devices::detect::DetectedDevice>) {
+        let v2_hid_entries = lianli_devices::wireless::query_v2_hid_macs();
+        let known_wireless_macs: HashSet<[u8; 6]> =
+            self.wireless.devices().iter().map(|d| d.mac).collect();
+        if !v2_hid_entries.is_empty() {
+            debug!("V2 HID MAC map: {} entr(y/ies)", v2_hid_entries.len());
+        }
+
         let mut cached = Vec::new();
         for det in usb_devices {
             if matches!(
@@ -109,18 +116,36 @@ impl ServiceManager {
                 lianli_shared::device_id::DeviceFamily::HydroShiftLcd
                     | lianli_shared::device_id::DeviceFamily::Galahad2Lcd
                     | lianli_shared::device_id::DeviceFamily::HydroShift2Lcd
+                    | lianli_shared::device_id::DeviceFamily::HydroShift2OledCurveLcd
+                    | lianli_shared::device_id::DeviceFamily::Slv3Lcd
+                    | lianli_shared::device_id::DeviceFamily::Tlv2Lcd
             );
 
             let (firmware_version, supports_c_command) = self
-                .aio_lcd_info
+                .aio_lcd_firmware
                 .get(&device_id)
-                .cloned()
                 .unwrap_or((None, false));
             let port_index = if det.family == DeviceFamily::TlLcd {
-                self.tl_lcd_port_index.get(&device_id).copied()
+                self.registry.tl_lcd_port_index.get(&device_id).copied()
             } else {
                 None
             };
+
+            let wireless_group_mac =
+                if matches!(det.family, DeviceFamily::Slv3Lcd | DeviceFamily::Tlv2Lcd) {
+                    match det.device.port_numbers() {
+                        Ok(ports) => find_wireless_group_mac(
+                            &v2_hid_entries,
+                            &known_wireless_macs,
+                            det.bus,
+                            &ports,
+                        ),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
             cached.push(DeviceInfo {
                 device_id: device_id.clone(),
                 family: det.family,
@@ -146,10 +171,11 @@ impl ServiceManager {
                 firmware_version,
                 supports_c_command,
                 port_index,
+                wireless_group_mac,
             });
         }
 
-        self.cached_usb_devices = cached;
+        self.registry.cached_usb_devices = cached;
 
         match crate::desktop_display::enumerate_turzx() {
             Ok(present) => self.desktop_displays.sync(&present),
@@ -159,8 +185,8 @@ impl ServiceManager {
 
     /// Update IPC telemetry and device list.
     pub(super) fn sync_ipc_telemetry(&self) {
-        let mut ipc_state = self.ipc_state.lock();
-        ipc_state.telemetry.streaming_active = !self.targets.is_empty();
+        let mut ipc_state = self.ipc.state.lock();
+        ipc_state.telemetry.streaming_active = !self.targets.lock().is_empty();
 
         // OpenRGB server status
         let (enabled, _) = self
@@ -169,7 +195,7 @@ impl ServiceManager {
             .and_then(|c| c.rgb.as_ref())
             .map(|rgb| (rgb.openrgb_server, rgb.openrgb_port))
             .unwrap_or((false, 6743));
-        let orgb_state = self.openrgb_state.lock();
+        let orgb_state = self.openrgb.state.lock();
         ipc_state.telemetry.openrgb_status = lianli_shared::ipc::OpenRgbServerStatus {
             enabled,
             running: orgb_state.running,
@@ -184,12 +210,14 @@ impl ServiceManager {
             use lianli_shared::device_id::DeviceFamily;
 
             let family = match dev.fan_type {
-                WirelessFanType::Slv3Led => DeviceFamily::Slv3Led,
+                WirelessFanType::Slv3Led | WirelessFanType::SlV4 => DeviceFamily::Slv3Led,
                 WirelessFanType::Slv3Lcd => DeviceFamily::Slv3Lcd,
                 WirelessFanType::Tlv2Lcd => DeviceFamily::Tlv2Lcd,
-                WirelessFanType::Tlv2Led => DeviceFamily::Tlv2Led,
-                WirelessFanType::SlInf => DeviceFamily::SlInf,
-                WirelessFanType::Clv1 => DeviceFamily::Clv1,
+                WirelessFanType::Tlv2Led | WirelessFanType::TlV3 { .. } => DeviceFamily::Tlv2Led,
+                WirelessFanType::SlInf | WirelessFanType::SlInfV3 { .. } => DeviceFamily::SlInf,
+                WirelessFanType::Clv1 | WirelessFanType::ClV2 { .. } | WirelessFanType::P28V2 => {
+                    DeviceFamily::Clv1
+                }
                 WirelessFanType::WaterBlock | WirelessFanType::WaterBlock2 => {
                     DeviceFamily::WirelessAio
                 }
@@ -230,8 +258,7 @@ impl ServiceManager {
                 has_pump_control: is_aio,
                 fan_count: Some(fan_count),
                 per_fan_control: Some(!is_rgb_only),
-                mb_sync_support: dev.fan_type.supports_hw_mobo_sync()
-                    || self.wireless.motherboard_pwm().is_some(),
+                mb_sync_support: dev.fan_type.supports_hw_mobo_sync(),
                 rgb_zone_count: Some(rgb_zone_count),
                 screen_width: None,
                 screen_height: None,
@@ -242,6 +269,7 @@ impl ServiceManager {
                 firmware_version: None,
                 supports_c_command: false,
                 port_index: None,
+                wireless_group_mac: None,
             });
 
             // Update RPM telemetry keyed by device_id
@@ -267,12 +295,14 @@ impl ServiceManager {
             use lianli_shared::device_id::DeviceFamily;
 
             let family = match dev.fan_type {
-                WirelessFanType::Slv3Led => DeviceFamily::Slv3Led,
+                WirelessFanType::Slv3Led | WirelessFanType::SlV4 => DeviceFamily::Slv3Led,
                 WirelessFanType::Slv3Lcd => DeviceFamily::Slv3Lcd,
                 WirelessFanType::Tlv2Lcd => DeviceFamily::Tlv2Lcd,
-                WirelessFanType::Tlv2Led => DeviceFamily::Tlv2Led,
-                WirelessFanType::SlInf => DeviceFamily::SlInf,
-                WirelessFanType::Clv1 => DeviceFamily::Clv1,
+                WirelessFanType::Tlv2Led | WirelessFanType::TlV3 { .. } => DeviceFamily::Tlv2Led,
+                WirelessFanType::SlInf | WirelessFanType::SlInfV3 { .. } => DeviceFamily::SlInf,
+                WirelessFanType::Clv1 | WirelessFanType::ClV2 { .. } | WirelessFanType::P28V2 => {
+                    DeviceFamily::Clv1
+                }
                 WirelessFanType::WaterBlock | WirelessFanType::WaterBlock2 => {
                     DeviceFamily::WirelessAio
                 }
@@ -308,14 +338,15 @@ impl ServiceManager {
                 firmware_version: None,
                 supports_c_command: false,
                 port_index: None,
+                wireless_group_mac: None,
             });
         }
 
         // Add wired USB/HID fan devices (per-port entries from open_wired_fan_devices)
-        devices.extend(self.wired_fan_device_info.clone());
+        devices.extend(self.registry.fan_device_info.clone());
 
         // Read wired fan RPMs and split per port.
-        for (base_id, dev) in self.wired_fan_devices.iter() {
+        for (base_id, dev) in self.registry.fan_devices.iter() {
             if let Ok(all_rpms) = dev.read_fan_rpm() {
                 let ports = dev.fan_port_info();
                 let per_fan = dev.per_fan_control();
@@ -344,8 +375,44 @@ impl ServiceManager {
 
         // Cache is refreshed every USB_ENUM_INTERVAL (30s) to avoid
         // USB bus contention from opening every device for serial reads.
-        devices.extend(self.cached_usb_devices.clone());
+        // Drop entries already emitted from fan_device_info above so each
+        // physical endpoint surfaces exactly once.
+        let opened_ids: std::collections::HashSet<&str> = self
+            .registry
+            .fan_device_info
+            .iter()
+            .map(|d| d.device_id.as_str())
+            .collect();
+        devices.extend(
+            self.registry
+                .cached_usb_devices
+                .iter()
+                .filter(|d| !opened_ids.contains(d.device_id.as_str()))
+                .cloned(),
+        );
 
         ipc_state.devices = devices;
     }
+}
+
+/// Check if a wired device at `bus`:`ports` shares a USB parent hub with
+/// any V2 dongle HID entry. If so, and the MAC corresponds to a discovered
+/// wireless device, return the associated wireless group MAC.
+fn find_wireless_group_mac(
+    v2_hid_entries: &[lianli_devices::wireless::V2HidEntry],
+    known_wireless_macs: &HashSet<[u8; 6]>,
+    bus: u8,
+    ports: &[u8],
+) -> Option<String> {
+    for entry in v2_hid_entries {
+        if lianli_devices::wireless::share_parent(entry.bus, &entry.port_numbers, bus, ports)
+            && known_wireless_macs.contains(&entry.mac)
+        {
+            return Some(format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                entry.mac[0], entry.mac[1], entry.mac[2], entry.mac[3], entry.mac[4], entry.mac[5],
+            ));
+        }
+    }
+    None
 }

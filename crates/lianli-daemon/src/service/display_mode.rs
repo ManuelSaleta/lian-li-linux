@@ -1,6 +1,6 @@
 use super::runtime::LcdBackend;
 use super::{DaemonEvent, ServiceManager};
-use lianli_devices::winusb_lcd::WinUsbLcdDevice;
+use lianli_devices::winusb::lcd::WinUsbLcdDevice;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -8,16 +8,20 @@ use tracing::{info, warn};
 impl ServiceManager {
     pub(super) fn handle_display_switch_to_desktop(&mut self, device_id: &str) {
         // Find and remove the active LCD target for this device
-        let target_idx = self.targets.iter().find_map(|(&idx, t)| {
-            if t.device_identity == *device_id {
-                Some(idx)
-            } else {
-                None
-            }
-        });
+        let target_idx = {
+            let targets = self.targets.lock();
+            targets.iter().find_map(|(&idx, t)| {
+                if t.device_identity == *device_id {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+        };
 
         if let Some(idx) = target_idx {
-            if let Some(mut target) = self.targets.remove(&idx) {
+            let removed = self.targets.lock().remove(&idx);
+            if let Some(mut target) = removed {
                 target.stop();
                 if let LcdBackend::WinUsb(ref mut lcd) = target.lcd {
                     match lcd.switch_to_desktop_mode() {
@@ -34,6 +38,7 @@ impl ServiceManager {
         } else {
             info!("No active LCD target for {device_id}, opening temporary connection");
             let det = self
+                .registry
                 .cached_usb_devices
                 .iter()
                 .find(|d| d.device_id == *device_id);
@@ -71,12 +76,9 @@ impl ServiceManager {
         self.mark_mode_switch(device_id);
         thread::sleep(Duration::from_millis(300));
 
-        match hidapi::HidApi::new() {
-            Ok(api) => match lianli_devices::display_switcher::switch_to_lcd_mode(&api, pid) {
-                Ok(()) => info!("Switched {device_id} to LCD mode"),
-                Err(e) => warn!("Failed to switch {device_id} to LCD mode: {e:#}"),
-            },
-            Err(e) => warn!("Failed to open HID for switch-to-LCD: {e:#}"),
+        match lianli_devices::display_switcher::switch_to_lcd_mode(pid) {
+            Ok(()) => info!("Switched {device_id} to LCD mode"),
+            Err(e) => warn!("Failed to switch {device_id} to LCD mode: {e:#}"),
         }
 
         self.schedule_post_switch_refresh();

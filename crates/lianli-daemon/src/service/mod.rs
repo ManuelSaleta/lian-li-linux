@@ -1,39 +1,51 @@
-use crate::aio_controller::AioController;
-use crate::fan_controller::FanController;
-use crate::ipc_server::{self, DaemonState};
-use crate::openrgb_server;
-use crate::rgb_controller::RgbController;
+use crate::ipc::{self, DaemonState};
 use anyhow::Result;
 use lianli_devices::crypto::PacketBuilder;
 use lianli_devices::detect::ensure_hid_devices_bound;
-use lianli_devices::traits::FanDevice;
 use lianli_devices::wireless::WirelessController;
 use lianli_shared::config::AppConfig;
-use lianli_shared::config::HidDriver;
-use lianli_shared::ipc::DeviceInfo;
 use lianli_shared::systeminfo::SysSensor;
-use lianli_transport::HidBackend;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use runtime::LcdBackend;
 
+mod aio_lcd_firmware;
 mod display_mode;
 mod init;
 mod media;
+mod renderers;
 mod runtime;
 mod shutdown;
 mod streaming;
+mod subsystems;
+mod suspend;
 mod sync;
 
-use runtime::{parse_mac_str, ActiveTarget};
+use aio_lcd_firmware::AioLcdFirmwareTracker;
+use subsystems::{Controllers, DeviceRegistry, IpcSubsystem, OpenRgbSubsystem};
+
+use runtime::ActiveTarget;
+
+/// Parse a colon-separated MAC address string (e.g. `"01:23:45:67:89:AB"`)
+/// into a 6-byte array. Returns `None` on malformed input.
+fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16).ok()?;
+    }
+    Some(mac)
+}
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Full USB bus enumeration interval — only needed for hot-plug detection of
@@ -45,30 +57,20 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     USBCheck,
     DevicePoll,
-    DisplaySwitch {
-        device_id: String,
-    }, // LCD→Desktop. Handled by main event loop.
-    DisplaySwitchToLcd {
-        device_id: String,
-        pid: u16,
-    }, // Desktop→LCD. Handled by main event loop.
-    Bind {
-        mac_address: String,
-    }, // MAC address pending wireless device bind. Handled by main event loop.
-    Unbind {
-        mac_address: String,
-    }, // MAC address pending wireless device unbind. Handled by main event loop.
-    SetEne6k77FanQuantity {
-        device_id: String,
-        quantity: u8,
-    },
-    FrameFinished {
-        asset: Arc<lianli_media::MediaAsset>,
-    }, // A device has calculated a new frame, let's update the display
-    RecreateMedia {
-        target_index: usize,
-    },
+    DisplaySwitch { device_id: String }, // LCD→Desktop. Handled by main event loop.
+    DisplaySwitchToLcd { device_id: String, pid: u16 }, // Desktop→LCD. Handled by main event loop.
+    Bind { mac_address: String }, // MAC address pending wireless device bind. Handled by main event loop.
+    Unbind { mac_address: String }, // MAC address pending wireless device unbind. Handled by main event loop.
+    SetEne6k77FanQuantity { device_id: String, quantity: u8 },
+    FrameFinished,
+    RecreateMedia { target_index: usize },
     ResyncWirelessRgb,
+    SystemResumed,
+    RebootWirelessLcd { mac: [u8; 6] },
+    DisableLc217Wifi { mac: [u8; 6], disable: bool },
+    SetLcdBrightness { device_id: String, brightness: u8 },
+    BindAll,
+    UnbindAll,
     Shutdown, // SIGINT/SIGTERM received, exit the event loop cleanly
 }
 
@@ -76,43 +78,24 @@ pub struct ServiceManager {
     config_path: PathBuf,
     config: Option<AppConfig>,
     media_assets: HashMap<usize, Arc<lianli_media::MediaAsset>>,
-    targets: HashMap<usize, ActiveTarget>,
+    targets: Arc<Mutex<HashMap<usize, ActiveTarget>>>,
     wireless: WirelessController,
     packet_builder: PacketBuilder,
-    fan_controller: Option<FanController>,
-    aio_controller: Option<AioController>,
-    rgb_controller: Option<Arc<Mutex<RgbController>>>,
-    /// Per-port DeviceInfo for wired fan devices (populated by open_wired_fan_devices).
-    wired_fan_device_info: Vec<DeviceInfo>,
-    /// Shared reference to wired fan device handles (for RPM reading).
-    wired_fan_devices: Arc<HashMap<String, Box<dyn FanDevice>>>,
-    /// Shared HID backends keyed by device ID — allows fan, RGB, and LCD
-    /// controllers for the same physical device to share one USB handle.
-    hid_backends: HashMap<String, Arc<Mutex<HidBackend>>>,
-    last_wired_hid_ids: std::collections::HashSet<String>,
-    /// Cached USB device list from enumerate_devices() — refreshed every USB_ENUM_INTERVAL.
-    cached_usb_devices: Vec<DeviceInfo>,
-    /// Firmware string + C-command capability per AIO LCD device_id, populated
-    /// when the controller attaches and surfaced through DeviceInfo.
-    aio_lcd_info: HashMap<String, (Option<String>, bool)>,
-    /// TL LCD (port, fan_index) per device_id. Probed once at init, sync.rs reads this.
-    tl_lcd_port_index: HashMap<String, (u8, u8)>,
-    /// AIO LCD device IDs with pending deferred firmware reads.
-    aio_lcd_pending_firmware: HashMap<String, (Instant, bool)>,
-    /// AIO LCD device IDs for which firmware read previously failed.
-    aio_lcd_skip_firmware: HashMap<String, Instant>,
+    /// Wired USB device registry (fan handles, HID backends, hot-plug caches).
+    registry: DeviceRegistry,
+    /// AIO LCD device IDs with pending deferred firmware reads, plus the
+    /// devices whose reads previously failed and should be skipped.
+    aio_lcd_firmware: AioLcdFirmwareTracker,
     last_wireless_count: usize,
     last_poll_mono: Instant,
     last_poll_wall: std::time::SystemTime,
     restart_requested: bool,
-    ipc_state: Arc<Mutex<DaemonState>>, // the (shared) state of the deamon. Shared between daemon itself and IPC thread.
-    ipc_stop: Arc<AtomicBool>, // Flag which allows the deamon thread (on shutdown) to tell the IPC thread to stop.
-    ipc_thread: Option<JoinHandle<()>>, // Here the deamon thread stores the handle to the IPC thread.
-    openrgb_stop: Arc<AtomicBool>,
-    openrgb_thread: Option<JoinHandle<()>>,
-    openrgb_state: Arc<Mutex<openrgb_server::OpenRgbServerState>>,
-    direct_color_buffer: Arc<Mutex<crate::rgb_controller::DirectColorBuffer>>,
-    direct_color_writer: Option<JoinHandle<()>>,
+    /// Background controllers (fan/AIO/RGB) and direct-color flush thread.
+    controllers: Controllers,
+    /// IPC server thread + shared state.
+    ipc: IpcSubsystem,
+    /// OpenRGB SDK server thread + shared state.
+    openrgb: OpenRgbSubsystem,
     desktop_displays: crate::desktop_display::DesktopDisplayRegistry,
     tx: Option<Sender<DaemonEvent>>,
     mode_switch_suppression: HashMap<String, Instant>,
@@ -126,35 +109,18 @@ impl ServiceManager {
             config_path,
             config: None,
             media_assets: HashMap::new(),
-            targets: HashMap::new(),
+            targets: Arc::new(Mutex::new(HashMap::new())),
             wireless: WirelessController::new(),
             packet_builder: PacketBuilder::new(),
-            fan_controller: None,
-            aio_controller: None,
-            rgb_controller: None,
-            wired_fan_device_info: Vec::new(),
-            wired_fan_devices: Arc::new(HashMap::new()),
-            hid_backends: HashMap::new(),
-            last_wired_hid_ids: std::collections::HashSet::new(),
-            cached_usb_devices: Vec::new(),
-            aio_lcd_info: HashMap::new(),
-            tl_lcd_port_index: HashMap::new(),
-            aio_lcd_pending_firmware: HashMap::new(),
-            aio_lcd_skip_firmware: HashMap::new(),
+            registry: DeviceRegistry::new(),
+            aio_lcd_firmware: AioLcdFirmwareTracker::new(),
             last_wireless_count: 0,
             last_poll_mono: Instant::now(),
             last_poll_wall: std::time::SystemTime::now(),
             restart_requested: false,
-            ipc_state,
-            ipc_stop: Arc::new(AtomicBool::new(false)),
-            ipc_thread: None,
-            openrgb_stop: Arc::new(AtomicBool::new(false)),
-            openrgb_thread: None,
-            openrgb_state: Arc::new(Mutex::new(openrgb_server::OpenRgbServerState::default())),
-            direct_color_buffer: Arc::new(Mutex::new(
-                crate::rgb_controller::DirectColorBuffer::new(),
-            )),
-            direct_color_writer: None,
+            controllers: Controllers::new(),
+            ipc: IpcSubsystem::new(ipc_state),
+            openrgb: OpenRgbSubsystem::new(),
             desktop_displays: crate::desktop_display::DesktopDisplayRegistry::new(),
             tx: None,
             mode_switch_suppression: HashMap::new(),
@@ -162,11 +128,12 @@ impl ServiceManager {
     }
 
     /// Check if the configured HID driver is rusb.
+    ///
+    /// Always `true` after the hidapi backend was dropped. Kept as a thin
+    /// helper so legacy call sites can stay readable while they're being
+    /// migrated off the `use_rusb()` branch pattern during the daemon rewrite.
     fn use_rusb(&self) -> bool {
-        self.config
-            .as_ref()
-            .map(|c| c.hid_driver == HidDriver::Rusb)
-            .unwrap_or(false)
+        true
     }
 
     /// Stable device ID for a rusb device — uses serial or USB port path.
@@ -174,80 +141,48 @@ impl ServiceManager {
         det.device_id()
     }
 
-    /// Get a cached HID backend or open a new one via rusb.
-    fn get_or_open_backend_rusb(
-        &mut self,
-        det: &lianli_devices::detect::DetectedDevice,
-    ) -> anyhow::Result<Arc<Mutex<HidBackend>>> {
-        let key = Self::rusb_device_id(det);
-        if let Some(backend) = self.hid_backends.get(&key) {
-            return Ok(Arc::clone(backend));
-        }
-        let backend = lianli_devices::detect::open_hid_backend_rusb(det)?;
-        self.hid_backends.insert(key, Arc::clone(&backend));
-        Ok(backend)
-    }
-
-    /// Get a cached HID backend or open a new one via hidapi.
-    fn get_or_open_backend_hidapi(
-        &mut self,
-        api: &hidapi::HidApi,
-        key: &str,
-        det: &lianli_devices::detect::DetectedHidDevice,
-    ) -> anyhow::Result<Arc<Mutex<HidBackend>>> {
-        if let Some(backend) = self.hid_backends.get(key) {
-            return Ok(Arc::clone(backend));
-        }
-        let backend = lianli_devices::detect::open_hid_backend_hidapi(api, det)?;
-        self.hid_backends
-            .insert(key.to_string(), Arc::clone(&backend));
-        Ok(backend)
-    }
-
     /// Process deferred firmware reads for AIO LCD devices.
     /// Called every DevicePoll tick.
     fn process_pending_lcd_firmware(&mut self) {
-        let now = Instant::now();
-        let ready: Vec<(String, bool)> = self
-            .aio_lcd_pending_firmware
-            .iter()
-            .filter(|(_, (deadline, _))| *deadline <= now)
-            .map(|(id, (_, enable_512))| (id.clone(), *enable_512))
-            .collect();
+        let ready = self.aio_lcd_firmware.drain_due();
 
         for (device_id, enable_512) in ready {
-            self.aio_lcd_pending_firmware.remove(&device_id);
-
-            let found = self
-                .targets
-                .values_mut()
-                .find(|t| t.device_identity == device_id);
-
-            if let Some(target) = found {
-                if let LcdBackend::HidLcd(ref hid) = target.lcd {
-                    let mut guard = hid.lock();
-                    match guard.try_read_firmware() {
-                        Ok(()) => {
-                            self.aio_lcd_info.insert(
-                                device_id.clone(),
-                                (
-                                    guard.firmware_version_str().map(|s| s.to_string()),
-                                    guard.supports_c_command(),
-                                ),
-                            );
-                            guard.set_use_c_command(enable_512);
-                            info!("AIO LCD firmware read succeeded for {device_id}");
-                        }
-                        Err(e) => {
-                            warn!(
-                                "AIO LCD firmware read failed for {device_id}: {e:#}. \
-                                 Skipping firmware reads for 30 minutes."
-                            );
-                            self.aio_lcd_skip_firmware
-                                .insert(device_id.clone(), Instant::now());
+            let mut firmware_result: Option<Result<(Option<String>, bool), anyhow::Error>> = None;
+            {
+                let mut targets = self.targets.lock();
+                if let Some(target) = targets
+                    .values_mut()
+                    .find(|t| t.device_identity == device_id)
+                {
+                    if let LcdBackend::HidLcd(ref hid) = target.lcd {
+                        let mut guard = hid.lock();
+                        match guard.try_read_firmware() {
+                            Ok(()) => {
+                                let fw = guard.firmware_version_str().map(|s| s.to_string());
+                                let supports = guard.supports_c_command();
+                                guard.set_use_c_command(enable_512);
+                                firmware_result = Some(Ok((fw, supports)));
+                            }
+                            Err(e) => {
+                                firmware_result = Some(Err(e));
+                            }
                         }
                     }
                 }
+            }
+            match firmware_result {
+                Some(Ok((fw, supports))) => {
+                    self.aio_lcd_firmware.record(&device_id, fw, supports);
+                    info!("AIO LCD firmware read succeeded for {device_id}");
+                }
+                Some(Err(e)) => {
+                    warn!(
+                        "AIO LCD firmware read failed for {device_id}: {e:#}. \
+                         Skipping firmware reads for 30 minutes."
+                    );
+                    self.aio_lcd_firmware.mark_failed(&device_id);
+                }
+                None => {}
             }
         }
     }
@@ -255,20 +190,9 @@ impl ServiceManager {
     pub fn device_poll(&mut self) {
         let now_mono = Instant::now();
         let now_wall = std::time::SystemTime::now();
-        let mono_elapsed = now_mono.duration_since(self.last_poll_mono);
-        let wall_elapsed = now_wall
-            .duration_since(self.last_poll_wall)
-            .unwrap_or(mono_elapsed);
+        let _mono_elapsed = now_mono.duration_since(self.last_poll_mono);
         self.last_poll_mono = now_mono;
         self.last_poll_wall = now_wall;
-        if wall_elapsed > mono_elapsed + Duration::from_secs(5) {
-            info!(
-                "System resume detected (~{:.0}s sleep), restarting daemon",
-                (wall_elapsed - mono_elapsed).as_secs_f32()
-            );
-            self.restart_requested = true;
-            return;
-        }
 
         // Check for late wireless device discovery
         let current_wireless = self.wireless.devices().len();
@@ -290,7 +214,15 @@ impl ServiceManager {
         self.check_wired_hotplug();
         self.refresh_targets();
         self.process_pending_lcd_firmware();
+        self.check_thermal_alert();
         self.sync_ipc_telemetry();
+    }
+
+    /// Check thermal alert state and trigger RGB override/restore if changed.
+    fn check_thermal_alert(&self) {
+        if let Some(ref rgb) = self.controllers.rgb {
+            rgb.lock().check_thermal_override();
+        }
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.
@@ -325,6 +257,8 @@ impl ServiceManager {
 
         self.tx = Some(tx.clone());
 
+        suspend::spawn(tx.clone());
+
         // We need to send these two events to ourselves before load_config, as load_config sets up the assets and already sends FrameFinished-Events
         tx.send(DaemonEvent::USBCheck).ok();
         tx.send(DaemonEvent::DevicePoll).ok();
@@ -335,9 +269,9 @@ impl ServiceManager {
 
         // Start IPC server
         let tx_cloned = tx.clone();
-        self.ipc_thread = Some(ipc_server::start_ipc_server(
-            Arc::clone(&self.ipc_state),
-            Arc::clone(&self.ipc_stop),
+        self.ipc.thread = Some(ipc::start_ipc_server(
+            Arc::clone(&self.ipc.state),
+            Arc::clone(&self.ipc.stop),
             tx_cloned,
         ));
         self.try_wireless();
@@ -363,14 +297,57 @@ impl ServiceManager {
             }
         });
 
-        // Spawn a thread to regularily check for new known devices.
+        // Spawn a thread to regularly check for new known devices.
         let device_tx = tx.clone();
         thread::spawn(move || loop {
             thread::sleep(DEVICE_POLL_INTERVAL);
             if device_tx.send(DaemonEvent::DevicePoll).is_err() {
-                break; // Daemon thread has ended. Time for us to die as well
+                break;
             }
         });
+        // Spawn the dedicated LCD streaming thread.
+        // Polls all targets for new frames so DevicePoll / USB enumeration
+        // on the main loop can never block video playback.
+        let stream_targets = Arc::clone(&self.targets);
+        let stream_main_tx = tx.clone();
+        thread::spawn(move || {
+            let mut builder = PacketBuilder::new();
+            loop {
+                let mut to_recreate = Vec::new();
+                {
+                    let mut targets = stream_targets.lock();
+                    for (&id, target) in targets.iter_mut() {
+                        match target.send_frame(None, &mut builder) {
+                            Ok(true) => {
+                                target.consecutive_errors = 0;
+                            }
+                            Ok(false) => {}
+                            Err(runtime::SendError::Usb(err)) => {
+                                target.consecutive_errors += 1;
+                                if target.consecutive_errors >= 3 {
+                                    warn!("LCD[{id}] USB error (3/3): {err}");
+                                    to_recreate.push(id);
+                                }
+                            }
+                            Err(runtime::SendError::Other(err)) => {
+                                warn!("LCD[{id}] media error: {err}");
+                                to_recreate.push(id);
+                            }
+                        }
+                    }
+                    for id in &to_recreate {
+                        targets.remove(id);
+                    }
+                }
+                for id in to_recreate {
+                    stream_main_tx
+                        .send(DaemonEvent::RecreateMedia { target_index: id })
+                        .ok();
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
         SysSensor::init();
 
         let shutdown_tx = tx.clone();
@@ -446,51 +423,107 @@ impl ServiceManager {
                 }
                 DaemonEvent::IpcUpdate => {
                     // Check for IPC-triggered config reload
-                    let ipc_state = self.ipc_state.lock();
+                    let ipc_state = self.ipc.state.lock();
                     info!("Config reload triggered via IPC");
-                    let old_hid_driver = self.config.as_ref().map(|c| c.hid_driver);
                     // Force the config watcher to pick up the new file
                     drop(ipc_state);
                     if self.load_config(tx.clone()) {
-                        let new_hid_driver = self.config.as_ref().map(|c| c.hid_driver);
-                        if old_hid_driver != new_hid_driver {
-                            info!("HID driver changed ({old_hid_driver:?} -> {new_hid_driver:?}), restarting daemon...");
-                            self.restart_requested = true;
-                            break;
-                        }
                         self.start_fan_control();
                         if let (Some(aio), Some(cfg)) =
-                            (self.aio_controller.as_ref(), self.config.as_ref())
+                            (self.controllers.aio.as_ref(), self.config.as_ref())
                         {
                             aio.set_config(cfg.clone());
                         } else {
                             self.start_aio_control();
                         }
-                        self.apply_rgb_config();
                         self.start_openrgb_server();
+                        if let Some(ref ta) = self.controllers.thermal_alert {
+                            if let Some(ref cfg) = self.config {
+                                ta.update_settings(cfg.thermal_alert.clone());
+                            }
+                        }
                         self.sync_ipc_state();
 
                         self.device_poll();
                     }
                 }
-                DaemonEvent::FrameFinished { asset } => {
-                    // which worker has a new image to send?
-                    self.stream_target(asset);
+                DaemonEvent::FrameFinished => {
+                    // Handled by the polling streaming thread — no action needed.
                 }
                 DaemonEvent::ResyncWirelessRgb => {
-                    info!("Wireless RGB drift detected, re-applying config");
-                    self.apply_rgb_config();
+                    if let Some(ref rgb) = self.controllers.rgb {
+                        let rgb = rgb.lock();
+                        if rgb.is_openrgb_controlled() {
+                            debug!("OpenRGB server active, skipping wireless drift resync");
+                        } else {
+                            drop(rgb);
+                            self.apply_rgb_config();
+                        }
+                    }
                 }
                 DaemonEvent::RecreateMedia { target_index } => {
                     if let Some(asset) = self.media_assets.get(&target_index).cloned() {
-                        if let Some(target) = self.targets.get_mut(&target_index) {
+                        if let Some(target) = self.targets.lock().get_mut(&target_index) {
                             info!(
                                 "[devices] LCD[{}] recreating media after recovery",
                                 target.device_identity
                             );
-                            target.swap_media(asset, self.tx.clone());
+                            target.swap_media(asset, target.custom_h264, self.tx.clone());
                         }
                     }
+                }
+                DaemonEvent::RebootWirelessLcd { mac } => {
+                    if let Err(e) = self.wireless.reboot_lcd_group(&mac) {
+                        warn!("Failed to reboot wireless LCD: {e}");
+                    }
+                }
+                DaemonEvent::DisableLc217Wifi { mac, disable } => {
+                    if let Err(e) = self.wireless.close_217_wifi(&mac, disable) {
+                        warn!("Failed to toggle LC217 wifi: {e}");
+                    }
+                }
+                DaemonEvent::BindAll => {
+                    for dev in self.wireless.unbound_devices() {
+                        if let Err(e) = self.wireless.bind_device(&dev.mac) {
+                            warn!("Failed to bind {}: {e}", dev.mac_str());
+                        }
+                    }
+                    self.device_poll();
+                }
+                DaemonEvent::UnbindAll => {
+                    for dev in self.wireless.devices() {
+                        if let Err(e) = self.wireless.unbind_device(&dev.mac) {
+                            warn!("Failed to unbind {}: {e}", dev.mac_str());
+                        }
+                    }
+                    self.device_poll();
+                }
+                DaemonEvent::SetLcdBrightness {
+                    device_id,
+                    brightness,
+                } => {
+                    let mut targets = self.targets.lock();
+                    if let Some((_, target)) = targets
+                        .iter_mut()
+                        .find(|(_, t)| t.device_identity == device_id)
+                    {
+                        if let Err(e) = target.lcd.set_brightness(
+                            Some(&self.wireless),
+                            &mut self.packet_builder,
+                            brightness,
+                        ) {
+                            warn!("Failed to set LCD brightness for {device_id}: {e}");
+                        }
+                    }
+                }
+                DaemonEvent::SystemResumed => {
+                    info!("System resumed — waiting for USB re-enumeration");
+                    thread::sleep(Duration::from_secs(2));
+                    self.rebuild_rgb_controller();
+                    self.restart_fan_control();
+                    self.start_aio_control();
+                    self.sync_ipc_state();
+                    info!("Device state re-applied after resume");
                 }
             }
         }

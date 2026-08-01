@@ -1,3 +1,4 @@
+use super::convergence::{PendingQueue, TargetSeqMap};
 use super::discovery::{poll_and_discover, DiscoveredDevice};
 use super::transport::{open_any, with_transport_recovery};
 use super::{
@@ -5,7 +6,7 @@ use super::{
     RF_CHUNK_SIZE, RF_DATA_SIZE, RF_SELECT, RX_IDS, TX_IDS, USB_CMD_GET_MAC, USB_CMD_SEND_RF,
 };
 use anyhow::{bail, Context, Result};
-use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
+use lianli_transport::usb::{RusbBulk, USB_TIMEOUT};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -16,8 +17,8 @@ use tracing::{debug, error, info, warn};
 const TX_FAILURE_THRESHOLD: u32 = 5;
 
 pub struct WirelessController {
-    pub(super) tx: Option<Arc<Mutex<UsbTransport>>>,
-    pub(super) rx: Option<Arc<Mutex<UsbTransport>>>,
+    pub(super) tx: Option<Arc<Mutex<RusbBulk>>>,
+    pub(super) rx: Option<Arc<Mutex<RusbBulk>>>,
     pub(super) poll_stop: Arc<AtomicBool>,
     pub(super) poll_thread: Option<JoinHandle<()>>,
     pub(super) video_mode_active: Arc<AtomicBool>,
@@ -27,8 +28,14 @@ pub struct WirelessController {
     /// Motherboard PWM duty cycle (0-255) extracted from RX GetDev response bytes [2:3].
     /// 0xFFFF means unavailable/not yet read.
     pub(super) mobo_pwm: Arc<AtomicU16>,
+    pub(super) fg_sync: Arc<AtomicBool>,
     pub(super) tx_failures: Arc<AtomicU32>,
     pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], [u8; 4]>>>,
+    /// Pending commands awaiting device ack, drained by the convergence loop.
+    pub(super) pending_commands: Option<PendingQueue>,
+    /// Per-device target `cmd_seq`; incremented per state-changing command.
+    pub(super) target_cmd_seqs: Option<TargetSeqMap>,
+    pub(super) convergence_thread: Option<JoinHandle<()>>,
 }
 
 impl Clone for WirelessController {
@@ -43,14 +50,20 @@ impl Clone for WirelessController {
             master_channel: Arc::clone(&self.master_channel),
             discovered_devices: Arc::clone(&self.discovered_devices),
             mobo_pwm: Arc::clone(&self.mobo_pwm),
+            fg_sync: Arc::clone(&self.fg_sync),
             tx_failures: Arc::clone(&self.tx_failures),
             desired_effects: Arc::clone(&self.desired_effects),
+            pending_commands: self.pending_commands.clone(),
+            target_cmd_seqs: self.target_cmd_seqs.clone(),
+            convergence_thread: None,
         }
     }
 }
 
 impl WirelessController {
     pub fn new() -> Self {
+        let pending_commands: PendingQueue = Arc::new(Mutex::new(Default::default()));
+        let target_cmd_seqs: TargetSeqMap = Arc::new(Mutex::new(Default::default()));
         Self {
             tx: None,
             rx: None,
@@ -61,8 +74,12 @@ impl WirelessController {
             master_channel: Arc::new(Mutex::new(8)),
             discovered_devices: Arc::new(Mutex::new(Vec::new())),
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
+            fg_sync: Arc::new(AtomicBool::new(false)),
             tx_failures: Arc::new(AtomicU32::new(0)),
             desired_effects: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pending_commands: Some(pending_commands),
+            target_cmd_seqs: Some(target_cmd_seqs),
+            convergence_thread: None,
         }
     }
 
@@ -190,6 +207,7 @@ impl WirelessController {
         let stop_flag = self.poll_stop.clone();
         let discovered_devices = Arc::clone(&self.discovered_devices);
         let mobo_pwm = Arc::clone(&self.mobo_pwm);
+        let fg_sync = Arc::clone(&self.fg_sync);
         let master_mac = Arc::clone(&self.master_mac);
 
         let discovery_done = Arc::new(AtomicBool::new(false));
@@ -203,7 +221,7 @@ impl WirelessController {
             const MAX_RESETS: u32 = 3;
             while !stop_flag.load(Ordering::SeqCst) {
                 if let Err(err) =
-                    poll_and_discover(&rx, &discovered_devices, &mobo_pwm, &master_mac)
+                    poll_and_discover(&rx, &discovered_devices, &mobo_pwm, &fg_sync, &master_mac)
                 {
                     consecutive_errors += 1;
                     consecutive_successes = 0;
@@ -267,6 +285,21 @@ impl WirelessController {
             }
             thread::sleep(Duration::from_millis(50));
         }
+
+        if let (Some(queue), Some(target_seqs)) =
+            (self.pending_commands.clone(), self.target_cmd_seqs.clone())
+        {
+            let conv_stop = self.poll_stop.clone();
+            let discovered = Arc::clone(&self.discovered_devices);
+            self.convergence_thread = Some(Self::spawn_convergence_loop(
+                Arc::clone(&tx),
+                queue,
+                target_seqs,
+                discovered,
+                conv_stop,
+            ));
+        }
+
         Ok(())
     }
 
@@ -303,19 +336,18 @@ impl WirelessController {
     }
 
     /// Broadcast a "master clock" sync packet (RF sub-command 0x14) carrying
-    /// 220 bytes of CPU/GPU info. L-Connect sends this once per second; missing
+    /// 220 bytes of CPU/GPU info. This must be sent once per second; missing
     /// it appears to put the fan firmware into an autonomous fallback that
-    /// occasionally spikes RPM. We send all-zero info bytes — the firmware
-    /// only seems to need the heartbeat itself.
-    pub fn send_master_clock(&self) -> Result<()> {
+    /// occasionally spikes RPM.
+    pub fn send_master_clock(&self, payload: &[u8; 220]) -> Result<()> {
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
 
         let mut rf_data = vec![0u8; RF_DATA_SIZE];
         rf_data[0] = RF_SELECT;
-        rf_data[1] = 0x14;
+        rf_data[1] = super::RF_CLOCK_SYNC;
         rf_data[8..14].copy_from_slice(&master_mac);
-        // rf_data[14..234] = cpuInfoParam (220 bytes, leave zero)
+        rf_data[14..234].copy_from_slice(payload);
 
         self.tx_recover(|handle| {
             for chunk_idx in 0..RF_CHUNKS as u8 {
@@ -410,7 +442,7 @@ impl WirelessController {
 
     pub(super) fn tx_recover<F, R>(&self, op: F) -> Result<R>
     where
-        F: FnMut(&UsbTransport) -> Result<R>,
+        F: FnMut(&RusbBulk) -> Result<R>,
     {
         let tx = self.tx.as_ref().context("TX device not connected")?;
         let result = with_transport_recovery(tx, &TX_IDS, "TX", op);
@@ -473,10 +505,17 @@ impl WirelessController {
         }
     }
 
+    /// Enable/disable FgSync mode. When enabled, the GetDev polling command
+    /// includes the current fan RPM so the RX dongle can measure motherboard
+    /// PWM duty from the FG signal.
+    pub fn set_fg_sync(&self, enabled: bool) {
+        self.fg_sync.store(enabled, Ordering::Relaxed);
+    }
+
     /// Send a 240-byte RF packet as 4× 64-byte USB chunks.
     pub(super) fn send_rf_packet(
         &self,
-        handle: &UsbTransport,
+        handle: &RusbBulk,
         device: &DiscoveredDevice,
         rf_data: &[u8],
     ) -> Result<()> {
@@ -499,7 +538,7 @@ impl WirelessController {
         Ok(())
     }
 
-    pub(super) fn next_seq_index(&self, device: &DiscoveredDevice) -> u8 {
+    pub(super) fn next_slot_index(&self, device: &DiscoveredDevice) -> u8 {
         let devices = self.discovered_devices.lock();
         let master_mac = *self.master_mac.lock();
         devices

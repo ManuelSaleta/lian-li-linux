@@ -6,7 +6,7 @@ use super::{
     RF_SELECT, USB_CMD_SEND_RF,
 };
 use anyhow::{Context, Result};
-use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
+use lianli_transport::usb::{RusbBulk, USB_TIMEOUT};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
@@ -47,7 +47,7 @@ impl WirelessController {
         let device = self.device_by_mac_snapshot(mac)?;
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
-        let seq_index = self.next_seq_index(&device);
+        let slot_index = self.next_slot_index(&device);
 
         let mut rf_data = vec![0u8; RF_DATA_SIZE];
         rf_data[0] = RF_SELECT;
@@ -56,7 +56,7 @@ impl WirelessController {
         rf_data[8..14].copy_from_slice(&master_mac);
         rf_data[14] = device.rx_type;
         rf_data[15] = master_ch;
-        rf_data[16] = seq_index;
+        rf_data[16] = slot_index;
         rf_data[18..18 + AIO_PARAM_LEN].copy_from_slice(aio_param);
 
         self.tx_recover(|handle| send_rf_frame_via(handle, &device, &rf_data))?;
@@ -71,11 +71,7 @@ impl WirelessController {
     }
 }
 
-fn send_rf_frame_via(
-    handle: &UsbTransport,
-    device: &DiscoveredDevice,
-    rf_data: &[u8],
-) -> Result<()> {
+fn send_rf_frame_via(handle: &RusbBulk, device: &DiscoveredDevice, rf_data: &[u8]) -> Result<()> {
     assert_eq!(rf_data.len(), RF_DATA_SIZE);
     for chunk_idx in 0..RF_CHUNKS as u8 {
         let mut packet = vec![0u8; 64];

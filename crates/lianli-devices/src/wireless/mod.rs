@@ -1,18 +1,26 @@
 //! Wireless RF dongle driver — TX/RX dongles + bound wireless fans/AIOs/strips.
 
+pub mod adapters;
 mod aio;
 mod bind;
+mod clock_sync;
 mod controller;
+mod convergence;
 mod discovery;
 mod fan_speed;
 mod fan_type;
+mod mb_sync;
+mod opcodes;
 mod rgb;
 mod transport;
+mod v2_hid;
 
 pub use aio::pump_rpm_to_timer;
+pub use clock_sync::{build_payload, SensorSnapshot};
 pub use controller::WirelessController;
 pub use discovery::DiscoveredDevice;
 pub use fan_type::WirelessFanType;
+pub use v2_hid::{query_v2_hid_macs, share_parent, V2HidEntry, V2_HID_PID, V2_HID_VID};
 
 use once_cell::sync::Lazy;
 
@@ -41,9 +49,15 @@ const USB_CMD_GET_MAC: u8 = 0x11;
 
 const RF_SELECT: u8 = 0x12;
 const RF_PWM_CMD: u8 = 0x10;
+const RF_SELECTED_GROUP: u8 = 0x12;
+const RF_CLOCK_SYNC: u8 = 0x14;
+const RF_REBOOT_LCD: u8 = 0x16;
 const RF_AIO_SWITCH_WIRELESS: u8 = 0x19;
 const RF_SET_RGB: u8 = 0x20;
+const RF_SEND_PIC: u8 = 0x22;
+const RF_217_CLOSE_WIFI: u8 = 0x23;
 const RF_AIO_PARAMS: u8 = 0x21;
+const RF_MB_LIGHT_SYNC: u8 = 0x27;
 
 const RF_DATA_SIZE: usize = 240;
 const RF_CHUNK_SIZE: usize = 60;

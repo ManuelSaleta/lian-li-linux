@@ -20,10 +20,6 @@ pub enum IpcRequest {
         device_id: String,
         config: LcdConfig,
     },
-    SetFanSpeed {
-        device_index: u8,
-        fan_pwm: [u8; 4],
-    },
     SetFanConfig {
         config: FanConfig,
     },
@@ -119,6 +115,7 @@ pub enum IpcRequest {
         quantity: u8,
     },
     ListSensors,
+    ListPwmHeaders,
     GetLcdTemplates,
     SetLcdTemplates {
         templates: Vec<LcdTemplate>,
@@ -129,8 +126,41 @@ pub enum IpcRequest {
         width: u32,
         height: u32,
     },
-    Subscribe,
     Ping,
+    SetLcdBrightness {
+        device_id: String,
+        brightness: u8,
+    },
+    PingDevice {
+        device_id: String,
+        zone: u8,
+    },
+    RebootWirelessLcd {
+        device_id: String,
+    },
+    DisableLc217Wifi {
+        device_id: String,
+        disable: bool,
+    },
+    BindAllWireless,
+    UnbindAllWireless,
+    GetChannel,
+    SetMergeLightingConfig {
+        config: crate::rgb::MergeLightingConfig,
+    },
+    GetMergeLightingConfig,
+    SaveDeviceProfile {
+        name: String,
+        device_id: String,
+    },
+    DeleteDeviceProfile {
+        name: String,
+    },
+    ListDeviceProfiles,
+    ApplyDeviceProfile {
+        name: String,
+        device_id: String,
+    },
 }
 
 /// Responses from daemon to GUI.
@@ -216,6 +246,11 @@ pub struct DeviceInfo {
     /// (port, fan_index) for daisy-chained TL LCD fans. None for other devices.
     #[serde(default)]
     pub port_index: Option<(u8, u8)>,
+    /// MAC of the wireless group this wired LCD receiver is paired with
+    /// (via V2 dongle HID topology matching). None for non-LCD devices or
+    /// when no V2 dongle is present.
+    #[serde(default)]
+    pub wireless_group_mac: Option<String>,
 }
 
 /// Status of the OpenRGB SDK server.

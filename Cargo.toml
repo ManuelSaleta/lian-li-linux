@@ -11,7 +11,10 @@ members = [
     "crates/lianli-evdi",
     "crates/lianli-media",
     "crates/lianli-daemon",
-    "crates/lianli-gui",
+    "crates/lianli-gui/src-tauri",
+]
+exclude = [
+    "crates/lianli-gui-old",
 ]
 
 [workspace.dependencies]
@@ -24,7 +27,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # USB/HID
-hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
 rusb = "0.9"
 
 # Crypto
@@ -62,7 +64,6 @@ ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", 
 # Template catalog
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 sha2 = "0.10"
-arboard = { version = "3.4", default-features = false, features = ["wayland-data-control"] }
 
 [profile.profiling]
 inherits = "release"

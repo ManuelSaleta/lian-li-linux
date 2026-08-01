@@ -1,19 +1,33 @@
+//! USB bulk / WinUSB-style transport.
+//!
+//! Wraps a `rusb::DeviceHandle` for devices that speak bulk or interrupt
+//! transfers on fixed endpoints (EP 0x01 out, EP 0x81 in). Used by every
+//! non-HID USB device: wireless dongles, WinUSB LCDs (HydroShift II / Lancool
+//! 207 / Universal Screen), WinUSB LED controllers, and TURZX desktop-mode
+//! displays.
+
 use crate::error::TransportError;
 use rusb::{Device, DeviceHandle, GlobalContext};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
+/// Default OUT endpoint address (vendor-defined but consistent across the
+/// Lian Li USB-bulk fleet).
 pub const EP_OUT: u8 = 0x01;
+/// Default IN endpoint address.
 pub const EP_IN: u8 = 0x81;
+/// Default timeout for ordinary control transfers.
 pub const USB_TIMEOUT: Duration = Duration::from_millis(5_000);
+/// Per-frame write timeout for LCD streaming (tight to keep frame pacing tight).
 pub const LCD_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+/// Per-frame read timeout for LCD status polling.
 pub const LCD_READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 
-/// Low-level USB transport wrapping a `rusb` device handle.
+/// USB bulk transport wrapping a `rusb::DeviceHandle`.
 ///
 /// Auto-detects endpoint transfer types (bulk vs interrupt) from the USB
 /// descriptor so the correct libusb call is used.
-pub struct UsbTransport {
+pub struct RusbBulk {
     handle: DeviceHandle<GlobalContext>,
     ep_out: u8,
     ep_in: u8,
@@ -24,7 +38,7 @@ pub struct UsbTransport {
     claimed: Vec<u8>,
 }
 
-impl UsbTransport {
+impl RusbBulk {
     pub fn open(vid: u16, pid: u16) -> Result<Self, TransportError> {
         let device = rusb::devices()?
             .iter()
@@ -59,6 +73,10 @@ impl UsbTransport {
         })
     }
 
+    /// Detach any kernel driver, set the active configuration, and claim
+    /// interface 0 (plus any other vendor interfaces). Recovers from a busy
+    /// state by retrying with short delays rather than USB reset (which can
+    /// destabilise other devices on the same hub).
     pub fn detach_and_configure(&mut self, name: &str) -> Result<(), TransportError> {
         match self.handle.kernel_driver_active(0) {
             Ok(true) => {
@@ -72,25 +90,9 @@ impl UsbTransport {
 
         match self.handle.set_active_configuration(1) {
             Ok(()) | Err(rusb::Error::Busy) | Err(rusb::Error::NotFound) => {}
-            Err(rusb::Error::Io) => {
-                warn!("{name} configuration I/O error, attempting USB reset");
-                self.handle.reset()?;
-                info!("{name} USB reset successful, retrying");
-                std::thread::sleep(Duration::from_millis(500));
-                // Kernel driver may re-attach after reset
-                match self.handle.kernel_driver_active(0) {
-                    Ok(true) => {
-                        let _ = self.handle.detach_kernel_driver(0);
-                        debug!("Detached kernel driver from {name} after reset");
-                    }
-                    _ => {}
-                }
-                match self.handle.set_active_configuration(1) {
-                    Ok(()) | Err(rusb::Error::Busy) | Err(rusb::Error::NotFound) => {}
-                    Err(e) => return Err(e.into()),
-                }
+            Err(e) => {
+                debug!("{name} set_active_configuration: {e}, continuing");
             }
-            Err(e) => return Err(e.into()),
         }
 
         match self.handle.claim_interface(0) {
@@ -99,21 +101,28 @@ impl UsbTransport {
                 self.claimed.push(0);
             }
             Err(rusb::Error::Busy) => {
-                warn!("{name} interface busy, attempting USB reset");
-                self.handle.reset()?;
-                info!("{name} USB reset successful");
-                std::thread::sleep(Duration::from_millis(500));
-                // Kernel driver may re-attach after reset — detach again
-                match self.handle.kernel_driver_active(0) {
-                    Ok(true) => {
-                        self.handle.detach_kernel_driver(0)?;
-                        debug!("Detached kernel driver from {name} after reset");
+                warn!("{name} interface 0 busy, retrying...");
+                let mut claimed = false;
+                for attempt in 1..=5u32 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if let Ok(true) = self.handle.kernel_driver_active(0) {
+                        let _ = self.handle.detach_kernel_driver(0);
                     }
-                    Ok(false) => {}
-                    Err(rusb::Error::NotSupported) => {}
-                    Err(e) => return Err(e.into()),
+                    match self.handle.claim_interface(0) {
+                        Ok(()) => {
+                            claimed = true;
+                            break;
+                        }
+                        Err(rusb::Error::Busy) => {
+                            debug!("{name} interface 0 still busy (attempt {attempt}/5)");
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
                 }
-                self.handle.claim_interface(0)?;
+                if !claimed {
+                    return Err(rusb::Error::Busy.into());
+                }
                 let _ = self.handle.set_alternate_setting(0, 0);
                 self.claimed.push(0);
             }
@@ -164,6 +173,30 @@ impl UsbTransport {
             );
         }
         Ok(n)
+    }
+
+    /// Write all data, handling short writes by continuing from the offset
+    /// where the previous transfer left off. Each sub-transfer uses the same
+    /// timeout, so the total worst-case is `timeout * number_of_chunks`.
+    pub fn write_full(&self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let n = if self.ep_out_interrupt {
+                self.handle
+                    .write_interrupt(self.ep_out, &data[offset..], timeout)?
+            } else {
+                self.handle
+                    .write_bulk(self.ep_out, &data[offset..], timeout)?
+            };
+            if n == 0 {
+                return Err(TransportError::Write(format!(
+                    "zero-length USB write at offset {offset}/{}",
+                    data.len()
+                )));
+            }
+            offset += n;
+        }
+        Ok(())
     }
 
     pub fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, TransportError> {
@@ -237,7 +270,7 @@ impl UsbTransport {
     }
 }
 
-impl Drop for UsbTransport {
+impl Drop for RusbBulk {
     fn drop(&mut self) {
         for &iface in self.claimed.iter().rev() {
             let _ = self.handle.release_interface(iface);

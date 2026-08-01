@@ -43,6 +43,8 @@ pub struct LcdConfig {
     pub custom_h264: Option<bool>,
     #[serde(default)]
     pub aio_512_frame: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<u8>,
 }
 
 impl LcdConfig {
@@ -130,25 +132,68 @@ impl LcdConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HidDriver {
-    Hidapi,
-    Rusb,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Ene6k77DeviceConfig {
     #[serde(default)]
     pub fan_quantities: HashMap<u8, u8>,
 }
 
+fn default_threshold() -> u8 {
+    80
+}
+
+fn default_cpu_alert_color() -> [u8; 3] {
+    [255, 0, 0]
+}
+
+fn default_gpu_alert_color() -> [u8; 3] {
+    [0, 0, 255]
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThermalAlertSourceSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_threshold")]
+    pub threshold: u8,
+    #[serde(default = "default_cpu_alert_color")]
+    pub alert_color: [u8; 3],
+}
+
+impl Default for ThermalAlertSourceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_threshold(),
+            alert_color: default_cpu_alert_color(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ThermalAlertSettings {
+    #[serde(default)]
+    pub cpu: ThermalAlertSourceSettings,
+    #[serde(default = "default_gpu_settings")]
+    pub gpu: ThermalAlertSourceSettings,
+}
+
+fn default_gpu_settings() -> ThermalAlertSourceSettings {
+    ThermalAlertSourceSettings {
+        enabled: false,
+        threshold: 80,
+        alert_color: default_gpu_alert_color(),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_fps")]
     pub default_fps: f32,
-    #[serde(default)]
-    pub hid_driver: HidDriver,
+    /// Legacy `hid_driver` field (removed when hidapi was dropped). Kept as an
+    /// optional, ignored serde field so old config files still parse cleanly.
+    #[serde(default, skip_serializing)]
+    pub hid_driver: Option<String>,
     #[serde(default, alias = "devices")]
     pub lcds: Vec<LcdConfig>,
     #[serde(default)]
@@ -163,26 +208,54 @@ pub struct AppConfig {
     /// Per-ENE 6K77 device configuration keyed by device serial.
     #[serde(default)]
     pub ene6k77: HashMap<String, Ene6k77DeviceConfig>,
+    #[serde(default)]
+    pub wireless_groups: HashMap<String, WirelessGroupConfig>,
+    #[serde(default)]
+    pub thermal_alert: ThermalAlertSettings,
+    /// Wireless RGB drift re-sync: re-applies saved RGB when a wireless
+    /// device's firmware resets its lighting. Wireless devices only.
+    #[serde(default = "default_true")]
+    pub rgb_drift_detection_enabled: bool,
+    #[serde(default = "default_drift_interval_ms")]
+    pub rgb_drift_detection_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WirelessGroupConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mb_rgb_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mb_pwm_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_palette: Option<Vec<[u8; 3]>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_fan_lcd_enable: Option<u8>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_drift_interval_ms() -> u64 {
+    1000
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             default_fps: default_fps(),
-            hid_driver: HidDriver::default(),
+            hid_driver: None,
             lcds: Vec::new(),
             fan_curves: Vec::new(),
             fans: None,
             rgb: None,
             aio: HashMap::new(),
             ene6k77: HashMap::new(),
+            wireless_groups: HashMap::new(),
+            thermal_alert: ThermalAlertSettings::default(),
+            rgb_drift_detection_enabled: default_true(),
+            rgb_drift_detection_interval_ms: default_drift_interval_ms(),
         }
-    }
-}
-
-impl Default for HidDriver {
-    fn default() -> Self {
-        Self::Hidapi
     }
 }
 

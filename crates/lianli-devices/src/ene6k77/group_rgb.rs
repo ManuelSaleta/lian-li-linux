@@ -37,18 +37,104 @@ impl RgbDevice for Ene6k77GroupDevice {
     }
 
     fn supported_modes(&self) -> Vec<RgbMode> {
-        vec![
-            RgbMode::Off,
-            RgbMode::Static,
-            RgbMode::Breathing,
-            RgbMode::ColorCycle,
-            RgbMode::Rainbow,
-            RgbMode::Runway,
-            RgbMode::Meteor,
-            RgbMode::Staggered,
-            RgbMode::Tide,
-            RgbMode::Mixing,
-        ]
+        use super::Ene6k77Model;
+        let m = self.controller.model;
+        if m.uses_double_port() {
+            // Shared base for all dual-ring models
+            let mut modes = vec![
+                RgbMode::Off,
+                RgbMode::Static,
+                RgbMode::Breathing,
+                RgbMode::Rainbow,
+                RgbMode::MeteorRainbow,
+                RgbMode::ColorCycle,
+                RgbMode::Meteor,
+                RgbMode::Runway,
+                RgbMode::MopUp,
+                RgbMode::Lottery,
+                RgbMode::Wave,
+                RgbMode::Spring,
+                RgbMode::TailChasing,
+                RgbMode::Warning,
+                RgbMode::Voice,
+                RgbMode::Mixing,
+                RgbMode::Stack,
+                RgbMode::Tide,
+                RgbMode::Scan,
+                RgbMode::PacMan,
+            ];
+            match m {
+                Ene6k77Model::AlV2Fan => {
+                    modes.extend([
+                        RgbMode::RainbowMorph,
+                        RgbMode::ColorfulCity,
+                        RgbMode::Render,
+                        RgbMode::Twinkle,
+                    ]);
+                }
+                Ene6k77Model::SlInfinity => {
+                    // SL Infinity has a completely different set
+                    return vec![
+                        RgbMode::Off,
+                        RgbMode::Static,
+                        RgbMode::Breathing,
+                        RgbMode::Rainbow,
+                        RgbMode::RainbowMorph,
+                        RgbMode::BreathingRainbow,
+                        RgbMode::MeteorRainbow,
+                        RgbMode::ColorCycle,
+                        RgbMode::Meteor,
+                        RgbMode::Runway,
+                        RgbMode::MopUp,
+                        RgbMode::DoubleMeteor,
+                        RgbMode::MeteorContest,
+                        RgbMode::MeteorMix,
+                        RgbMode::ReturnArc,
+                        RgbMode::DoubleArc,
+                        RgbMode::Door,
+                        RgbMode::Disco,
+                        RgbMode::HeartBeat,
+                        RgbMode::Lottery,
+                        RgbMode::Warning,
+                        RgbMode::Voice,
+                        RgbMode::Mixing,
+                        RgbMode::Stack,
+                        RgbMode::Tide,
+                        RgbMode::Scan,
+                        RgbMode::HeartBeatRunway,
+                    ];
+                }
+                _ => {}
+            }
+            modes
+        } else {
+            // Single-ring models
+            let mut modes = vec![
+                RgbMode::Off,
+                RgbMode::Static,
+                RgbMode::Breathing,
+                RgbMode::ColorCycle,
+                RgbMode::Rainbow,
+                RgbMode::RainbowMorph,
+                RgbMode::Runway,
+                RgbMode::Meteor,
+                RgbMode::Staggered,
+                RgbMode::Tide,
+                RgbMode::Mixing,
+                RgbMode::Stack,
+                RgbMode::StackMulti,
+                RgbMode::Neon,
+            ];
+            if m.is_v2() {
+                modes.extend([
+                    RgbMode::Voice,
+                    RgbMode::Groove,
+                    RgbMode::Render,
+                    RgbMode::Tunnel,
+                ]);
+            }
+            modes
+        }
     }
 
     fn zone_info(&self) -> Vec<RgbZoneInfo> {
@@ -93,6 +179,74 @@ impl RgbDevice for Ene6k77GroupDevice {
         self.controller
             .send_feature(&[REPORT_ID, 0x10, sub_cmd, enabled as u8, 0, 0])?;
         thread::sleep(CMD_DELAY);
+        Ok(())
+    }
+
+    fn supports_merge_lighting(&self) -> bool {
+        true
+    }
+
+    fn start_merge_lighting(&self) -> Result<()> {
+        match self.controller.model {
+            Ene6k77Model::SlFan | Ene6k77Model::SlRedragon => self.controller.start_merge(),
+            Ene6k77Model::AlFan => self.controller.send_merge_command(true),
+            Ene6k77Model::SlV2Fan
+            | Ene6k77Model::SlV2aFan
+            | Ene6k77Model::AlV2Fan
+            | Ene6k77Model::SlInfinity => self.controller.set_merge_order([0, 1, 2, 3]),
+        }
+    }
+
+    fn stop_merge_lighting(&self) -> Result<()> {
+        match self.controller.model {
+            Ene6k77Model::SlFan | Ene6k77Model::SlRedragon => self.controller.stop_merge(),
+            Ene6k77Model::AlFan => self.controller.send_merge_command(false),
+            // V2/SLInfinity variants: set_merge_order with identity exits merge mode
+            _ => self.controller.set_merge_order([0, 1, 2, 3]),
+        }
+    }
+
+    fn ping(&self, _zone: u8) -> Result<()> {
+        let g = self.group & 0x0F;
+        match self.controller.model {
+            Ene6k77Model::SlFan
+            | Ene6k77Model::SlRedragon
+            | Ene6k77Model::SlV2Fan
+            | Ene6k77Model::SlV2aFan => {
+                self.controller
+                    .send_feature(&[REPORT_ID, 0x10 | g, 0x11, 0xFF, 0x00, 0x02])?;
+            }
+            Ene6k77Model::AlFan => {
+                self.controller.send_feature(&[
+                    REPORT_ID,
+                    0x10 | ((g * 2) & 0xF),
+                    0x34,
+                    0xFF,
+                    0x00,
+                    0x02,
+                ])?;
+            }
+            Ene6k77Model::SlInfinity => {
+                self.controller.send_feature(&[
+                    REPORT_ID,
+                    0x10 | ((g * 2) & 0xF),
+                    0x3E,
+                    0x00,
+                    0x00,
+                    0x02,
+                ])?;
+            }
+            Ene6k77Model::AlV2Fan => {
+                self.controller.send_feature(&[
+                    REPORT_ID,
+                    0x10 | ((g * 2) & 0xF),
+                    0x36,
+                    0x00,
+                    0x00,
+                    0x02,
+                ])?;
+            }
+        }
         Ok(())
     }
 }

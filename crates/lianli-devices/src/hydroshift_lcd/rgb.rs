@@ -5,18 +5,18 @@ use super::AioLcdVariant;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use lianli_transport::HidBackend;
+use lianli_transport::RusbHid;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 pub struct AioLcdRgbController {
-    device: Arc<Mutex<HidBackend>>,
+    device: Arc<Mutex<RusbHid>>,
     variant: AioLcdVariant,
 }
 
 impl AioLcdRgbController {
-    pub fn new(device: Arc<Mutex<HidBackend>>, pid: u16) -> Result<Self> {
+    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
         info!("Opened {} RGB controller", variant.name());
@@ -33,8 +33,8 @@ impl AioLcdRgbController {
         let mut payload = [0u8; 19];
         payload[0] = scope;
         payload[1] = mode_byte;
-        payload[2] = effect.brightness.min(4);
-        payload[3] = effect.speed.min(4);
+        payload[2] = lianli_shared::rgb::brightness_scale(effect.brightness);
+        payload[3] = lianli_shared::rgb::brightness_scale(effect.speed);
         for (i, color) in effect.colors.iter().take(4).enumerate() {
             let offset = 4 + i * 3;
             payload[offset] = color[0];
@@ -58,8 +58,8 @@ impl AioLcdRgbController {
         let mode_byte = effect.mode.to_hydroshift_lcd_mode_byte().unwrap_or(3);
         let mut payload = [0u8; 20];
         payload[0] = mode_byte;
-        payload[1] = effect.brightness.min(4);
-        payload[2] = effect.speed.min(4);
+        payload[1] = lianli_shared::rgb::brightness_scale(effect.brightness);
+        payload[2] = lianli_shared::rgb::brightness_scale(effect.speed);
         for (i, color) in effect.colors.iter().take(4).enumerate() {
             let offset = 3 + i * 3;
             payload[offset] = color[0];
@@ -102,25 +102,37 @@ impl RgbDevice for AioLcdRgbController {
     }
 
     fn supported_modes(&self) -> Vec<RgbMode> {
-        vec![
-            RgbMode::Off,
-            RgbMode::Static,
-            RgbMode::Rainbow,
-            RgbMode::RainbowMorph,
-            RgbMode::Breathing,
-            RgbMode::Runway,
-            RgbMode::Meteor,
-            RgbMode::TickerTape,
-            RgbMode::Fluctuation,
-            RgbMode::Transmit,
-            RgbMode::ColorfulStarryNight,
-            RgbMode::StaticStarryNight,
-            RgbMode::Voice,
-            RgbMode::BigBang,
-            RgbMode::Burst,
-            RgbMode::ColorsMorph,
-            RgbMode::Bounce,
-        ]
+        if matches!(self.variant, super::AioLcdVariant::Galahad2Vision) {
+            vec![
+                RgbMode::Off,
+                RgbMode::Static,
+                RgbMode::Rainbow,
+                RgbMode::RainbowMorph,
+                RgbMode::Breathing,
+                RgbMode::Runway,
+                RgbMode::Meteor,
+            ]
+        } else {
+            vec![
+                RgbMode::Off,
+                RgbMode::Static,
+                RgbMode::Rainbow,
+                RgbMode::RainbowMorph,
+                RgbMode::Breathing,
+                RgbMode::Runway,
+                RgbMode::Meteor,
+                RgbMode::TickerTape,
+                RgbMode::Fluctuation,
+                RgbMode::Transmit,
+                RgbMode::ColorfulStarryNight,
+                RgbMode::StaticStarryNight,
+                RgbMode::Voice,
+                RgbMode::BigBang,
+                RgbMode::Burst,
+                RgbMode::ColorsMorph,
+                RgbMode::Bounce,
+            ]
+        }
     }
 
     fn zone_info(&self) -> Vec<RgbZoneInfo> {

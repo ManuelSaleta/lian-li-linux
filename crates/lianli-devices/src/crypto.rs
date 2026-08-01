@@ -21,6 +21,29 @@ pub const CMD_QUERY_BLOCK: u8 = 0x7A;
 pub const CMD_STOP_PLAY: u8 = 0x7B;
 pub const CMD_REBOOT: u8 = 0x0B;
 pub const CMD_SWITCH_TO_DESKTOP: u8 = 0x96;
+pub const CMD_WARN_SWITCH: u8 = 0x2E;
+
+// HydroShift II AIO opcodes
+pub const CMD_GET_H2_PARAMS: u8 = 0xFA;
+pub const CMD_SYNC_PUMP_FAN: u8 = 0xFB;
+pub const CMD_PUSH_RGB_DATA: u8 = 0xFC;
+pub const CMD_SET_WTHEME_INDEX: u8 = 0xF9;
+
+/// CRC-16/CCITT (poly 0x1021, init 0, no final XOR, no reflection).
+pub fn crc16_ccitt(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
 
 /// Builds DES-CBC encrypted command headers for VID=0x1CBE LCD devices.
 ///
@@ -162,8 +185,11 @@ impl PacketBuilder {
     }
 
     pub fn start_play_header_winusb(&mut self, chunk_len: usize, is_last: bool) -> Vec<u8> {
+        let play_tick = self.start_time.elapsed().as_millis() as u32;
         let mut params = (chunk_len as u32).to_be_bytes().to_vec();
         params.push(if is_last { 1 } else { 0 });
+        params.push(0);
+        params.extend_from_slice(&play_tick.to_be_bytes());
         self.build_winusb(CMD_START_PLAY, &params)
     }
 
@@ -204,10 +230,112 @@ impl PacketBuilder {
     pub fn reboot_header_winusb(&mut self) -> Vec<u8> {
         self.build_winusb(CMD_REBOOT, &[])
     }
+
+    pub fn warn_switch_header_winusb(&mut self, is_open: bool) -> Vec<u8> {
+        self.build_winusb(CMD_WARN_SWITCH, &[if is_open { 1 } else { 0 }])
+    }
+
+    /// Build a SyncPumpFan header (cmd 0xFB) with CRC16.
+    pub fn sync_pump_fan_header_winusb(
+        &mut self,
+        pump_pwm: u16,
+        fan1: u8,
+        fan2: u8,
+        fan3: u8,
+    ) -> Vec<u8> {
+        let mut payload = [0u8; 492];
+        payload[0] = 0xFF;
+        payload[1] = 0x0F;
+        payload[2] = 0xA2;
+        payload[3] = 0x00;
+        payload[4] = (pump_pwm >> 8) as u8;
+        payload[5] = (pump_pwm & 0xFF) as u8;
+        payload[6] = fan1;
+        payload[7] = fan2;
+        payload[8] = fan3;
+        let crc = crc16_ccitt(&payload[..12]);
+        payload[12] = (crc >> 8) as u8;
+        payload[13] = (crc & 0xFF) as u8;
+        self.build_winusb(CMD_SYNC_PUMP_FAN, &payload)
+    }
+
+    /// Build a GetH2Params header (cmd 0xFA) — telemetry read.
+    pub fn get_h2_params_header_winusb(&mut self) -> Vec<u8> {
+        self.build_winusb(CMD_GET_H2_PARAMS, &[])
+    }
+
+    /// PushRgbData header (cmd 0xFC). Payload length is at offset 12, not 8.
+    pub fn push_rgb_data_header_winusb(&mut self, payload_len: usize) -> Vec<u8> {
+        let mut params = [0u8; 8];
+        params[4..8].copy_from_slice(&(payload_len as u32).to_be_bytes());
+        self.build_winusb(CMD_PUSH_RGB_DATA, &params)
+    }
 }
 
 impl Default for PacketBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+const LGBL_KEY: &[u8; 8] = b"lgbm9lgb";
+
+pub fn decrypt_lgbl(input: &[u8]) -> Vec<u8> {
+    input
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ LGBL_KEY[i % 8])
+        .collect()
+}
+
+pub fn is_lgbl(data: &[u8]) -> bool {
+    data.len() >= 4 && &data[..4] == b"lgbl"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{crc16_ccitt, decrypt_lgbl, is_lgbl};
+
+    #[test]
+    fn crc16_empty_is_zero() {
+        assert_eq!(crc16_ccitt(&[]), 0);
+    }
+
+    #[test]
+    fn crc16_single_byte_matches_table() {
+        // table[1] = 4129 = 0x1021
+        assert_eq!(crc16_ccitt(&[0x01]), 0x1021);
+    }
+
+    #[test]
+    fn crc16_known_vector() {
+        // CRC-16/XMODEM of "123456789" = 0x31C3
+        assert_eq!(crc16_ccitt(b"123456789"), 0x31C3);
+    }
+
+    #[test]
+    fn lgbl_decrypt_round_trip() {
+        let original = b"Hello, World!";
+        let encrypted: Vec<u8> = original
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| b ^ b"lgbm9lgb"[i % 8])
+            .collect();
+        let decrypted = decrypt_lgbl(&encrypted);
+        assert_eq!(&decrypted[..], original);
+    }
+
+    #[test]
+    fn lgbl_detection() {
+        assert!(is_lgbl(b"lgbl\x00\x01"));
+        assert!(!is_lgbl(b"other"));
+        assert!(!is_lgbl(b"lg"));
+    }
+
+    #[test]
+    fn lgbl_magic_xors_to_h264_start_code() {
+        let encrypted = b"lgbl";
+        let decrypted = decrypt_lgbl(encrypted);
+        assert_eq!(&decrypted[..4], &[0x00, 0x00, 0x00, 0x01]);
     }
 }

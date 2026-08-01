@@ -1,46 +1,27 @@
 use super::ServiceManager;
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use tracing::info;
 
 impl ServiceManager {
     pub(super) fn shutdown(&mut self) {
         self.desktop_displays.shutdown();
 
-        for target in self.targets.values_mut() {
+        let mut targets = self.targets.lock();
+        for target in targets.values_mut() {
             target.stop();
         }
-        self.targets.clear();
+        targets.clear();
 
-        if let Some(fan_controller) = self.fan_controller.take() {
-            info!("Stopping fan controller...");
-            fan_controller.stop();
-        }
+        // Controllers (fan / AIO / RGB / direct-color writer)
+        self.controllers.shutdown();
 
-        if let Some(aio) = self.aio_controller.take() {
-            info!("Stopping AIO controller...");
-            aio.stop();
-        }
-
-        // Drop RGB controller before HID backends so device handles are released cleanly
-        self.rgb_controller = None;
-        self.ipc_state.lock().rgb_controller = None;
-        self.wired_fan_devices = Arc::new(HashMap::new());
-        self.hid_backends.clear();
+        // Drop RGB controller reference from IPC state before clearing the
+        // device registry so device handles are released cleanly.
+        self.ipc.state.lock().rgb_controller = None;
+        self.registry.clear();
 
         self.wireless.stop();
-
-        // Stop OpenRGB server
-        self.openrgb_stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.openrgb_thread.take() {
-            let _ = thread.join();
-        }
-
-        // Stop IPC server
-        self.ipc_stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.ipc_thread.take() {
-            let _ = thread.join();
-        }
+        self.openrgb.shutdown();
+        self.ipc.shutdown();
+        let _ = info!("Daemon shutdown complete.");
     }
 }

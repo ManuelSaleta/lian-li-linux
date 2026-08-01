@@ -10,7 +10,7 @@
 use crate::traits::{AioDevice, FanDevice, RgbDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use lianli_transport::HidBackend;
+use lianli_transport::RusbHid;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -60,6 +60,15 @@ impl Galahad2TrinityModel {
             Self::Regular => "Galahad II Trinity",
         }
     }
+
+    /// Per-variant pump RPM envelope.
+    pub fn pump_envelope(&self) -> lianli_shared::aio::PumpEnvelope {
+        use lianli_shared::aio::PumpEnvelope;
+        match self {
+            Self::Performance => PumpEnvelope::GALAHAD2_PERFORMANCE,
+            Self::Regular => PumpEnvelope::GALAHAD2_REGULAR,
+        }
+    }
 }
 
 /// Handshake response data.
@@ -74,16 +83,17 @@ pub struct Galahad2Handshake {
 /// Provides pump + fan speed control and RGB/LED effects.
 /// Does NOT have LCD or coolant temp sensor.
 pub struct Galahad2TrinityController {
-    device: Arc<Mutex<HidBackend>>,
+    device: Arc<Mutex<RusbHid>>,
     model: Galahad2TrinityModel,
     handshake_cache: Mutex<Option<(Galahad2Handshake, Instant)>>,
     mb_sync: AtomicBool,
+    firmware_version: Mutex<Option<String>>,
 }
 
 const HANDSHAKE_REFRESH: Duration = Duration::from_millis(500);
 
 impl Galahad2TrinityController {
-    pub fn new(device: Arc<Mutex<HidBackend>>, pid: u16) -> Result<Self> {
+    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
         let model = Galahad2TrinityModel::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown Galahad2 Trinity PID: {pid:#06x}"))?;
 
@@ -92,6 +102,7 @@ impl Galahad2TrinityController {
             model,
             handshake_cache: Mutex::new(None),
             mb_sync: AtomicBool::new(false),
+            firmware_version: Mutex::new(None),
         };
 
         ctrl.initialize()?;
@@ -109,7 +120,10 @@ impl Galahad2TrinityController {
         );
 
         match self.read_firmware(INIT_READ_TIMEOUT_MS) {
-            Ok(fw) => info!("  Firmware: {fw}"),
+            Ok(fw) => {
+                info!("  Firmware: {fw}");
+                *self.firmware_version.lock() = Some(fw);
+            }
             Err(e) => warn!("  Failed to read firmware: {e}"),
         }
 
@@ -147,6 +161,13 @@ impl Galahad2TrinityController {
         // (bytes 6-7 and 8-9 respectively), regardless of the data_len header field.
         if n < HEADER_LEN + 4 {
             bail!("Galahad2 Trinity: handshake response too short ({n} bytes)");
+        }
+
+        if buf[1] != CMD_HANDSHAKE {
+            bail!(
+                "Galahad2 Trinity: handshake response mismatch (expected 0x{CMD_HANDSHAKE:02x}, got 0x{:02x})",
+                buf[1]
+            );
         }
 
         let data = &buf[HEADER_LEN..];
@@ -202,6 +223,10 @@ impl Galahad2TrinityController {
         self.model
     }
 
+    pub fn firmware_str(&self) -> Option<String> {
+        self.firmware_version.lock().clone()
+    }
+
     /// Set pump LED effect.
     ///
     /// Uses CMD_SET_PUMP_LIGHT (0x83) with 19-byte payload:
@@ -247,7 +272,7 @@ impl Galahad2TrinityController {
         let mut payload = [0u8; 19];
         payload[0] = scope_byte;
         payload[1] = mode_byte;
-        payload[2] = effect.brightness.min(4);
+        payload[2] = lianli_shared::rgb::brightness_scale(effect.brightness);
         payload[3] = effect.speed.min(4);
 
         for (i, color) in effect.colors.iter().take(4).enumerate() {
@@ -299,7 +324,7 @@ impl Galahad2TrinityController {
 
         let mut payload = [0u8; 20];
         payload[0] = mode_byte;
-        payload[1] = effect.brightness.min(4);
+        payload[1] = lianli_shared::rgb::brightness_scale(effect.brightness);
         payload[2] = effect.speed.min(4);
 
         for (i, color) in effect.colors.iter().take(4).enumerate() {
@@ -358,9 +383,7 @@ impl Galahad2TrinityController {
     }
 }
 
-fn duty_to_percent(duty: u8) -> u8 {
-    ((duty as u32 * 100) / 255) as u8
-}
+use lianli_shared::fan::duty_to_percent;
 
 impl FanDevice for Galahad2TrinityController {
     fn set_fan_speed(&self, _slot: u8, duty: u8) -> Result<()> {
@@ -401,10 +424,19 @@ impl FanDevice for Galahad2TrinityController {
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
-        let pwm = duty_to_percent(duty);
+        let mut pwm = duty_to_percent(duty);
+        let envelope = self.model.pump_envelope();
+        let min_pwm = envelope.min_pwm();
+        if pwm < min_pwm {
+            debug!("Pump PWM {pwm}% clamped to variant floor {min_pwm}%");
+            pwm = min_pwm;
+        }
         let mb = self.mb_sync.load(Ordering::Relaxed) as u8;
         self.send_write_command(CMD_SET_PUMP_PWM, &[mb, pwm])?;
-        debug!("Set pump PWM to {pwm}% (mb_sync={mb})");
+        debug!(
+            "Set pump PWM to {pwm}% (model={}, mb_sync={mb})",
+            self.model.name()
+        );
         Ok(())
     }
 }
@@ -416,59 +448,6 @@ impl AioDevice for Galahad2TrinityController {
 
     fn read_coolant_temp(&self) -> Result<f32> {
         bail!("Galahad2 Trinity does not have a coolant temperature sensor")
-    }
-}
-
-/// Allows sharing a single `Galahad2TrinityController` instance across
-/// the fan control loop and the RGB controller via `Arc`.
-impl FanDevice for Arc<Galahad2TrinityController> {
-    fn set_fan_speed(&self, slot: u8, duty: u8) -> Result<()> {
-        (**self).set_fan_speed(slot, duty)
-    }
-    fn set_fan_speeds(&self, duties: &[u8]) -> Result<()> {
-        (**self).set_fan_speeds(duties)
-    }
-    fn read_fan_rpm(&self) -> Result<Vec<u16>> {
-        (**self).read_fan_rpm()
-    }
-    fn fan_slot_count(&self) -> u8 {
-        (**self).fan_slot_count()
-    }
-    fn supports_mb_sync(&self) -> bool {
-        (**self).supports_mb_sync()
-    }
-    fn set_mb_rpm_sync(&self, port: u8, sync: bool) -> Result<()> {
-        (**self).set_mb_rpm_sync(port, sync)
-    }
-    fn has_pump_control(&self) -> bool {
-        (**self).has_pump_control()
-    }
-    fn set_pump_speed(&self, duty: u8) -> Result<()> {
-        (**self).set_pump_speed(duty)
-    }
-}
-
-impl RgbDevice for Arc<Galahad2TrinityController> {
-    fn device_name(&self) -> String {
-        (**self).device_name()
-    }
-    fn supported_modes(&self) -> Vec<RgbMode> {
-        (**self).supported_modes()
-    }
-    fn zone_info(&self) -> Vec<RgbZoneInfo> {
-        (**self).zone_info()
-    }
-    fn set_zone_effect(&self, zone: u8, effect: &RgbEffect) -> Result<()> {
-        (**self).set_zone_effect(zone, effect)
-    }
-    fn supported_scopes(&self) -> Vec<Vec<RgbScope>> {
-        (**self).supported_scopes()
-    }
-    fn supports_mb_rgb_sync(&self) -> bool {
-        (**self).supports_mb_rgb_sync()
-    }
-    fn set_mb_rgb_sync(&self, enabled: bool) -> Result<()> {
-        (**self).set_mb_rgb_sync(enabled)
     }
 }
 
@@ -541,5 +520,47 @@ impl RgbDevice for Galahad2TrinityController {
         self.set_fan_light(&dummy, source_mcu, false)?;
         debug!("Set MB RGB sync: enabled={enabled}");
         Ok(())
+    }
+}
+
+/// Driver entry point for the Galahad II Trinity AIO.
+pub struct Galahad2TrinityDriver;
+
+impl crate::registry::DeviceDriver for Galahad2TrinityDriver {
+    fn family(&self) -> lianli_shared::device_id::DeviceFamily {
+        lianli_shared::device_id::DeviceFamily::Galahad2Trinity
+    }
+
+    fn open(
+        &self,
+        ctx: &crate::registry::OpenContext,
+    ) -> anyhow::Result<crate::registry::OpenedDevice> {
+        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
+            ctx.device.clone(),
+            ctx.hid_usage_page,
+            ctx.vid,
+            ctx.pid,
+            ctx.bus,
+            ctx.device.port_numbers().unwrap_or_default(),
+        )?;
+        let ctrl = std::sync::Arc::new(Galahad2TrinityController::new(backend.clone(), ctx.pid)?);
+        let model = ctrl.model().name().to_string();
+        let firmware = ctrl.firmware_str();
+        Ok(crate::registry::OpenedDevice {
+            id: ctx.device_id(),
+            family: lianli_shared::device_id::DeviceFamily::Galahad2Trinity,
+            capabilities: lianli_shared::device_id::DeviceFamily::Galahad2Trinity.capabilities(),
+            transport_kind: lianli_shared::device_id::TransportKind::Hid,
+            model_name: model,
+            firmware,
+            fan: Some(Box::new(std::sync::Arc::clone(&ctrl))),
+            lcd: None,
+            rgb: vec![(
+                String::new(),
+                ctrl.clone() as Arc<dyn crate::traits::RgbDevice>,
+            )],
+            aio: Some(Box::new(ctrl)),
+            shared_hid: Some(backend),
+        })
     }
 }

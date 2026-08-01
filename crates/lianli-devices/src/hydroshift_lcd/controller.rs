@@ -9,38 +9,143 @@ use super::{AioHandshake, AioLcdVariant, LcdControlMode, ScreenRotation};
 use crate::traits::{AioDevice, FanDevice, LcdDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use lianli_transport::HidBackend;
+use lianli_transport::RusbHid;
 use parking_lot::Mutex;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Used by `stream_h264_reader` to split the pipe byte stream into complete frames.
-fn find_au_split(data: &[u8]) -> Option<usize> {
+/// Remap fan PWM for HydroShift LCD RGB variant: Map(10..100 → 12..95).
+fn remap_fan_pwm_rgb(pwm: u8) -> u8 {
+    if pwm < 10 {
+        return 0;
+    }
+    let scaled = ((pwm as u32 - 10) * 83) / 90;
+    (12 + scaled as u8).min(95)
+}
+
+/// Used by `stream_h264_reader` to split the pipe byte stream into complete
+/// access units (AUs).
+///
+/// Since Rust reads from a continuous pipe, we must detect AU boundaries
+/// ourselves.
+///
+/// Boundary policy: if AUD NALs (type 9) are present, they
+/// alone delimit AUs. Otherwise, primary coded picture NALs (types 1 and 5)
+/// are the boundary markers. This is determined lazily from the first
+/// boundary-eligible NAL encountered.
+pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
+    let mut split_on_aud: Option<bool> = None;
     let mut found_first = false;
     let mut i = 0;
-    while i + 4 < data.len() {
-        if data[i..i + 4] == [0, 0, 0, 1] {
-            let nal_type = data[i + 4] & 0x1F;
-            if matches!(nal_type, 1 | 5 | 9) {
-                if found_first {
-                    return Some(i);
-                }
-                found_first = true;
+    while i + 3 < data.len() {
+        let (sc_len, nal_type) = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            if i + 4 >= data.len() {
+                break;
             }
+            (4, data[i + 4] & 0x1F)
+        } else if data[i..].starts_with(&[0, 0, 1]) {
+            (3, data[i + 3] & 0x1F)
+        } else {
+            i += 1;
+            continue;
+        };
+
+        if split_on_aud.is_none() && matches!(nal_type, 1 | 5 | 9) {
+            split_on_aud = Some(nal_type == 9);
         }
-        i += 1;
+
+        let is_boundary = match split_on_aud {
+            Some(true) => nal_type == 9,
+            Some(false) => matches!(nal_type, 1 | 5),
+            None => false,
+        };
+
+        if is_boundary {
+            if found_first {
+                return Some(i);
+            }
+            found_first = true;
+        }
+
+        i += sc_len + 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_au_split;
+
+    const SC4: &[u8] = &[0, 0, 0, 1];
+
+    fn nal(typ: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(SC4);
+        v.push(typ);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn no_aud_splits_at_second_slice() {
+        // [SPS][PPS][IDR] [P] [P]
+        let mut buf = Vec::new();
+        buf.extend(nal(7, &[1, 2])); // SPS
+        buf.extend(nal(8, &[3, 4])); // PPS
+        buf.extend(nal(5, &[5, 6])); // IDR (boundary #1)
+        let p1_off = buf.len();
+        buf.extend(nal(1, &[7, 8])); // P-slice (boundary #2)
+        buf.extend(nal(1, &[9, 10])); // P-slice
+
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, p1_off);
+        // Drained AU = [SPS PPS IDR] — the complete first AU
+    }
+
+    #[test]
+    fn aud_delimited_splits_at_next_aud() {
+        // [AUD][SPS][PPS][IDR] [AUD][P]
+        let mut buf = Vec::new();
+        buf.extend(nal(9, &[0x10])); // AUD (boundary #1)
+        buf.extend(nal(7, &[1, 2])); // SPS — NOT a boundary
+        buf.extend(nal(8, &[3, 4])); // PPS — NOT a boundary
+        buf.extend(nal(5, &[5, 6])); // IDR — NOT a boundary (AUD policy active)
+        let aud2_off = buf.len();
+        buf.extend(nal(9, &[0x10])); // AUD (boundary #2)
+        buf.extend(nal(1, &[7, 8])); // P-slice
+
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, aud2_off);
+        // Drained AU = [AUD SPS PPS IDR] — complete, includes the IDR
+    }
+
+    #[test]
+    fn three_byte_start_code() {
+        let mut buf = Vec::new();
+        buf.extend(&[0, 0, 0, 1, 5, 1]); // 4-byte SC + IDR
+        let split_off = buf.len();
+        buf.extend(&[0, 0, 1, 1, 2]); // 3-byte SC + P-slice
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, split_off);
+    }
+
+    #[test]
+    fn no_split_in_partial_buffer() {
+        // Only one slice NAL — not enough for a split
+        let buf = nal(5, &[1, 2, 3]);
+        assert!(find_au_split(&buf).is_none());
+    }
 }
 
 /// HydroShift LCD / Galahad2 LCD AIO controller.
 ///
 /// Provides pump + fan speed control, coolant temperature reading, and LCD streaming.
 pub struct HydroShiftLcdController {
-    device: Arc<Mutex<HidBackend>>,
+    device: Arc<Mutex<RusbHid>>,
     variant: AioLcdVariant,
     last_handshake: Option<AioHandshake>,
     brightness: u8,
@@ -50,10 +155,11 @@ pub struct HydroShiftLcdController {
     firmware_string: Option<String>,
     firmware_version: Option<(u32, u32)>,
     last_recovery_attempt: Option<Instant>,
+    drain_stop: Arc<AtomicBool>,
 }
 
 impl HydroShiftLcdController {
-    pub fn new(device: Arc<Mutex<HidBackend>>, pid: u16) -> Result<Self> {
+    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
 
@@ -68,6 +174,7 @@ impl HydroShiftLcdController {
             firmware_string: None,
             firmware_version: None,
             last_recovery_attempt: None,
+            drain_stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -75,7 +182,9 @@ impl HydroShiftLcdController {
         if self.initialized {
             return Ok(());
         }
-        info!("Initializing {}", self.variant.name());
+        let name = self.variant.name();
+        info!("Initializing {name} — waiting 10s for device to settle");
+        thread::sleep(Duration::from_secs(10));
 
         match self.handshake() {
             Ok(hs) => {
@@ -87,7 +196,41 @@ impl HydroShiftLcdController {
             Err(e) => warn!("  Handshake failed: {e:#}"),
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        if self.firmware_version.is_none() {
+            for attempt in 1..=30u32 {
+                match self.read_firmware_internal(INIT_READ_TIMEOUT_MS) {
+                    Ok(fw) => {
+                        self.firmware_version = parse_firmware_version(&fw);
+                        self.firmware_string = Some(fw.clone());
+                        info!("AIO LCD firmware for {name}: {fw}");
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt % 5 == 0 {
+                            warn!("Firmware read attempt {attempt}/30 failed: {e:#}");
+                        }
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+
+        let device = Arc::clone(&self.device);
+        let stop = Arc::clone(&self.drain_stop);
+        thread::spawn(move || {
+            let mut buf = [0u8; B_PACKET_SIZE];
+            while !stop.load(Ordering::Relaxed) {
+                let mut dev = device.lock();
+                let n = dev.read_timeout(&mut buf, 20).unwrap_or(0);
+                drop(dev);
+                if n > 0 {
+                    debug!("drain: discarded {n} stale bytes (cmd={:#04x})", buf[1]);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        thread::sleep(Duration::from_secs(2));
 
         if let Err(e) = self.apply_lcd_settings() {
             warn!("  apply_lcd_settings failed: {e:#}");
@@ -182,7 +325,8 @@ impl HydroShiftLcdController {
     }
 
     pub fn send_jpeg(&self, jpeg_data: &[u8]) -> Result<()> {
-        self.send_chunked(CMD_SEND_JPEG, jpeg_data)
+        let (report_id, pkt_size, max_payload) = (REPORT_ID_B, B_PACKET_SIZE, B_MAX_PAYLOAD);
+        self.send_chunked_with(CMD_SEND_JPEG, jpeg_data, report_id, pkt_size, max_payload)
     }
 
     pub fn send_h264_frame(&self, frame: &[u8]) -> Result<()> {
@@ -287,10 +431,14 @@ impl HydroShiftLcdController {
                 return false;
             }
             if n > A_HEADER_LEN && buf[1] == CMD_RESET_DEVICE {
-                match buf[A_HEADER_LEN] {
-                    1 => return true,
-                    2 => continue,
-                    _ => {}
+                if buf[A_HEADER_LEN] == 1 {
+                    return true;
+                } else {
+                    warn!(
+                        "AIO LCD: reset device returned byte {} (expected 1)",
+                        buf[A_HEADER_LEN]
+                    );
+                    return false;
                 }
             }
         }
@@ -300,10 +448,7 @@ impl HydroShiftLcdController {
 
     pub fn check_and_recover_lcd(&mut self) -> Result<crate::traits::RecoveryAction> {
         use crate::traits::RecoveryAction;
-        if !self.use_c_command {
-            return Ok(RecoveryAction::NoChange);
-        }
-        const RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
+        const RECOVERY_COOLDOWN: Duration = Duration::from_secs(2);
         if self
             .last_recovery_attempt
             .map(|t| t.elapsed() < RECOVERY_COOLDOWN)
@@ -398,14 +543,14 @@ impl HydroShiftLcdController {
         Ok(buf[..n].to_vec())
     }
 
-    /// Public write_a_command. Locks `HidBackend` for the duration of the call —
+    /// Public write_a_command. Locks `RusbHid` for the duration of the call —
     /// do NOT call when the device is already locked.
     pub fn write_a_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
         self.write_a_command_internal(&mut *dev, cmd, data)
     }
 
-    fn write_a_command_internal(&self, dev: &mut HidBackend, cmd: u8, data: &[u8]) -> Result<()> {
+    fn write_a_command_internal(&self, dev: &mut RusbHid, cmd: u8, data: &[u8]) -> Result<()> {
         let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
         if data.len() > max_payload {
             bail!(
@@ -507,8 +652,51 @@ impl HydroShiftLcdController {
         Ok(())
     }
 
-    fn read_ack(&self, dev: &mut HidBackend, label: &str, timeout_ms: i32) {
-        let mut buf = [0u8; 512];
+    fn send_chunked_with(
+        &self,
+        cmd: u8,
+        data: &[u8],
+        report_id: u8,
+        pkt_size: usize,
+        max_payload: usize,
+    ) -> Result<()> {
+        let total_size = data.len();
+        let mut offset = 0;
+        let mut packet_num: u32 = 0;
+        let mut dev = self.device.lock();
+
+        loop {
+            let remaining = total_size.saturating_sub(offset);
+            let chunk_len = remaining.min(max_payload);
+
+            let pkt = build_lcd_packet(
+                report_id,
+                pkt_size,
+                cmd,
+                total_size as u32,
+                packet_num,
+                if chunk_len > 0 {
+                    &data[offset..offset + chunk_len]
+                } else {
+                    &[]
+                },
+            );
+
+            dev.write(&pkt).context("AIO LCD: write LCD command")?;
+            offset += chunk_len;
+            packet_num += 1;
+
+            if offset >= total_size {
+                break;
+            }
+        }
+
+        self.read_ack(&mut dev, "send_chunked_with", ACK_TIMEOUT_MS);
+        Ok(())
+    }
+
+    fn read_ack(&self, dev: &mut RusbHid, label: &str, timeout_ms: i32) {
+        let mut buf = [0u8; B_PACKET_SIZE];
         if let Err(e) = dev.read_timeout(&mut buf, timeout_ms) {
             debug!("AIO LCD: {label} ack: {e:#}");
         }
@@ -517,9 +705,13 @@ impl HydroShiftLcdController {
 
 impl FanDevice for HydroShiftLcdController {
     fn set_fan_speed(&self, _slot: u8, duty: u8) -> Result<()> {
-        let pwm = duty_to_percent(duty);
+        let mut pwm = duty_to_percent(duty);
+        // RGB variant remap: Map(speed, 10..100 → 12..95)
+        if matches!(self.variant, super::AioLcdVariant::HydroShiftLcdRgb) {
+            pwm = remap_fan_pwm_rgb(pwm);
+        }
         self.write_a_command(CMD_SET_FAN_PWM, &[0x00, pwm])?;
-        debug!("Set fan PWM to {pwm}%");
+        debug!("Set fan PWM to {pwm}% (variant={})", self.variant.name());
         Ok(())
     }
 
@@ -539,39 +731,51 @@ impl FanDevice for HydroShiftLcdController {
     }
 
     fn fan_slot_count(&self) -> u8 {
-        1
+        if self.variant.has_fan_control() {
+            1
+        } else {
+            0
+        }
     }
 
     fn has_pump_control(&self) -> bool {
         true
     }
 
+    fn poll_coolant_temp(&self) -> Option<f32> {
+        self.last_handshake
+            .as_ref()
+            .filter(|hs| {
+                // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
+                !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
+            })
+            .map(|hs| hs.coolant_temp)
+    }
+
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
-        let pwm = duty_to_percent(duty);
+        let mut pwm = duty_to_percent(duty);
+        let envelope = self.variant.pump_envelope();
+        let min_pwm = envelope.min_pwm();
+        if pwm < min_pwm {
+            debug!("Pump PWM {pwm}% clamped to variant floor {min_pwm}%");
+            pwm = min_pwm;
+        }
         self.write_a_command(CMD_SET_PUMP_PWM, &[0x00, pwm])?;
-        debug!("Set pump PWM to {pwm}%");
+        debug!(
+            "Set pump PWM to {pwm}% (variant={}, max_rpm={})",
+            self.variant.name(),
+            envelope.max_rpm
+        );
         Ok(())
     }
-}
 
-impl FanDevice for Arc<HydroShiftLcdController> {
-    fn set_fan_speed(&self, slot: u8, duty: u8) -> Result<()> {
-        (**self).set_fan_speed(slot, duty)
-    }
-    fn set_fan_speeds(&self, duties: &[u8]) -> Result<()> {
-        (**self).set_fan_speeds(duties)
-    }
-    fn read_fan_rpm(&self) -> Result<Vec<u16>> {
-        (**self).read_fan_rpm()
-    }
-    fn fan_slot_count(&self) -> u8 {
-        (**self).fan_slot_count()
-    }
-    fn has_pump_control(&self) -> bool {
-        (**self).has_pump_control()
-    }
-    fn set_pump_speed(&self, duty: u8) -> Result<()> {
-        (**self).set_pump_speed(duty)
+    fn set_mb_rpm_sync(&self, _port: u8, sync: bool) -> Result<()> {
+        let source: u8 = if sync { 0x01 } else { 0x00 };
+        let envelope = self.variant.pump_envelope();
+        let pwm = envelope.min_pwm();
+        self.write_a_command(CMD_SET_PUMP_PWM, &[source, pwm])?;
+        debug!("Set pump MB sync={sync} (variant={})", self.variant.name());
+        Ok(())
     }
 }
 
@@ -590,6 +794,12 @@ impl AioDevice for HydroShiftLcdController {
             Some(_) => bail!("Coolant temperature sensor reports invalid"),
             None => bail!("No handshake data available"),
         }
+    }
+}
+
+impl Drop for HydroShiftLcdController {
+    fn drop(&mut self) {
+        self.drain_stop.store(true, Ordering::Relaxed);
     }
 }
 

@@ -1,11 +1,11 @@
 use super::controller::WirelessController;
 use super::discovery::poll_and_discover;
 use super::{RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, USB_CMD_SEND_RF};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use lianli_transport::usb::USB_TIMEOUT;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::info;
 
 impl WirelessController {
     pub fn bind_device(&self, mac: &[u8; 6]) -> Result<()> {
@@ -41,6 +41,7 @@ impl WirelessController {
                 rx,
                 &self.discovered_devices,
                 &self.mobo_pwm,
+                &self.fg_sync,
                 &self.master_mac,
             );
 
@@ -59,11 +60,11 @@ impl WirelessController {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                warn!(
+                bail!(
                     "bind convergence for {:02x?} timed out after {attempts} attempt(s); observed={:?}",
-                    mac, observed
+                    mac,
+                    observed
                 );
-                return Ok(());
             }
         }
     }
@@ -118,7 +119,7 @@ impl WirelessController {
     fn get_rx_unused(&self) -> u8 {
         let devices = self.discovered_devices.lock();
         let local_mac = *self.master_mac.lock();
-        for rx in 1..15u8 {
+        for rx in 1..14u8 {
             let in_use = devices
                 .iter()
                 .any(|d| d.master_mac == local_mac && d.rx_type == rx);
