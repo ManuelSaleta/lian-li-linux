@@ -66,6 +66,12 @@ async fn ipc_request(method: String, params: Value) -> Result<Value, String> {
     Ok(result)
 }
 
+/// Return the application version from Cargo.toml (resolved at compile time).
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Combined Ping + ListDevices + GetTelemetry, used by the 2s polling loop.
 #[tauri::command]
 async fn poll_daemon() -> Result<PollResult, String> {
@@ -184,6 +190,7 @@ pub fn run() {
             list_system_fonts,
             open_editor_window,
             open_browser_window,
+            app_version,
         ])
         .setup(|app| {
             if let Some(win) = app.get_webview_window("main") {

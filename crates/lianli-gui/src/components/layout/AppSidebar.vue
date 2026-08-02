@@ -1,11 +1,17 @@
 <script setup lang="ts">
+import { ref, onMounted } from "vue";
 import { RouterLink } from "vue-router";
+import { invoke } from "@tauri-apps/api/core";
 import * as icons from "lucide-vue-next";
 import { MAIN_ROUTES } from "@/router";
 import { useDaemonStore } from "@/stores/daemon";
 
 const daemon = useDaemonStore();
-const APP_VERSION = "0.6.1";
+const APP_VERSION = ref("...");
+
+onMounted(async () => {
+  APP_VERSION.value = await invoke<string>("app_version");
+});
 
 // Map icon name strings from the route table to Lucide components.
 function iconFor(name: string) {

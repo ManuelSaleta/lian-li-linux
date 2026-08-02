@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink } from "lucide-vue-next";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { useDaemonStore } from "@/stores/daemon";
@@ -12,6 +13,11 @@ const REPO_URL = "https://github.com/sgtaziz/lian-li-linux";
 const daemon = useDaemonStore();
 const config = useConfigStore();
 const thermal = useThermalStore();
+
+const appVersion = ref("...");
+onMounted(async () => {
+  appVersion.value = await invoke<string>("app_version");
+});
 
 const rgb = computed(() => config.ensureRgb());
 const fanCfg = computed(() => config.ensureFans());
@@ -194,7 +200,7 @@ function onDefaultFps(v: number | null) {
       </div>
       <p class="about-line">
         Open-source Linux replacement for L-Connect 3
-        <span class="muted"> · v0.6.1</span>
+        <span class="muted"> · v{{ appVersion }}</span>
       </p>
       <button class="repo-link" @click="openUrl(REPO_URL)">
         <ExternalLink :size="13" /> github.com/sgtaziz/lian-li-linux
