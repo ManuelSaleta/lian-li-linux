@@ -561,6 +561,7 @@ impl crate::registry::DeviceDriver for Galahad2TrinityDriver {
             )],
             aio: Some(Box::new(ctrl)),
             shared_hid: Some(backend),
+            shared_usb: None,
         })
     }
 }

@@ -534,6 +534,7 @@ impl crate::registry::DeviceDriver for TlLcdDriver {
             rgb: Vec::new(),
             aio: None,
             shared_hid: None,
+            shared_usb: None,
         })
     }
 }

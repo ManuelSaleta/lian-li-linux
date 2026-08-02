@@ -178,6 +178,7 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
             )],
             aio: Some(Box::new(lcd_arc)),
             shared_hid: Some(backend),
+            shared_usb: None,
         })
     }
 }

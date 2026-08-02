@@ -162,6 +162,7 @@ pub struct DeviceRegistry {
     /// Shared HID backends keyed by device ID — allows fan, RGB, and LCD
     /// controllers for the same physical device to share one USB handle.
     pub hid_backends: HashMap<String, Arc<Mutex<RusbHid>>>,
+    pub usb_backends: HashMap<String, lianli_devices::registry::SharedUsb>,
     /// Hot-plug detection: device IDs seen at the last topology scan.
     pub last_wired_ids: HashSet<String>,
     /// Cached USB device list from `enumerate_devices()` — refreshed every
@@ -177,6 +178,7 @@ impl DeviceRegistry {
             fan_device_info: Vec::new(),
             fan_devices: Arc::new(HashMap::new()),
             hid_backends: HashMap::new(),
+            usb_backends: HashMap::new(),
             last_wired_ids: HashSet::new(),
             cached_usb_devices: Vec::new(),
             tl_lcd_port_index: HashMap::new(),
@@ -188,6 +190,7 @@ impl DeviceRegistry {
         self.fan_device_info.clear();
         self.fan_devices = Arc::new(HashMap::new());
         self.hid_backends.clear();
+        self.usb_backends.clear();
         self.cached_usb_devices.clear();
         // Keep `last_wired_ids` and `tl_lcd_port_index` — they describe what
         // *should* be plugged in, not what currently is.

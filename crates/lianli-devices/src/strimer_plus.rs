@@ -454,6 +454,7 @@ impl crate::registry::DeviceDriver for StrimerPlusDriver {
             )],
             aio: None,
             shared_hid: Some(backend),
+            shared_usb: None,
         })
     }
 }

@@ -193,6 +193,7 @@ impl crate::registry::DeviceDriver for WinUsbLedDriver {
             )],
             aio: None,
             shared_hid: None,
+            shared_usb: None,
         })
     }
 }

@@ -265,8 +265,22 @@ impl ServiceManager {
                         let device = Device::clone(candidate.usb_device.as_ref().unwrap());
                         Slv3LcdDevice::new(device).map(LcdBackend::Slv3)
                     }
-                    DeviceFamily::HydroShift2Lcd
-                    | DeviceFamily::HydroShift2OledCurveLcd
+                    DeviceFamily::HydroShift2Lcd => {
+                        if let Some(transport) =
+                            self.registry.usb_backends.get(&candidate.device_id)
+                        {
+                            lianli_devices::winusb::lcd::WinUsbLcdDevice::from_shared_transport(
+                                Arc::clone(transport),
+                                candidate.pid,
+                            )
+                            .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
+                        } else {
+                            let device = Device::clone(candidate.usb_device.as_ref().unwrap());
+                            lianli_devices::winusb::lcd::open_for_pid(candidate.pid, device)
+                                .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
+                        }
+                    }
+                    DeviceFamily::HydroShift2OledCurveLcd
                     | DeviceFamily::Lancool207
                     | DeviceFamily::UniversalScreen => {
                         let device = Device::clone(candidate.usb_device.as_ref().unwrap());

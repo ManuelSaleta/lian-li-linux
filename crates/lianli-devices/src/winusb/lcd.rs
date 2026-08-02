@@ -105,6 +105,27 @@ impl WinUsbLcdDevice {
         Arc::clone(&self.transport)
     }
 
+    pub fn from_shared_transport(transport: SharedTransport, pid: u16) -> Result<Self> {
+        let (screen, _family, name) = screen_for_pid(pid)
+            .ok_or_else(|| anyhow::anyhow!("unknown WinUSB LCD PID {:#06x}", pid))?;
+        info!("{name} attached via shared USB transport");
+        Ok(Self {
+            transport,
+            builder: PacketBuilder::new(),
+            screen,
+            _name: name.to_string(),
+            bus: 0,
+            address: 0,
+            serial: String::new(),
+            initialized: false,
+            last_read_ok: false,
+            consecutive_failures: 0,
+            h264_chunk_size: Self::DEFAULT_H264_CHUNK_SIZE,
+            device_gone: false,
+            firmware: None,
+        })
+    }
+
     pub fn transport_release(&self) {}
 
     #[inline]
@@ -669,6 +690,12 @@ impl crate::registry::DeviceDriver for WinUsbLcdDriver {
             (None, None, Vec::new())
         };
 
+        let shared_usb = if matches!(ctx.pid, 0xA021 | 0xA034) {
+            Some(lcd.shared_transport())
+        } else {
+            None
+        };
+
         Ok(crate::registry::OpenedDevice {
             id: ctx.device_id(),
             family,
@@ -681,6 +708,7 @@ impl crate::registry::DeviceDriver for WinUsbLcdDriver {
             rgb,
             aio,
             shared_hid: None,
+            shared_usb,
         })
     }
 }

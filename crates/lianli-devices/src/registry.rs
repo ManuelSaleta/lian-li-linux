@@ -70,6 +70,7 @@ pub struct OpenedDevice {
     /// can cache it and hand the same backend to a sibling LCD controller
     /// later. `None` for USB-bulk devices and LCD-only families.
     pub shared_hid: Option<SharedHid>,
+    pub shared_usb: Option<SharedUsb>,
 }
 
 impl OpenedDevice {
@@ -128,3 +129,5 @@ pub fn open_device(family: DeviceFamily, ctx: &OpenContext) -> Option<Result<Ope
 /// `Arc<Mutex<RusbHid>>`. Re-exported here so driver modules don't need to
 /// spell out the full path.
 pub type SharedHid = Arc<Mutex<lianli_transport::RusbHid>>;
+
+pub type SharedUsb = Arc<Mutex<lianli_transport::RusbBulk>>;

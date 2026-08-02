@@ -66,6 +66,7 @@ impl DeviceDriver for Ene6k77Driver {
             rgb,
             aio: None,
             shared_hid: Some(backend),
+            shared_usb: None,
         })
     }
 }

@@ -9,6 +9,7 @@ use lianli_shared::fan::duty_to_percent;
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbZoneInfo};
 use lianli_transport::usb::{RusbBulk, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
@@ -57,6 +58,7 @@ pub struct H2AioController {
     last_fan_duties: Mutex<[u8; 3]>,
     last_pump_duty: Mutex<u8>,
     is_square: bool,
+    is_wireless: AtomicBool,
 }
 
 impl H2AioController {
@@ -67,13 +69,21 @@ impl H2AioController {
             last_fan_duties: Mutex::new([50, 50, 50]),
             last_pump_duty: Mutex::new(128),
             is_square: pid == 0xA034,
+            is_wireless: AtomicBool::new(false),
         };
         wake(&transport);
         tracing::info!("HydroShift II control channel opened (shared transport)");
         ctrl
     }
 
-    /// Read telemetry via GetH2Params (0xFA).
+    pub fn set_wireless_mode(&self, enabled: bool) {
+        self.is_wireless.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_wireless_mode(&self) -> bool {
+        self.is_wireless.load(Ordering::Relaxed)
+    }
+
     pub fn get_h2_params(&self) -> Result<H2Params> {
         let header = self.builder.lock().get_h2_params_header_winusb();
         {
@@ -120,6 +130,9 @@ impl H2AioController {
 
     /// Send pump + fan PWM via SyncPumpFan (0xFB).
     pub fn sync_pump_fan(&self, pump_pwm: u16, fan_duties: [u8; 3]) -> Result<()> {
+        if self.is_wireless.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let header = self.builder.lock().sync_pump_fan_header_winusb(
             pump_pwm,
             fan_duties[0],

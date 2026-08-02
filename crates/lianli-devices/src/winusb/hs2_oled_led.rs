@@ -353,6 +353,7 @@ impl crate::registry::DeviceDriver for Hs2OledLedDriver {
             )],
             aio: Some(Box::new(ctrl)),
             shared_hid: None,
+            shared_usb: None,
         })
     }
 }

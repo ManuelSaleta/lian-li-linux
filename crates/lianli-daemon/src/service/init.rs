@@ -241,6 +241,12 @@ impl ServiceManager {
                     if let Some(backend) = shared_hid {
                         self.registry.hid_backends.insert(base_id.clone(), backend);
                     }
+                    let shared_usb = opened.shared_usb.take();
+                    if let Some(transport) = shared_usb {
+                        self.registry
+                            .usb_backends
+                            .insert(base_id.clone(), transport);
+                    }
                     self.register_opened_device(
                         base_id,
                         name,

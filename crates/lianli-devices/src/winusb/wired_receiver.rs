@@ -737,6 +737,7 @@ impl crate::registry::DeviceDriver for WiredReceiverDriver {
             )],
             aio: None,
             shared_hid: None,
+            shared_usb: None,
         })
     }
 }

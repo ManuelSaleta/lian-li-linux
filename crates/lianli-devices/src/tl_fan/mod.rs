@@ -64,6 +64,7 @@ impl DeviceDriver for TlFanDriver {
             rgb,
             aio: None,
             shared_hid: Some(backend),
+            shared_usb: None,
         })
     }
 }
