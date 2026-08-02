@@ -319,7 +319,7 @@ mod tests {
             &mut cache,
             &sensors,
         );
-        assert!(rpm >= 2048 && rpm <= 2054, "got {rpm}");
+        assert!((2048..=2054).contains(&rpm), "got {rpm}");
     }
 
     #[test]

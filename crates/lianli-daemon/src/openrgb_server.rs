@@ -135,7 +135,7 @@ fn run_server(
                 let rgb = Arc::clone(&rgb);
                 let buf = Arc::clone(&direct_buffer);
                 let count = Arc::clone(&client_count);
-                let stop = Arc::clone(&stop_flag);
+                let stop = Arc::clone(stop_flag);
 
                 let prev = count.fetch_add(1, Ordering::Relaxed);
                 if prev == 0 {

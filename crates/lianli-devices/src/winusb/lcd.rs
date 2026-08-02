@@ -453,8 +453,8 @@ impl WinUsbLcdDevice {
         use image::{ImageBuffer, Rgb, Rgba};
         use std::io::Cursor;
 
-        let w = self.screen.width as u32;
-        let h = self.screen.height as u32;
+        let w = self.screen.width;
+        let h = self.screen.height;
 
         // Clear PNG overlay layer
         let png_img = ImageBuffer::from_pixel(w, h, Rgba([0u8, 0, 0, 0]));
@@ -671,21 +671,15 @@ impl crate::registry::DeviceDriver for WinUsbLcdDriver {
 
         let (fan, aio, rgb) = if matches!(ctx.pid, 0xA021 | 0xA034) {
             let shared = lcd.shared_transport();
-            match super::h2_aio::H2AioController::new(shared, ctx.pid) {
-                ctrl => {
-                    let ctrl = std::sync::Arc::new(ctrl);
-                    (
-                        Some(Box::new(std::sync::Arc::clone(&ctrl))
-                            as Box<dyn crate::traits::FanDevice>),
-                        Some(Box::new(std::sync::Arc::clone(&ctrl))
-                            as Box<dyn crate::traits::AioDevice>),
-                        vec![(
-                            String::new(),
-                            Arc::new(ctrl) as Arc<dyn crate::traits::RgbDevice>,
-                        )],
-                    )
-                }
-            }
+            let ctrl = std::sync::Arc::new(super::h2_aio::H2AioController::new(shared, ctx.pid));
+            (
+                Some(Box::new(std::sync::Arc::clone(&ctrl)) as Box<dyn crate::traits::FanDevice>),
+                Some(Box::new(std::sync::Arc::clone(&ctrl)) as Box<dyn crate::traits::AioDevice>),
+                vec![(
+                    String::new(),
+                    Arc::new(ctrl) as Arc<dyn crate::traits::RgbDevice>,
+                )],
+            )
         } else {
             (None, None, Vec::new())
         };

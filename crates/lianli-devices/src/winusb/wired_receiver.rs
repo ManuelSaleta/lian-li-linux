@@ -160,7 +160,7 @@ impl WiredReceiverController {
         };
 
         if let Ok(status) = ctrl.get_info() {
-            *ctrl.fan_count.lock() = status.fan_count.max(1).min(4);
+            *ctrl.fan_count.lock() = status.fan_count.clamp(1, 4);
             *ctrl.is_inf_right_attach.lock() = status.is_inf_right_attach;
             info!(
                 "{}: {} fans detected{}",
@@ -226,9 +226,9 @@ impl WiredReceiverController {
         fans_type.copy_from_slice(&rx[25..29]);
 
         let mut fan_rpm = [0u16; 4];
-        for i in 0..4 {
+        for (i, rpm) in fan_rpm.iter_mut().enumerate() {
             let off = 29 + i * 2;
-            fan_rpm[i] = u16::from_be_bytes([rx[off] & 0x0F, rx[off + 1]]);
+            *rpm = u16::from_be_bytes([rx[off] & 0x0F, rx[off + 1]]);
         }
         let fan_pwm = [rx[37], rx[38], rx[39], rx[40]];
 

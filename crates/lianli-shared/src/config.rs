@@ -366,9 +366,11 @@ impl AppConfig {
             return false;
         };
         let group = fans.speeds.remove(pos);
-        let mut aio = AioConfig::default();
-        aio.pump_target_rpm = group.speeds[3].clone();
-        aio.fan_speeds = group.speeds;
+        let aio = AioConfig {
+            pump_target_rpm: group.speeds[3].clone(),
+            fan_speeds: group.speeds,
+            ..Default::default()
+        };
         self.aio.insert(aio_device_id.to_string(), aio);
         true
     }

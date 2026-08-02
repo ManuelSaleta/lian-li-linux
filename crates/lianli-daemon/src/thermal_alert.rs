@@ -127,9 +127,9 @@ fn run(
             });
 
         let cpu_triggered =
-            cfg.cpu.enabled && cpu_temp.map_or(false, |t| t >= cfg.cpu.threshold as f32);
+            cfg.cpu.enabled && cpu_temp.is_some_and(|t| t >= cfg.cpu.threshold as f32);
         let gpu_triggered =
-            cfg.gpu.enabled && gpu_temp.map_or(false, |t| t >= cfg.gpu.threshold as f32);
+            cfg.gpu.enabled && gpu_temp.is_some_and(|t| t >= cfg.gpu.threshold as f32);
 
         let prev_len = active_stack.len();
         if cpu_triggered {

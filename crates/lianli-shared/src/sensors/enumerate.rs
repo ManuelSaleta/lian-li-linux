@@ -23,17 +23,14 @@ pub use hwmon::{display_name, label_name, pci_id_from_path, read_pwm_header, uni
 /// Order matters for the GUI's default ordering: built-in CPU/RAM sensors first,
 /// then hwmon entries (sorted by display name), then NVIDIA, AMD, network, disk.
 pub fn enumerate_sensors() -> Vec<SensorInfo> {
-    let mut sensors = Vec::new();
-
-    // Built-in synthetic sensors.
-    sensors.push(SensorInfo {
+    let mut sensors = vec![SensorInfo {
         source: SensorSource::CpuUsage,
         sensor_name: None,
         display_name: Some("CPU: Usage".to_string()),
         divider: 100,
         unit: Unit::PERCENT,
         current_value: Some(0.0),
-    });
+    }];
     sensors.push(SensorInfo {
         source: SensorSource::MemUsage,
         sensor_name: None,

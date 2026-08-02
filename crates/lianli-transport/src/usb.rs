@@ -135,11 +135,8 @@ impl RusbBulk {
                 if num == 0 || self.claimed.contains(&num) {
                     continue;
                 }
-                match self.handle.kernel_driver_active(num) {
-                    Ok(true) => {
-                        let _ = self.handle.detach_kernel_driver(num);
-                    }
-                    _ => {}
+                if let Ok(true) = self.handle.kernel_driver_active(num) {
+                    let _ = self.handle.detach_kernel_driver(num);
                 }
                 match self.handle.claim_interface(num) {
                     Ok(()) => {

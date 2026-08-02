@@ -197,13 +197,14 @@ impl ServiceManager {
                             let mut compatible = candidates.iter().enumerate()
                                 .filter(|(idx, c)| !claimed.contains(idx) && is_wired_aio_lcd(c.family));
                             let first = compatible.next();
-                            if first.is_some() && compatible.next().is_none() {
-                                let (idx, c) = first.unwrap();
-                                warn!(
-                                    "[devices] configured AIO LCD id '{}' unavailable; using compatible alias '{}'",
-                                    serial, c.device_id
-                                );
-                                return Some((idx, c));
+                            if let Some((idx, c)) = first {
+                                if compatible.next().is_none() {
+                                    warn!(
+                                        "[devices] configured AIO LCD id '{}' unavailable; using compatible alias '{}'",
+                                        serial, c.device_id
+                                    );
+                                    return Some((idx, c));
+                                }
                             }
                         }
                         None
@@ -212,9 +213,8 @@ impl ServiceManager {
                     candidates
                         .get(index)
                         .filter(|_| !claimed.contains(&index))
-                        .map(|c| {
+                        .inspect(|_c| {
                             claimed.insert(index);
-                            c
                         })
                 } else {
                     None

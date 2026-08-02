@@ -68,9 +68,7 @@ fn raw_white() -> Vec<u8> {
 
 fn raw_tl_flex() -> Vec<u8> {
     (0..4u8)
-        .flat_map(|fan| {
-            (0..26).flat_map(move |led| [(fan * 60 + led) as u8, 100, (fan * 30 + led) as u8])
-        })
+        .flat_map(|fan| (0..26).flat_map(move |led| [(fan * 60 + led), 100, (fan * 30 + led)]))
         .collect()
 }
 

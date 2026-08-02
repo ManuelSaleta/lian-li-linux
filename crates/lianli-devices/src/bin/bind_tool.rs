@@ -96,8 +96,8 @@ fn prompt_and_run(
 fn print_device_list(devices: &[DiscoveredDevice]) {
     println!();
     println!(
-        "{:>3}  {:17}  {:17}  {:>3}  {:>3}  {:>3}  {}",
-        "#", "MAC", "MASTER", "ch", "rx", "fans", "type"
+        "{:>3}  {:17}  {:17}  {:>3}  {:>3}  {:>3}  type",
+        "#", "MAC", "MASTER", "ch", "rx", "fans"
     );
     println!("{}", "-".repeat(78));
     for (i, d) in devices.iter().enumerate() {

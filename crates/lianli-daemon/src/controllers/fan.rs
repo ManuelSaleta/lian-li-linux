@@ -133,7 +133,7 @@ fn fan_control_thread(
 
     if wireless
         .as_ref()
-        .map_or(true, |w| !w.has_discovered_devices())
+        .is_none_or(|w| !w.has_discovered_devices())
         && wired.is_empty()
     {
         warn!("No fan devices available — fan control disabled");
@@ -207,7 +207,7 @@ fn fan_control_thread(
         let any_wireless_mb_sync = config.speeds.iter().any(|g| {
             g.device_id
                 .as_ref()
-                .map_or(false, |id| id.starts_with("wireless:"))
+                .is_some_and(|id| id.starts_with("wireless:"))
                 && g.speeds.iter().any(|s| s.is_mb_sync())
         });
         wireless.set_fg_sync(any_wireless_mb_sync);

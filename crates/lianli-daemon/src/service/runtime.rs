@@ -72,10 +72,10 @@ impl LcdBackend {
                 if let Some(w) = wireless {
                     w.ensure_video_mode()?;
                 }
-                d.set_brightness(builder, brightness).map_err(Into::into)
+                d.set_brightness(builder, brightness)
             }
             Self::WinUsb(sender) => sender.set_brightness(brightness),
-            Self::HidLcd(d) => d.lock().set_brightness(brightness).map_err(Into::into),
+            Self::HidLcd(d) => d.lock().set_brightness(brightness),
         }
     }
 

@@ -73,20 +73,15 @@ pub struct MacParseError;
 /// - ENE 6K77 controller has 4 fan groups → one `RgbDevice` per group with
 ///   `WiredSuffix::Group(0..4)`.
 /// - Single-zone devices (Galahad2 Trinity, LCDs, …) use `WiredSuffix::Unit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WiredSuffix {
     /// No suffix — the device is the only logical sub-device on its USB serial.
+    #[default]
     Unit,
     /// TL Fan port index (0..4).
     Port(u8),
     /// ENE 6K77 fan-group index (0..4).
     Group(u8),
-}
-
-impl Default for WiredSuffix {
-    fn default() -> Self {
-        Self::Unit
-    }
 }
 
 impl fmt::Display for WiredSuffix {

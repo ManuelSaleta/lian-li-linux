@@ -160,7 +160,7 @@ fn ene6k77_lookup(
 fn ene6k77_key_for(device_id: &str) -> Option<String> {
     device_id
         .split(':')
-        .last()
+        .next_back()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }

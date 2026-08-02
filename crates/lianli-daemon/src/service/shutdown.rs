@@ -22,6 +22,6 @@ impl ServiceManager {
         self.wireless.stop();
         self.openrgb.shutdown();
         self.ipc.shutdown();
-        let _ = info!("Daemon shutdown complete.");
+        info!("Daemon shutdown complete.");
     }
 }

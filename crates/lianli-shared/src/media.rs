@@ -16,6 +16,7 @@ pub enum MediaType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SensorSourceConfig {
     Constant {
         value: f32,
@@ -46,6 +47,7 @@ pub enum SensorSourceConfig {
         device_id: String,
     },
     #[serde(rename = "cpu_usage")]
+    #[default]
     CpuUsage,
     #[serde(rename = "mem_usage")]
     MemUsage,
@@ -69,12 +71,6 @@ pub enum SensorSourceConfig {
     DiskWrite {
         device: String,
     },
-}
-
-impl Default for SensorSourceConfig {
-    fn default() -> Self {
-        SensorSourceConfig::CpuUsage
-    }
 }
 
 impl SensorSourceConfig {

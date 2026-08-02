@@ -154,18 +154,16 @@ impl Ene6k77Controller {
         let mut rpms = [0u16; 4];
 
         if self.model.is_v2() {
-            // V2 models return 9 bytes (1 padding + 4x2 RPM)
             let data = self.read_input(9)?;
-            for i in 0..4 {
+            for (i, rpm) in rpms.iter_mut().enumerate() {
                 let offset = 1 + i * 2;
-                rpms[i] = u16::from_be_bytes([data[offset], data[offset + 1]]);
+                *rpm = u16::from_be_bytes([data[offset], data[offset + 1]]);
             }
         } else {
-            // Standard models return 8 bytes (4x2 RPM)
             let data = self.read_input(8)?;
-            for i in 0..4 {
+            for (i, rpm) in rpms.iter_mut().enumerate() {
                 let offset = i * 2;
-                rpms[i] = u16::from_be_bytes([data[offset], data[offset + 1]]);
+                *rpm = u16::from_be_bytes([data[offset], data[offset + 1]]);
             }
         }
 
@@ -816,7 +814,7 @@ mod tests {
         let out = expand_palette(&ui, 6, 4);
         assert_eq!(out.len(), 24);
         for fan in 0..6 {
-            assert_eq!(out[fan * 4 + 0], [10, 20, 30]);
+            assert_eq!(out[fan * 4], [10, 20, 30]);
             for slot in 1..4 {
                 assert_eq!(out[fan * 4 + slot], [0, 0, 0]);
             }

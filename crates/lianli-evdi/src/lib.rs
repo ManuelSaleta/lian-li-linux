@@ -204,7 +204,7 @@ impl EvdiHandle {
         }
         let added = unsafe { ffi::evdi_add_device() };
         if added <= 0 {
-            return Err(explain_add_failure().into());
+            return Err(explain_add_failure());
         }
         ADDED_ANY_DEVICE.store(true, Ordering::SeqCst);
         for n in 0..16 {

@@ -77,10 +77,7 @@ pub fn build_gif_frames(
     let target_ms = desired_fps.map(|fps| 1000.0 / fps.max(1.0));
     let mut accum_ms = 0.0f32;
 
-    let frames: Vec<_> = decoder
-        .into_frames()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(image::ImageError::from)?;
+    let frames: Vec<_> = decoder.into_frames().collect::<Result<Vec<_>, _>>()?;
     let n = frames.len();
 
     for (i, frame) in frames.into_iter().enumerate() {

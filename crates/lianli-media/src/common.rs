@@ -167,7 +167,6 @@ pub fn apply_orientation(image: RgbImage, orientation: f32) -> RgbImage {
 ///
 /// But if you want the baseline of the text at box_y, you'll need to draw the text at y=box_y-ascent: So if you want to draw several characters each after another, you need to keep the baseline constant.
 /// If you draw a text at x/y, then the baseline will be at y+ascent. The topmost coord will be at y+oy and the bottommost coord will be y+oy+th-1. The text will NOT appear at x/y, as this coord is only the top left coord of the glyph (which in almost all cases starts with an offset).
-
 pub fn get_exact_text_metrics(
     font: &FontVec,
     text: &str,

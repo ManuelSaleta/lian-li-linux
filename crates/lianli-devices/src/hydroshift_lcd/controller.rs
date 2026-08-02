@@ -76,71 +76,6 @@ pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::find_au_split;
-
-    const SC4: &[u8] = &[0, 0, 0, 1];
-
-    fn nal(typ: u8, payload: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(SC4);
-        v.push(typ);
-        v.extend_from_slice(payload);
-        v
-    }
-
-    #[test]
-    fn no_aud_splits_at_second_slice() {
-        // [SPS][PPS][IDR] [P] [P]
-        let mut buf = Vec::new();
-        buf.extend(nal(7, &[1, 2])); // SPS
-        buf.extend(nal(8, &[3, 4])); // PPS
-        buf.extend(nal(5, &[5, 6])); // IDR (boundary #1)
-        let p1_off = buf.len();
-        buf.extend(nal(1, &[7, 8])); // P-slice (boundary #2)
-        buf.extend(nal(1, &[9, 10])); // P-slice
-
-        let split = find_au_split(&buf).expect("should find a split");
-        assert_eq!(split, p1_off);
-        // Drained AU = [SPS PPS IDR] — the complete first AU
-    }
-
-    #[test]
-    fn aud_delimited_splits_at_next_aud() {
-        // [AUD][SPS][PPS][IDR] [AUD][P]
-        let mut buf = Vec::new();
-        buf.extend(nal(9, &[0x10])); // AUD (boundary #1)
-        buf.extend(nal(7, &[1, 2])); // SPS — NOT a boundary
-        buf.extend(nal(8, &[3, 4])); // PPS — NOT a boundary
-        buf.extend(nal(5, &[5, 6])); // IDR — NOT a boundary (AUD policy active)
-        let aud2_off = buf.len();
-        buf.extend(nal(9, &[0x10])); // AUD (boundary #2)
-        buf.extend(nal(1, &[7, 8])); // P-slice
-
-        let split = find_au_split(&buf).expect("should find a split");
-        assert_eq!(split, aud2_off);
-        // Drained AU = [AUD SPS PPS IDR] — complete, includes the IDR
-    }
-
-    #[test]
-    fn three_byte_start_code() {
-        let mut buf = Vec::new();
-        buf.extend(&[0, 0, 0, 1, 5, 1]); // 4-byte SC + IDR
-        let split_off = buf.len();
-        buf.extend(&[0, 0, 1, 1, 2]); // 3-byte SC + P-slice
-        let split = find_au_split(&buf).expect("should find a split");
-        assert_eq!(split, split_off);
-    }
-
-    #[test]
-    fn no_split_in_partial_buffer() {
-        // Only one slice NAL — not enough for a split
-        let buf = nal(5, &[1, 2, 3]);
-        assert!(find_au_split(&buf).is_none());
-    }
-}
-
 /// HydroShift LCD / Galahad2 LCD AIO controller.
 ///
 /// Provides pump + fan speed control, coolant temperature reading, and LCD streaming.
@@ -403,7 +338,7 @@ impl HydroShiftLcdController {
         const MAX_ATTEMPTS: u32 = 20;
 
         let mut dev = self.device.lock();
-        if let Err(e) = self.write_a_command_internal(&mut *dev, CMD_RESET_DEVICE, &[]) {
+        if let Err(e) = self.write_a_command_internal(&mut dev, CMD_RESET_DEVICE, &[]) {
             warn!("AIO LCD: reset device failed: {e}");
             return false;
         }
@@ -472,7 +407,7 @@ impl HydroShiftLcdController {
     fn read_firmware_internal(&self, timeout_ms: i32) -> Result<String> {
         let mut dev = self.device.lock();
 
-        self.write_a_command_internal(&mut *dev, CMD_GET_FIRMWARE, &[])?;
+        self.write_a_command_internal(&mut dev, CMD_GET_FIRMWARE, &[])?;
 
         // Loop reading until we see a firmware response, discarding stale
         // responses from a previous session (e.g. handshake/reset).
@@ -515,7 +450,7 @@ impl HydroShiftLcdController {
 
     fn send_a_command(&self, cmd: u8, data: &[u8], timeout_ms: i32) -> Result<Vec<u8>> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut *dev, cmd, data)?;
+        self.write_a_command_internal(&mut dev, cmd, data)?;
 
         let mut buf = [0u8; A_PACKET_SIZE];
         let n = dev
@@ -538,7 +473,7 @@ impl HydroShiftLcdController {
     /// do NOT call when the device is already locked.
     pub fn write_a_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut *dev, cmd, data)
+        self.write_a_command_internal(&mut dev, cmd, data)
     }
 
     fn write_a_command_internal(&self, dev: &mut RusbHid, cmd: u8, data: &[u8]) -> Result<()> {
@@ -859,5 +794,70 @@ impl LcdDevice for HydroShiftLcdController {
         fps: f32,
     ) -> Result<()> {
         HydroShiftLcdController::stream_h264_reader(self, reader, stop, fps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_au_split;
+
+    const SC4: &[u8] = &[0, 0, 0, 1];
+
+    fn nal(typ: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(SC4);
+        v.push(typ);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn no_aud_splits_at_second_slice() {
+        // [SPS][PPS][IDR] [P] [P]
+        let mut buf = Vec::new();
+        buf.extend(nal(7, &[1, 2])); // SPS
+        buf.extend(nal(8, &[3, 4])); // PPS
+        buf.extend(nal(5, &[5, 6])); // IDR (boundary #1)
+        let p1_off = buf.len();
+        buf.extend(nal(1, &[7, 8])); // P-slice (boundary #2)
+        buf.extend(nal(1, &[9, 10])); // P-slice
+
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, p1_off);
+        // Drained AU = [SPS PPS IDR] — the complete first AU
+    }
+
+    #[test]
+    fn aud_delimited_splits_at_next_aud() {
+        // [AUD][SPS][PPS][IDR] [AUD][P]
+        let mut buf = Vec::new();
+        buf.extend(nal(9, &[0x10])); // AUD (boundary #1)
+        buf.extend(nal(7, &[1, 2])); // SPS — NOT a boundary
+        buf.extend(nal(8, &[3, 4])); // PPS — NOT a boundary
+        buf.extend(nal(5, &[5, 6])); // IDR — NOT a boundary (AUD policy active)
+        let aud2_off = buf.len();
+        buf.extend(nal(9, &[0x10])); // AUD (boundary #2)
+        buf.extend(nal(1, &[7, 8])); // P-slice
+
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, aud2_off);
+        // Drained AU = [AUD SPS PPS IDR] — complete, includes the IDR
+    }
+
+    #[test]
+    fn three_byte_start_code() {
+        let mut buf = Vec::new();
+        buf.extend(&[0, 0, 0, 1, 5, 1]); // 4-byte SC + IDR
+        let split_off = buf.len();
+        buf.extend(&[0, 0, 1, 1, 2]); // 3-byte SC + P-slice
+        let split = find_au_split(&buf).expect("should find a split");
+        assert_eq!(split, split_off);
+    }
+
+    #[test]
+    fn no_split_in_partial_buffer() {
+        // Only one slice NAL — not enough for a split
+        let buf = nal(5, &[1, 2, 3]);
+        assert!(find_au_split(&buf).is_none());
     }
 }

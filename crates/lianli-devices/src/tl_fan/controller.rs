@@ -268,7 +268,7 @@ impl TlFanController {
         let mut dev = self.device.lock();
         for (port, &duty) in duties.iter().take(4).enumerate() {
             for idx in 0..fan_counts[port] {
-                Self::send_speed_locked(&mut *dev, port as u8, idx, duty)?;
+                Self::send_speed_locked(&mut dev, port as u8, idx, duty)?;
             }
         }
         Ok(())

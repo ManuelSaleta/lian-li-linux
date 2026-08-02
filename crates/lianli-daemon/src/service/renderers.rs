@@ -365,7 +365,7 @@ impl AsyncCustomH264Renderer {
         let restarter = lcd
             .stream_restarter()
             .ok_or_else(|| anyhow::anyhow!("h264 streaming not supported on this backend"))?;
-        let screen_clone = screen.clone();
+        let screen_clone = *screen;
 
         let thread = thread::spawn(move || {
             let mut next_deadline = Instant::now() + frame_interval;
@@ -477,7 +477,7 @@ impl AsyncSensorH264Renderer {
         let restarter = lcd
             .stream_restarter()
             .ok_or_else(|| anyhow::anyhow!("h264 streaming not supported on this backend"))?;
-        let screen_clone = screen.clone();
+        let screen_clone = *screen;
 
         let thread = thread::spawn(move || {
             let mut next_deadline = Instant::now() + frame_interval;

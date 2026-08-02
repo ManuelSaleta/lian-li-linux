@@ -75,7 +75,7 @@ impl WirelessController {
         let force_keepalive = pwm_last_sent()
             .lock()
             .get(mac)
-            .map_or(true, |t| now.duration_since(*t) >= PWM_KEEPALIVE_INTERVAL);
+            .is_none_or(|t| now.duration_since(*t) >= PWM_KEEPALIVE_INTERVAL);
         if !needs_send && !force_keepalive {
             return Ok(());
         }

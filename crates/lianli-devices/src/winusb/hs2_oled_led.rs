@@ -205,7 +205,7 @@ impl Hs2OledLedController {
         }
 
         let transport = self.transport.lock();
-        let per_chunk = (RGB_LED_COUNT + 2) / 3;
+        let per_chunk = RGB_LED_COUNT.div_ceil(3);
         for chunk in 0..3usize {
             let start = chunk * per_chunk;
             let this_count = (RGB_LED_COUNT - start).min(per_chunk);
@@ -378,6 +378,6 @@ mod tests {
     fn rpm_table_interpolates() {
         // Between 1577→250 and 1608→300: midpoint 1592.5 → ~275
         let v = rpm_to_output(1592);
-        assert!(v >= 270 && v <= 280, "got {v}");
+        assert!((270..=280).contains(&v), "got {v}");
     }
 }

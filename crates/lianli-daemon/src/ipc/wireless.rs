@@ -64,7 +64,7 @@ pub fn unbind_all(tx: Sender<DaemonEvent>) -> IpcResponse {
 
 pub fn get_channel(state: &std::sync::Arc<parking_lot::Mutex<super::DaemonState>>) -> IpcResponse {
     let state = state.lock();
-    if let Some(ref dev) = state
+    if let Some(dev) = state
         .devices
         .iter()
         .find(|d| d.device_id.starts_with("wireless:"))

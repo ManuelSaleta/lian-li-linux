@@ -186,7 +186,7 @@ impl WirelessFanType {
             27 | 32..=35 => Self::Tlv2Lcd,
             28..=31 => Self::Tlv2Led,
             36..=39 => Self::SlInf,
-            40 | 41..=42 => Self::Clv1,
+            40..=42 => Self::Clv1,
             43..=50 => Self::SlInfV3 {
                 lcd: matches!(b, 43 | 44 | 47 | 48),
             },

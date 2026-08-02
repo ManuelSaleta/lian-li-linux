@@ -36,7 +36,7 @@ impl SysSensor {
                 last_global_usage: AtomicU32::new(0),
             };
 
-            thread::spawn(|| Self::worker_loop());
+            thread::spawn(Self::worker_loop);
             sensor
         });
     }
