@@ -12,6 +12,7 @@ import WidgetList from "@/components/editor/WidgetList.vue";
 import WidgetCanvas from "@/components/editor/WidgetCanvas.vue";
 import PropertiesPanel from "@/components/editor/PropertiesPanel.vue";
 import { screenPresets } from "@/constants/screen";
+import { enumerateSensorsAsOptions } from "@/stores/sensorOptions";
 
 const config = useConfigStore();
 const lcd = useLcdStore();
@@ -25,12 +26,7 @@ const statusIsError = ref(false);
 
 const renderPreview = lcd.renderPreview();
 
-const sensorOptions = computed(() =>
-  config.sensors.map((s) => ({
-    label: s.display_name ?? s.sensor_name?.sensor_name ?? "sensor",
-    value: JSON.stringify(s.source),
-  })),
-);
+const sensorOptions = computed(() => enumerateSensorsAsOptions(config.sensors, false));
 
 const presetOptions = screenPresets.map((p) => ({ label: p.label, value: `${p.width}x${p.height}` }));
 

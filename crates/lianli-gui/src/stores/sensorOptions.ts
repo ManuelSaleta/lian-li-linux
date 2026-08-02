@@ -10,13 +10,18 @@ export interface SelectOption {
  *
  * When `includeCommand` is true, a "Custom command" sentinel option is
  * appended (value "command") so fan curves can fall back to a shell command.
+ *
+ * When `tempOnly` is true, only temperature sensors (unit "C") are included —
+ * use this for fan curve temperature sources where %, RPM, etc. are invalid.
  */
 export function enumerateSensorsAsOptions(
   sensors: SensorInfo[],
   includeCommand: boolean,
+  tempOnly: boolean = false,
 ): SelectOption[] {
-  const opts: SelectOption[] = sensors.map((s) => ({
-    label: s.display_name ?? s.sensor_name?.sensor_name ?? "sensor",
+  const filtered = tempOnly ? sensors.filter((s) => s.unit === "C") : sensors;
+  const opts: SelectOption[] = filtered.map((s) => ({
+    label: formatSensorLabel(s),
     value: JSON.stringify(s.source),
   }));
   if (includeCommand) {
@@ -30,10 +35,27 @@ export function sourceConfigsAsOptions(
   sensors: SensorInfo[],
 ): SelectOption[] {
   return sensors.map((s) => ({
-    label: s.display_name ?? s.sensor_name?.sensor_name ?? "sensor",
+    label: formatSensorLabel(s),
     value: JSON.stringify(s.source),
   }));
 }
+
+function formatSensorLabel(s: SensorInfo): string {
+  const name = s.display_name ?? s.sensor_name?.sensor_name ?? "sensor";
+  const unit = UNIT_LABELS[s.unit];
+  return unit ? `${name} (${unit})` : name;
+}
+
+const UNIT_LABELS: Record<string, string> = {
+  C: "\u00b0C",
+  RPM: "RPM",
+  V: "mV",
+  FREQ: "MHz",
+  PERCENT: "%",
+  SIZE: "GB",
+  MBps: "MB/s",
+  WO: "",
+};
 
 /** Decode a selected option value back into a SensorSourceConfig. */
 export function decodeOption(value: string): SensorSourceConfig | null {

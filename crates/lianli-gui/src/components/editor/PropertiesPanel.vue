@@ -130,23 +130,25 @@ function sourceLabel(src: SensorSourceConfig | null | undefined): string {
     case "nvidia_gpu":
       return `NVIDIA GPU ${src.gpu_index ?? 0} (${src.metric ?? "temp"})`;
     case "amd_gpu_usage":
-      return `AMD GPU ${src.card_index ?? 0}`;
+      return `AMD GPU ${src.card_index ?? 0} Usage (%)`;
     case "wireless_coolant":
-      return `coolant ${src.device_id}`;
+      return `Coolant (${src.device_id}) (°C)`;
     case "cpu_usage":
-      return "CPU Usage";
+      return "CPU Usage (%)";
     case "mem_usage":
-      return "Memory Usage";
+      return "Memory Usage (%)";
     case "mem_used":
-      return "Memory Used";
+      return "Memory Used (GB)";
     case "mem_free":
-      return "Memory Free";
+      return "Memory Free (GB)";
     case "network_rx":
+      return `Network ${src.iface}: Rx (MB/s)`;
     case "network_tx":
-      return `net ${src.iface}`;
+      return `Network ${src.iface}: Tx (MB/s)`;
     case "disk_read":
+      return `Disk ${src.device}: Read (MB/s)`;
     case "disk_write":
-      return `disk ${src.device}`;
+      return `Disk ${src.device}: Write (MB/s)`;
     default:
       return (src as any).type ?? "source";
   }

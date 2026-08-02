@@ -60,7 +60,7 @@ const assignmentGroups = computed(() => {
   return result;
 });
 
-const sensorOptions = computed(() => enumerateSensorsAsOptions(config.sensors, true));
+const sensorOptions = computed(() => enumerateSensorsAsOptions(config.sensors, true, true));
 
 function onCurveChange(value: [number, number][]) {
   if (!current.value) return;
