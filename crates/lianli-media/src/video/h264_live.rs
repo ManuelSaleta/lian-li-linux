@@ -214,6 +214,7 @@ fn try_spawn(
         .ok_or_else(|| format!("bad size_str {size_str}"))?;
     let frame_bytes = (w as usize) * (h as usize) * 4;
     grow_pipe(stdin.as_raw_fd(), frame_bytes);
+    grow_pipe(stdout.as_raw_fd(), 1 << 19);
 
     let probing = Arc::new(AtomicBool::new(true));
     let open_failed = Arc::new(AtomicBool::new(false));

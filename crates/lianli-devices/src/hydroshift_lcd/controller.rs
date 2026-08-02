@@ -339,10 +339,9 @@ impl HydroShiftLcdController {
         stop: &AtomicBool,
         fps: f32,
     ) -> Result<()> {
-        let frame_interval = std::time::Duration::from_secs_f32(1.0 / fps.max(1.0));
+        let _ = fps;
         let mut read_buf = vec![0u8; 64 * 1024];
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
-        let mut next_deadline = std::time::Instant::now() + frame_interval;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -358,14 +357,6 @@ impl HydroShiftLcdController {
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if !au.is_empty() {
                     self.send_h264_frame(&au)?;
-                    let now = std::time::Instant::now();
-                    if now < next_deadline {
-                        std::thread::sleep(next_deadline - now);
-                    }
-                    next_deadline += frame_interval;
-                    if next_deadline < std::time::Instant::now() {
-                        next_deadline = std::time::Instant::now() + frame_interval;
-                    }
                 }
             }
         }

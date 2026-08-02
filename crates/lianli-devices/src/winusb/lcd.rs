@@ -255,8 +255,6 @@ impl WinUsbLcdDevice {
         Ok(())
     }
 
-    /// Stream a live H.264 byte stream (e.g. ffmpeg stdout) in Access-Unit
-    /// frames via StartPlay (0x79). Runs until EOF or `stop` is set.
     pub fn stream_h264_reader<R: std::io::Read>(
         &mut self,
         reader: &mut R,
@@ -265,46 +263,27 @@ impl WinUsbLcdDevice {
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
 
+        let _ = fps;
+
         if !self.initialized {
             self.do_init()?;
         }
 
-        let frame_interval = std::time::Duration::from_secs_f32(1.0 / fps.max(1.0));
-        let mut read_buf = vec![0u8; 64 * 1024];
-        let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
-        let mut next_deadline = std::time::Instant::now() + frame_interval;
+        let mut buf = vec![0u8; self.h264_chunk_size];
 
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
             let n = reader
-                .read(&mut read_buf)
+                .read(&mut buf)
                 .context("WinUSB LCD: read h264 stream")?;
             if n == 0 {
                 break;
             }
-            accum.extend_from_slice(&read_buf[..n]);
-            while let Some(split) = crate::hydroshift_lcd::find_au_split(&accum) {
-                let au: Vec<u8> = accum.drain(..split).collect();
-                if !au.is_empty() {
-                    self.send_h264_au(&au)?;
-
-                    let now = std::time::Instant::now();
-                    if now < next_deadline {
-                        std::thread::sleep(next_deadline - now);
-                    }
-                    next_deadline += frame_interval;
-                    if next_deadline < std::time::Instant::now() {
-                        next_deadline = std::time::Instant::now() + frame_interval;
-                    }
-                }
-            }
+            self.send_h264_chunk(&buf[..n], false)?;
         }
 
-        if !accum.is_empty() {
-            self.send_h264_au(&accum)?;
-        }
         self.tx_read_flush();
         self.initialized = false;
         Ok(())
@@ -330,44 +309,10 @@ impl WinUsbLcdDevice {
 
         let resp = self.read_response("h264 chunk", LCD_READ_TIMEOUT);
 
-        std::thread::sleep(Duration::from_millis(30));
-
         if let Some(buf) = resp {
             if buf[8] > 3 {
                 self.wait_buffer(2);
             }
-        }
-        Ok(())
-    }
-
-    /// Lean per-frame send for live H.264 streaming via StartPlay (0x79).
-    /// Writes one packet with full short-write handling, then reads the ack
-    /// and checks the device buffer level from byte 8 of the response.
-    fn send_h264_au(&mut self, data: &[u8]) -> Result<()> {
-        let header = self.builder.start_play_header_winusb(data.len(), false);
-        let total = 512 + data.len();
-        let mut packet = vec![0u8; total];
-        packet[..512].copy_from_slice(&header);
-        packet[512..].copy_from_slice(data);
-        match self.tx_write_full(&packet, LCD_WRITE_TIMEOUT) {
-            Ok(_) => self.note_write_success(),
-            Err(e) => {
-                warn!("H264 AU write failed: {e}");
-                self.try_recover()
-                    .with_context(|| format!("recovering from h264 AU write error: {e}"))?;
-                self.tx_write_full(&packet, LCD_WRITE_TIMEOUT)
-                    .context("h264 AU write after recovery")?;
-                self.note_write_success();
-            }
-        }
-        let mut buf = [0u8; 512];
-        match self.tx_read(&mut buf, Duration::from_millis(10)) {
-            Ok(n) if n > 0 => {
-                if buf[8] > 3 {
-                    self.wait_buffer(2);
-                }
-            }
-            _ => self.tx_read_flush(),
         }
         Ok(())
     }
@@ -451,7 +396,7 @@ impl WinUsbLcdDevice {
         let stop_play = self.builder.stop_play_header_winusb();
         self.send_command(stop_play, "StopPlay");
 
-        let h264_block = self.builder.query_block_header_winusb();
+        let h264_block = self.builder.get_h264_block_header_winusb();
         if self.tx_write_full(&h264_block, LCD_WRITE_TIMEOUT).is_ok() {
             if let Some(resp) = self.read_response("GetH264Block", LCD_READ_TIMEOUT) {
                 if resp.len() >= 12 {
@@ -606,8 +551,8 @@ impl WinUsbLcdDevice {
     }
 
     /// Query device buffer level. Returns None on communication failure.
-    fn query_block(&mut self) -> Option<u8> {
-        let header = self.builder.query_block_header_winusb();
+    fn query_buffer_level(&mut self) -> Option<u8> {
+        let header = self.builder.query_buffer_level_header_winusb();
         self.tx_write_full(&header, LCD_WRITE_TIMEOUT).ok()?;
         let mut buf = [0u8; 512];
         match self.tx_read(&mut buf, Duration::from_millis(200)) {
@@ -626,7 +571,7 @@ impl WinUsbLcdDevice {
     /// Reference polls QueryBlock every 50ms until buf[8] <= threshold.
     fn wait_buffer(&mut self, threshold: u8) {
         for _ in 0..40 {
-            match self.query_block() {
+            match self.query_buffer_level() {
                 Some(level) if level <= threshold => return,
                 Some(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
                 None => return,

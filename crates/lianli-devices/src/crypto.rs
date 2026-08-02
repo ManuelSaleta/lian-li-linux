@@ -12,6 +12,7 @@ pub const CMD_GET_VER: u8 = 0x0A;
 pub const CMD_ROTATE: u8 = 0x0D;
 pub const CMD_BRIGHTNESS: u8 = 0x0E;
 pub const CMD_FRAME_RATE: u8 = 0x0F;
+pub const CMD_GET_H264_BLOCK: u8 = 0x11;
 pub const CMD_SET_CLOCK: u8 = 0x33;
 pub const CMD_STOP_CLOCK: u8 = 0x34;
 pub const CMD_PUSH_JPG: u8 = 0x65;
@@ -193,7 +194,11 @@ impl PacketBuilder {
         self.build_winusb(CMD_START_PLAY, &params)
     }
 
-    pub fn query_block_header_winusb(&mut self) -> Vec<u8> {
+    pub fn get_h264_block_header_winusb(&mut self) -> Vec<u8> {
+        self.build_winusb(CMD_GET_H264_BLOCK, &[])
+    }
+
+    pub fn query_buffer_level_header_winusb(&mut self) -> Vec<u8> {
         self.build_winusb(CMD_QUERY_BLOCK, &[])
     }
 

@@ -314,11 +314,9 @@ mod tests {
         // A 3-fan hub (e.g. a Uni Hub with only 3 connected fans) reports a
         // 3-element speeds array, which must be padded rather than rejected.
         let json = r#"[{"device_id": "wireless:AA:BB:CC:DD:EE:01", "speeds": [30, 40, 50]}]"#;
-        let groups: Vec<FanGroup> = serde_json::from_str(&format!(
-            r#"{{"speeds": {json}}}"#
-        ))
-        .map(|c: FanConfig| c.speeds)
-        .unwrap();
+        let groups: Vec<FanGroup> = serde_json::from_str(&format!(r#"{{"speeds": {json}}}"#))
+            .map(|c: FanConfig| c.speeds)
+            .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(
             groups[0].speeds,
