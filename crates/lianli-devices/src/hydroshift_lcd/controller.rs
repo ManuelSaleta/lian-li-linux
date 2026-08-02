@@ -395,7 +395,7 @@ impl HydroShiftLcdController {
                 .context("AIO LCD: read LCD available response")?;
 
             if n == 0 {
-                return Ok(false);
+                return Ok(true);
             }
             if buf[1] == CMD_LCD_AVAILABLE {
                 let data_len = (buf[9] as usize) << 8 | buf[10] as usize;
