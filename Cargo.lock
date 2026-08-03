@@ -2563,7 +2563,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lianli-daemon"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-devices"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "cbc",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-evdi"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "libc",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-gui"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "lianli-shared",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-media"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-shared"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "hex",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "lianli-transport"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "hidapi",
