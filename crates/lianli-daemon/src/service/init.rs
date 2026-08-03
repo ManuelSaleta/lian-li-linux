@@ -10,15 +10,17 @@ use lianli_devices::crypto::PacketBuilder;
 use lianli_devices::detect::enumerate_devices;
 use lianli_devices::registry;
 use lianli_devices::traits::FanDevice;
-use lianli_shared::config::AppConfig;
+use lianli_shared::config::{AppConfig, HidBackend};
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::DeviceInfo;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+const MAX_INIT_RETRIES: u32 = 18;
 
 impl ServiceManager {
     pub(super) fn start_fan_control(&mut self) {
@@ -135,20 +137,49 @@ impl ServiceManager {
 
     pub(super) fn check_wired_hotplug(&mut self) {
         let current = self.enumerate_wired_controller_ids();
-        if current == self.registry.last_wired_ids {
+        if current != self.registry.last_wired_ids {
+            let added = current.difference(&self.registry.last_wired_ids).count();
+            let removed = self.registry.last_wired_ids.difference(&current).count();
+            info!("Wired device topology changed (+{added} -{removed}): re-initializing");
+
+            if let Some(controller) = self.controllers.fan.take() {
+                controller.stop();
+            }
+            self.registry
+                .hid_backends
+                .retain(|k, _| current.contains(k));
+            self.registry.v2_hid_entries.clear();
+            self.init_wired_devices();
+            self.start_fan_control();
+            self.registry.last_wired_ids = current;
             return;
         }
 
-        let added = current.difference(&self.registry.last_wired_ids).count();
-        let removed = self.registry.last_wired_ids.difference(&current).count();
-        info!("Wired device topology changed (+{added} -{removed}): re-initializing");
-
-        self.registry
-            .hid_backends
-            .retain(|k, _| current.contains(k));
+        let pending: HashSet<String> = self
+            .registry
+            .failed_open_ids
+            .intersection(&current)
+            .cloned()
+            .collect();
+        if pending.is_empty() || self.registry.init_retry_count >= MAX_INIT_RETRIES {
+            return;
+        }
+        self.registry.init_retry_count += 1;
+        info!(
+            "Retrying {} device(s) that failed to open (attempt {}/{})",
+            pending.len(),
+            self.registry.init_retry_count,
+            MAX_INIT_RETRIES
+        );
+        if let Some(controller) = self.controllers.fan.take() {
+            controller.stop();
+        }
         self.init_wired_devices();
         self.start_fan_control();
-        self.registry.last_wired_ids = current;
+    }
+
+    pub(super) fn hid_backend(&self) -> HidBackend {
+        self.config.as_ref().map(|c| c.hid_backend).unwrap_or_default()
     }
 
     /// Initialize all wired USB devices (fan + RGB + LCD + AIO) via the
@@ -157,10 +188,24 @@ impl ServiceManager {
     /// rest of the daemon. Devices that time out are skipped and will be
     /// retried by the hotplug poller.
     pub(super) fn init_wired_devices(&mut self) {
-        let mut fan_devices: HashMap<String, Box<dyn FanDevice>> = HashMap::new();
+        let already_opened: HashSet<String> = self
+            .registry
+            .hid_backends
+            .keys()
+            .chain(self.registry.usb_backends.keys())
+            .cloned()
+            .collect();
+
+        let mut fan_devices: HashMap<String, Box<dyn FanDevice>> =
+            match Arc::try_unwrap(std::mem::take(&mut self.registry.fan_devices)) {
+                Ok(map) => map,
+                Err(arc) => {
+                    self.registry.fan_devices = arc;
+                    HashMap::new()
+                }
+            };
         let mut wired_rgb: HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>> =
             HashMap::new();
-        self.registry.fan_device_info.clear();
 
         let usb_devs = match enumerate_devices() {
             Ok(devs) => devs,
@@ -172,10 +217,14 @@ impl ServiceManager {
             }
         };
 
+        let present_ids: HashSet<String> = usb_devs.iter().map(|det| Self::rusb_device_id(det)).collect();
+        fan_devices.retain(|id, _| present_ids.contains(id));
+        self.registry.fan_device_info.retain(|info| {
+            present_ids.iter().any(|id| info.device_id.starts_with(id.as_str()))
+        });
+
         const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-        // Spawn each device open on its own thread so a single hung
-        // controller can't stall the rest of initialization.
         let mut pending: Vec<(
             String,
             &str,
@@ -195,6 +244,13 @@ impl ServiceManager {
             let Some(driver) = registry::driver_for_family(det.family) else {
                 continue;
             };
+            let base_id = Self::rusb_device_id(det);
+
+            if already_opened.contains(&base_id) {
+                debug!("Skipping {base_id} — already opened, preserving handle");
+                continue;
+            }
+
             let ctx = registry::OpenContext {
                 device: det.device.clone(),
                 family: det.family,
@@ -204,8 +260,8 @@ impl ServiceManager {
                 address: det.address,
                 serial: det.serial.clone(),
                 hid_usage_page: det.hid_usage_page,
+                hid_backend: self.hid_backend(),
             };
-            let base_id = Self::rusb_device_id(det);
             let name = det.name;
             let family = det.family;
             let vid = det.vid;
@@ -229,10 +285,12 @@ impl ServiceManager {
         // Collect results using a single global deadline so that N hung
         // devices waste at most OPEN_TIMEOUT total, not N × OPEN_TIMEOUT.
         let deadline = std::time::Instant::now() + OPEN_TIMEOUT;
+        let mut failed_ids: HashSet<String> = HashSet::new();
         for (base_id, name, family, vid, pid, serial, rx) in pending {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 warn!("Skipped {name} ({vid:04x}:{pid:04x}) — global open deadline exceeded");
+                failed_ids.insert(base_id);
                 continue;
             }
             match rx.recv_timeout(remaining) {
@@ -259,12 +317,19 @@ impl ServiceManager {
                         &mut wired_rgb,
                     );
                 }
-                Ok(Err(e)) => warn!("Failed to open {name} ({vid:04x}:{pid:04x}): {e}"),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => warn!(
-                    "Timeout opening {name} ({vid:04x}:{pid:04x}) — skipping; will retry on hotplug"
-                ),
+                Ok(Err(e)) => {
+                    warn!("Failed to open {name} ({vid:04x}:{pid:04x}): {e}");
+                    failed_ids.insert(base_id);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    warn!(
+                        "Timeout opening {name} ({vid:04x}:{pid:04x}) — skipping; will retry on hotplug"
+                    );
+                    failed_ids.insert(base_id);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    warn!("Open thread for {name} ({vid:04x}:{pid:04x}) panicked — skipping")
+                    warn!("Open thread for {name} ({vid:04x}:{pid:04x}) panicked — skipping");
+                    failed_ids.insert(base_id);
                 }
             }
         }
@@ -273,6 +338,19 @@ impl ServiceManager {
         self.registry.fan_devices = Arc::clone(&arc);
         self.init_rgb_controller_from(wired_rgb);
         self.registry.last_wired_ids = self.enumerate_wired_controller_ids();
+
+        if failed_ids.is_empty() {
+            if self.registry.init_retry_count > 0 {
+                info!("All wired devices opened successfully after {} retry/retries", self.registry.init_retry_count);
+            }
+            self.registry.init_retry_count = 0;
+        } else {
+            warn!(
+                "{} device(s) failed to open — will retry on next hotplug check",
+                failed_ids.len()
+            );
+        }
+        self.registry.failed_open_ids = failed_ids;
     }
 
     /// Dispatch an [`registry::OpenedDevice`] into the fan / RGB / AIO
@@ -429,13 +507,20 @@ impl ServiceManager {
         &mut self,
         wired_rgb: HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>>,
     ) {
+        let mut all_wired = if let Some(ref rgb) = self.controllers.rgb {
+            rgb.lock().drain_wired()
+        } else {
+            HashMap::new()
+        };
+        all_wired.extend(wired_rgb);
+
         let wireless = if self.wireless.has_discovered_devices() {
             Some(Arc::new(self.wireless.clone()))
         } else {
             None
         };
 
-        let mut controller = RgbController::new(wired_rgb, wireless);
+        let mut controller = RgbController::new(all_wired, wireless);
 
         // Start thermal alert monitor and share override state with RGB controller
         let thermal_settings = self

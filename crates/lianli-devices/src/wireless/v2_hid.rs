@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
-use lianli_transport::RusbHid;
+use lianli_shared::config::HidBackend;
+use lianli_transport::HidTransport;
 use rusb::GlobalContext;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// V2 dongle HID companion interface (CH340 VID `0x1A86`, PID `0x2107`).
 pub const V2_HID_VID: u16 = 0x1A86;
@@ -21,7 +22,7 @@ pub struct V2HidEntry {
 
 /// Enumerate every V2 dongle HID interface (`0x1A86:0x2107`) on the bus,
 /// send cmd `0x1C`, and return the MAC + topology of each.
-pub fn query_v2_hid_macs() -> Vec<V2HidEntry> {
+pub fn query_v2_hid_macs(backend: HidBackend) -> Vec<V2HidEntry> {
     let mut results = Vec::new();
 
     let Ok(devices) = rusb::devices() else {
@@ -39,9 +40,9 @@ pub fn query_v2_hid_macs() -> Vec<V2HidEntry> {
         let bus = device.bus_number();
         let port_numbers = device.port_numbers().unwrap_or_default();
 
-        match query_single_mac(device.clone()) {
+        match query_single_mac(device.clone(), backend) {
             Ok(mac) => {
-                info!(
+                debug!(
                     "V2 HID {}-{}: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                     bus,
                     format_ports(&port_numbers),
@@ -82,8 +83,17 @@ pub fn query_v2_hid_macs() -> Vec<V2HidEntry> {
 /// vendor's wire format, and auto-detect the MAC offset on read (the
 /// response may or may not include the Report ID byte depending on the
 /// device's HID descriptor).
-fn query_single_mac(device: rusb::Device<GlobalContext>) -> Result<[u8; 6]> {
-    let mut hid = RusbHid::open_by_usage(device, None).context("opening V2 HID interface")?;
+fn query_single_mac(
+    device: rusb::Device<GlobalContext>,
+    backend: HidBackend,
+) -> Result<[u8; 6]> {
+    let mut hid = crate::detect::open_hid_transient(
+        &device, None, V2_HID_VID, V2_HID_PID,
+        device.bus_number(),
+        &device.port_numbers().unwrap_or_default(),
+        backend,
+    )
+    .context("opening V2 HID interface")?;
 
     let mut cmd = [0u8; 64];
     cmd[0] = 0x00;

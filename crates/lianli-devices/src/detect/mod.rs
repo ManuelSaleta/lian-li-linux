@@ -6,12 +6,12 @@ mod controllers;
 mod enumerate;
 
 pub use backends::{
-    hidraw_path_for_usb_topology, open_hid_backend, open_hid_lcd_by_topology,
-    open_hid_lcd_by_vid_pid, open_hid_lcd_device, open_hid_with_reopener, open_usb_bulk_backend,
+    hidraw_path_for_usb_topology, open_hid_lcd_by_topology, open_hid_lcd_by_vid_pid,
+    open_hid_lcd_device, open_hid_transient, open_shared_hid, open_usb_bulk_backend,
 };
 pub use binding::ensure_hid_devices_bound;
 pub use controllers::{create_hid_lcd_device, create_wired_controllers, WiredControllerSet};
-pub use enumerate::{enumerate_devices, probe_tl_lcd_port_indices_rusb};
+pub use enumerate::{enumerate_devices, probe_tl_lcd_port_indices};
 
 use lianli_shared::device_id::DeviceFamily;
 use rusb::{Device, GlobalContext};

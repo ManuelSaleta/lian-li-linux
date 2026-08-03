@@ -83,6 +83,16 @@ function onDefaultFps(v: number | null) {
   config.config.default_fps = v;
   config.markDirty();
 }
+
+const hidBackendOptions = [
+  { label: "HIDRAW (recommended)", value: "hidraw" },
+  { label: "LibUSB (direct)", value: "rusb" },
+];
+
+function onHidBackend(v: "hidraw" | "rusb") {
+  config.config.hid_backend = v;
+  config.markDirty();
+}
 </script>
 
 <template>
@@ -103,6 +113,15 @@ function onDefaultFps(v: number | null) {
     <section class="card">
       <div class="section-head">
         <h2 class="section-title">Configuration</h2>
+      </div>
+      <div class="kv"><span class="muted">HID Backend</span>
+        <n-select
+          :value="config.config.hid_backend"
+          :options="hidBackendOptions"
+          size="small"
+          style="width: 220px"
+          @update:value="onHidBackend"
+        />
       </div>
       <div class="kv"><span class="muted">LCD count</span><span>{{ config.config.lcds.length }}</span></div>
       <div class="kv"><span class="muted">Fan curve count</span><span>{{ config.config.fan_curves.length }}</span></div>

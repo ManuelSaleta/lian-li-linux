@@ -1,10 +1,8 @@
 use super::DetectedDevice;
 use anyhow::Result;
+use lianli_shared::config::HidBackend;
 use lianli_shared::device_id::{DeviceFamily, UsbId, KNOWN_DEVICES};
-use lianli_transport::RusbHid;
-use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Enumerate all Lian Li USB devices on the system, sorted by (bus, address).
@@ -63,18 +61,29 @@ pub fn enumerate_devices() -> Result<Vec<DetectedDevice>> {
 /// iSerial across daisy-chained devices, so they cannot be told apart by
 /// serial alone — we open each one and read its `(port, index)` identity
 /// record to disambiguate.
-pub fn probe_tl_lcd_port_indices_rusb(devices: &[DetectedDevice]) -> HashMap<String, (u8, u8)> {
+pub fn probe_tl_lcd_port_indices(
+    devices: &[DetectedDevice],
+    backend: HidBackend,
+) -> HashMap<String, (u8, u8)> {
     let mut out = HashMap::new();
     for det in devices.iter().filter(|d| d.family == DeviceFamily::TlLcd) {
-        let transport = match RusbHid::open_by_usage(det.device.clone(), det.hid_usage_page) {
-            Ok(t) => t,
+        let port_numbers = det.device.port_numbers().unwrap_or_default();
+        let shared = match super::backends::open_shared_hid(
+            &det.device,
+            det.hid_usage_page,
+            det.vid,
+            det.pid,
+            det.bus,
+            &port_numbers,
+            backend,
+        ) {
+            Ok(s) => s,
             Err(e) => {
-                warn!("TL LCD rusb open failed for {}: {e:#}", det.device_id());
+                warn!("TL LCD open failed for {}: {e:#}", det.device_id());
                 continue;
             }
         };
-        let backend = Arc::new(Mutex::new(transport));
-        let tl = crate::tl_lcd::TlLcdDevice::new(backend);
+        let tl = crate::tl_lcd::TlLcdDevice::new(shared);
         match tl.read_identity_raw() {
             Ok(ident) => {
                 out.insert(det.device_id(), (ident.port, ident.index));

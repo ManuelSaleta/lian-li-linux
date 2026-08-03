@@ -11,6 +11,7 @@
 //! decide how to open a device.
 
 use anyhow::Result;
+use lianli_shared::config::HidBackend;
 use lianli_shared::device_id::{DeviceCapabilities, DeviceFamily, TransportKind};
 use lianli_shared::id::DeviceId;
 use parking_lot::Mutex;
@@ -30,6 +31,7 @@ pub struct OpenContext {
     pub address: u8,
     pub serial: Option<String>,
     pub hid_usage_page: Option<u16>,
+    pub hid_backend: HidBackend,
 }
 
 impl OpenContext {
@@ -128,6 +130,6 @@ pub fn open_device(family: DeviceFamily, ctx: &OpenContext) -> Option<Result<Ope
 /// Helper type for drivers whose controllers share an HID backend via
 /// `Arc<Mutex<RusbHid>>`. Re-exported here so driver modules don't need to
 /// spell out the full path.
-pub type SharedHid = Arc<Mutex<lianli_transport::RusbHid>>;
+pub type SharedHid = Arc<Mutex<Box<dyn lianli_transport::HidTransport>>>;
 
 pub type SharedUsb = Arc<Mutex<lianli_transport::RusbBulk>>;

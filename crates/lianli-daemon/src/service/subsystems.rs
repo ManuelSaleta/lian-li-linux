@@ -17,7 +17,7 @@ use crate::controllers::rgb::{DirectColorBuffer, RgbController};
 use crate::ipc::DaemonState;
 use crate::openrgb_server;
 use lianli_shared::ipc::DeviceInfo;
-use lianli_transport::RusbHid;
+use lianli_devices::registry::SharedHid;
 
 // ──────────────────────────────────────────────────────────────────────
 // IPC subsystem
@@ -161,15 +161,18 @@ pub struct DeviceRegistry {
     pub fan_devices: Arc<HashMap<String, Box<dyn FanDevice>>>,
     /// Shared HID backends keyed by device ID — allows fan, RGB, and LCD
     /// controllers for the same physical device to share one USB handle.
-    pub hid_backends: HashMap<String, Arc<Mutex<RusbHid>>>,
+    pub hid_backends: HashMap<String, SharedHid>,
     pub usb_backends: HashMap<String, lianli_devices::registry::SharedUsb>,
     /// Hot-plug detection: device IDs seen at the last topology scan.
     pub last_wired_ids: HashSet<String>,
+    pub failed_open_ids: HashSet<String>,
+    pub init_retry_count: u32,
     /// Cached USB device list from `enumerate_devices()` — refreshed every
     /// 10 s and surfaced to the GUI via `sync_ipc_state`.
     pub cached_usb_devices: Vec<DeviceInfo>,
     /// TL LCD `(port, fan_index)` per device_id. Probed once at init.
     pub tl_lcd_port_index: HashMap<String, (u8, u8)>,
+    pub v2_hid_entries: Vec<lianli_devices::wireless::V2HidEntry>,
 }
 
 impl DeviceRegistry {
@@ -180,8 +183,11 @@ impl DeviceRegistry {
             hid_backends: HashMap::new(),
             usb_backends: HashMap::new(),
             last_wired_ids: HashSet::new(),
+            failed_open_ids: HashSet::new(),
+            init_retry_count: 0,
             cached_usb_devices: Vec::new(),
             tl_lcd_port_index: HashMap::new(),
+            v2_hid_entries: Vec::new(),
         }
     }
 

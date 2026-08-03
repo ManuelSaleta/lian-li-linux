@@ -7,7 +7,7 @@
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use lianli_transport::RusbHid;
+use crate::registry::SharedHid;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::thread;
@@ -71,7 +71,7 @@ fn normalize_colors(mode: RgbMode, colors: &[[u8; 3]]) -> Vec<[u8; 3]> {
 }
 
 pub struct StrimerPlusController {
-    device: Arc<Mutex<RusbHid>>,
+    device: SharedHid,
     firmware: Mutex<Option<String>>,
     /// Tracked mode byte per port, for channel-wide enable bitmap logic.
     port_modes: Mutex<[u8; PORT_COUNT as usize]>,
@@ -80,7 +80,7 @@ pub struct StrimerPlusController {
 }
 
 impl StrimerPlusController {
-    pub fn new(device: Arc<Mutex<RusbHid>>) -> Result<Self> {
+    pub fn new(device: SharedHid) -> Result<Self> {
         let ctrl = Self {
             device,
             firmware: Mutex::new(None),
@@ -429,13 +429,14 @@ impl crate::registry::DeviceDriver for StrimerPlusDriver {
         &self,
         ctx: &crate::registry::OpenContext,
     ) -> anyhow::Result<crate::registry::OpenedDevice> {
-        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
-            ctx.device.clone(),
+        let backend: crate::registry::SharedHid = crate::detect::open_shared_hid(
+            &ctx.device,
             ctx.hid_usage_page,
             ctx.vid,
             ctx.pid,
             ctx.bus,
-            ctx.device.port_numbers().unwrap_or_default(),
+            &ctx.device.port_numbers().unwrap_or_default(),
+            ctx.hid_backend,
         )?;
         let ctrl = Arc::new(StrimerPlusController::new(backend.clone())?);
         let firmware = ctrl.firmware_str();

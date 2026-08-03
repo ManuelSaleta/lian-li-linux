@@ -40,6 +40,7 @@ pub struct RgbController {
     /// Cached last-applied OpenRGB direct colors per (device_id, zone).
     /// Used to re-push state after fan PWM disrupts the device's RGB.
     last_direct: HashMap<(String, u8), Vec<[u8; 3]>>,
+    mb_sync_state: HashMap<String, bool>,
 }
 
 impl RgbController {
@@ -77,6 +78,7 @@ impl RgbController {
             thermal_was_active: false,
             thermal_last_color: None,
             last_direct: HashMap::new(),
+            mb_sync_state: HashMap::new(),
         }
     }
 
@@ -169,9 +171,15 @@ impl RgbController {
         }
 
         for dev_cfg in &config.devices {
-            // MB sync: the motherboard controls RGB. Skip software effects
-            // entirely (sending them would kick the device out of sync) and
-            // just ensure the sync flag is set.
+            let is_wireless = dev_cfg.device_id.starts_with("wireless:");
+            if is_wireless && !self.wireless_state.contains_key(&dev_cfg.device_id) {
+                debug!(
+                    "Skipping {} — wireless device not yet discovered",
+                    dev_cfg.device_id
+                );
+                continue;
+            }
+
             if dev_cfg.mb_rgb_sync {
                 if let Err(e) = self.set_mb_rgb_sync(&dev_cfg.device_id, true) {
                     warn!("Failed to apply MB RGB sync to {}: {e}", dev_cfg.device_id);
@@ -493,34 +501,33 @@ impl RgbController {
         caps
     }
 
-    pub fn set_mb_rgb_sync(&self, device_id: &str, enabled: bool) -> anyhow::Result<()> {
+    pub fn set_mb_rgb_sync(&mut self, device_id: &str, enabled: bool) -> anyhow::Result<()> {
+        if self.mb_sync_state.get(device_id) == Some(&enabled) {
+            return Ok(());
+        }
+
         if let Some(dev) = self.wired.get(device_id) {
             if !dev.supports_mb_rgb_sync() {
                 anyhow::bail!("Device {device_id} does not support MB RGB sync");
             }
             dev.set_mb_rgb_sync(enabled)?;
-            info!(
-                "MB RGB sync {}: {device_id}",
-                if enabled { "enabled" } else { "disabled" }
-            );
-            return Ok(());
-        }
-
-        if let (Some(ref wireless), Some(state)) =
+        } else if let (Some(ref wireless), Some(state)) =
             (&self.wireless, self.wireless_state.get(device_id))
         {
             if !state.fan_type.supports_mb_rgb_sync() {
                 anyhow::bail!("Device {device_id} does not support MB RGB sync");
             }
             wireless.set_mb_rgb_sync(&state.mac, enabled)?;
-            info!(
-                "MB RGB sync {}: {device_id}",
-                if enabled { "enabled" } else { "disabled" }
-            );
-            return Ok(());
+        } else {
+            anyhow::bail!("RGB device not found: {device_id}");
         }
 
-        anyhow::bail!("RGB device not found: {device_id}");
+        self.mb_sync_state.insert(device_id.to_string(), enabled);
+        info!(
+            "MB RGB sync {}: {device_id}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+        Ok(())
     }
 
     pub fn set_fan_direction(
@@ -643,6 +650,10 @@ impl RgbController {
 
     pub fn set_wireless(&mut self, wireless: Option<Arc<WirelessController>>) {
         self.wireless = wireless;
+    }
+
+    pub fn drain_wired(&mut self) -> HashMap<String, Arc<dyn RgbDevice>> {
+        std::mem::take(&mut self.wired)
     }
 
     pub fn refresh_wireless_devices(&mut self) {

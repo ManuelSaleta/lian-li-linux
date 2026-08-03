@@ -186,14 +186,36 @@ fn default_gpu_settings() -> ThermalAlertSourceSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HidBackend {
+    Hidraw,
+    Rusb,
+}
+
+impl Default for HidBackend {
+    fn default() -> Self {
+        Self::Hidraw
+    }
+}
+
+impl std::fmt::Display for HidBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hidraw => write!(f, "hidraw"),
+            Self::Rusb => write!(f, "rusb"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_fps")]
     pub default_fps: f32,
-    /// Legacy `hid_driver` field (removed when hidapi was dropped). Kept as an
-    /// optional, ignored serde field so old config files still parse cleanly.
     #[serde(default, skip_serializing)]
     pub hid_driver: Option<String>,
+    #[serde(default)]
+    pub hid_backend: HidBackend,
     #[serde(default, alias = "devices")]
     pub lcds: Vec<LcdConfig>,
     #[serde(default)]
@@ -245,6 +267,7 @@ impl Default for AppConfig {
         Self {
             default_fps: default_fps(),
             hid_driver: None,
+            hid_backend: HidBackend::default(),
             lcds: Vec::new(),
             fan_curves: Vec::new(),
             fans: None,

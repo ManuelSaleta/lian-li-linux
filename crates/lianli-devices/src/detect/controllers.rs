@@ -1,20 +1,17 @@
 use anyhow::Result;
 use lianli_shared::device_id::DeviceFamily;
-use lianli_transport::RusbHid;
-use parking_lot::Mutex;
+use crate::registry::SharedHid;
 use std::sync::Arc;
 
-/// Result of initializing a wired HID controller that may provide fan, RGB, or both.
 pub struct WiredControllerSet {
     pub fan: Option<Box<dyn crate::traits::FanDevice>>,
     pub rgb: Vec<(String, Arc<dyn crate::traits::RgbDevice>)>,
 }
 
-/// Create all controllers (fan + RGB) for a device family in a single init pass.
 pub fn create_wired_controllers(
     family: DeviceFamily,
     pid: u16,
-    backend: Arc<Mutex<RusbHid>>,
+    backend: SharedHid,
 ) -> Option<Result<WiredControllerSet>> {
     match family {
         DeviceFamily::TlFan => Some(crate::tl_fan::TlFanController::new(backend).map(|ctrl| {
@@ -80,11 +77,10 @@ pub fn create_wired_controllers(
     }
 }
 
-/// Create an HID LCD controller from a pre-opened shared backend.
 pub fn create_hid_lcd_device(
     family: DeviceFamily,
     pid: u16,
-    backend: Arc<Mutex<RusbHid>>,
+    backend: SharedHid,
 ) -> Option<Result<Box<dyn crate::traits::LcdDevice>>> {
     match family {
         DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => Some(

@@ -9,8 +9,8 @@ use super::{AioHandshake, AioLcdVariant, LcdControlMode, ScreenRotation};
 use crate::traits::{AioDevice, FanDevice, LcdDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use lianli_transport::RusbHid;
-use parking_lot::Mutex;
+use crate::registry::SharedHid;
+use lianli_transport::HidTransport;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -80,7 +80,7 @@ pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
 ///
 /// Provides pump + fan speed control, coolant temperature reading, and LCD streaming.
 pub struct HydroShiftLcdController {
-    device: Arc<Mutex<RusbHid>>,
+    device: SharedHid,
     variant: AioLcdVariant,
     last_handshake: Option<AioHandshake>,
     brightness: u8,
@@ -94,7 +94,7 @@ pub struct HydroShiftLcdController {
 }
 
 impl HydroShiftLcdController {
-    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
+    pub fn new(device: SharedHid, pid: u16) -> Result<Self> {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
 
@@ -338,7 +338,7 @@ impl HydroShiftLcdController {
         const MAX_ATTEMPTS: u32 = 20;
 
         let mut dev = self.device.lock();
-        if let Err(e) = self.write_a_command_internal(&mut dev, CMD_RESET_DEVICE, &[]) {
+        if let Err(e) = self.write_a_command_internal(&mut *dev, CMD_RESET_DEVICE, &[]) {
             warn!("AIO LCD: reset device failed: {e}");
             return false;
         }
@@ -407,7 +407,7 @@ impl HydroShiftLcdController {
     fn read_firmware_internal(&self, timeout_ms: i32) -> Result<String> {
         let mut dev = self.device.lock();
 
-        self.write_a_command_internal(&mut dev, CMD_GET_FIRMWARE, &[])?;
+        self.write_a_command_internal(&mut *dev, CMD_GET_FIRMWARE, &[])?;
 
         // Loop reading until we see a firmware response, discarding stale
         // responses from a previous session (e.g. handshake/reset).
@@ -450,7 +450,7 @@ impl HydroShiftLcdController {
 
     fn send_a_command(&self, cmd: u8, data: &[u8], timeout_ms: i32) -> Result<Vec<u8>> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut dev, cmd, data)?;
+        self.write_a_command_internal(&mut *dev, cmd, data)?;
 
         let mut buf = [0u8; A_PACKET_SIZE];
         let n = dev
@@ -473,10 +473,10 @@ impl HydroShiftLcdController {
     /// do NOT call when the device is already locked.
     pub fn write_a_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut dev, cmd, data)
+        self.write_a_command_internal(&mut *dev, cmd, data)
     }
 
-    fn write_a_command_internal(&self, dev: &mut RusbHid, cmd: u8, data: &[u8]) -> Result<()> {
+    fn write_a_command_internal(&self, dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
         let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
         if data.len() > max_payload {
             bail!(
@@ -531,7 +531,7 @@ impl HydroShiftLcdController {
             }
         }
 
-        self.read_ack(&mut dev, "send_b_command", READ_TIMEOUT_MS);
+        self.read_ack(&mut *dev, "send_b_command", READ_TIMEOUT_MS);
         Ok(())
     }
 
@@ -574,7 +574,7 @@ impl HydroShiftLcdController {
             }
         }
 
-        self.read_ack(&mut dev, "send_chunked", ACK_TIMEOUT_MS);
+        self.read_ack(&mut *dev, "send_chunked", ACK_TIMEOUT_MS);
         Ok(())
     }
 
@@ -617,11 +617,11 @@ impl HydroShiftLcdController {
             }
         }
 
-        self.read_ack(&mut dev, "send_chunked_with", ACK_TIMEOUT_MS);
+        self.read_ack(&mut *dev, "send_chunked_with", ACK_TIMEOUT_MS);
         Ok(())
     }
 
-    fn read_ack(&self, dev: &mut RusbHid, label: &str, timeout_ms: i32) {
+    fn read_ack(&self, dev: &mut dyn HidTransport, label: &str, timeout_ms: i32) {
         let mut buf = [0u8; B_PACKET_SIZE];
         if let Err(e) = dev.read_timeout(&mut buf, timeout_ms) {
             debug!("AIO LCD: {label} ack: {e:#}");

@@ -9,6 +9,7 @@
 //! just use [`RusbHid::open_by_usage`].
 
 use crate::error::TransportError;
+use crate::hid_trait::HidTransport;
 use rusb::{Device, DeviceHandle, GlobalContext};
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,8 +89,7 @@ impl RusbHid {
 
         let mut claimed: Vec<u8> = Vec::new();
         for &iface_num in &hid_ifaces {
-            detach_kernel_driver_with_retry(&handle, iface_num);
-            match handle.claim_interface(iface_num) {
+            match detach_and_claim_interface(&handle, iface_num) {
                 Ok(()) => claimed.push(iface_num),
                 Err(e) => warn!("RusbHid: claim interface {iface_num} failed: {e}"),
             }
@@ -410,29 +410,45 @@ impl Drop for RusbHid {
     }
 }
 
-fn detach_kernel_driver_with_retry(handle: &DeviceHandle<GlobalContext>, iface: u8) {
-    for attempt in 0..2 {
-        let active = handle.kernel_driver_active(iface);
-        let needs_detach = matches!(active, Ok(true) | Err(_));
-        if !needs_detach {
-            return;
+/// Detach the kernel driver (if attached) and claim the interface in a single
+/// retry loop. During early boot the kernel `usbhid` driver may still be
+/// probing the interface, and other userspace tools (OpenRGB) may briefly hold
+/// a claim; retrying the full detach+claim cycle gives them time to release.
+fn detach_and_claim_interface(
+    handle: &DeviceHandle<GlobalContext>,
+    iface: u8,
+) -> Result<(), rusb::Error> {
+    const ATTEMPTS: u32 = 15;
+    const DELAY: Duration = Duration::from_millis(200);
+
+    for attempt in 0..ATTEMPTS {
+        // Detach the kernel driver if it is still attached (idempotent —
+        // safe to check on every attempt).
+        if let Ok(true) = handle.kernel_driver_active(iface) {
+            match handle.detach_kernel_driver(iface) {
+                Ok(()) => debug!("RusbHid: detached kernel driver from interface {iface}"),
+                Err(rusb::Error::NotFound) => {}
+                Err(e) => {
+                    debug!("RusbHid: detach interface {iface} (attempt {}): {e}", attempt + 1)
+                }
+            }
         }
-        match handle.detach_kernel_driver(iface) {
+        match handle.claim_interface(iface) {
             Ok(()) => {
-                debug!("RusbHid: detached kernel driver from interface {iface}");
-                return;
+                if attempt > 0 {
+                    debug!("RusbHid: claimed interface {iface} after {attempt} retry/retries");
+                }
+                return Ok(());
             }
-            Err(rusb::Error::NotFound) => return,
-            Err(e) if attempt == 0 => {
-                std::thread::sleep(Duration::from_millis(50));
-                debug!("RusbHid: detach interface {iface} retry after error: {e}");
+            Err(rusb::Error::Busy) => {
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(DELAY);
+                }
             }
-            Err(e) => {
-                warn!("RusbHid: detach interface {iface} failed: {e}");
-                return;
-            }
+            Err(e) => return Err(e),
         }
     }
+    Err(rusb::Error::Busy)
 }
 
 /// Parse the first Usage Page value from a HID report descriptor.
@@ -468,4 +484,30 @@ fn parse_usage_page(desc: &[u8]) -> Option<u16> {
         i += 1 + data_len;
     }
     None
+}
+
+impl HidTransport for RusbHid {
+    fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        RusbHid::write(self, data)
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError> {
+        RusbHid::read_timeout(self, buf, timeout_ms)
+    }
+
+    fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        RusbHid::send_feature_report(self, data)
+    }
+
+    fn get_feature_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        RusbHid::get_feature_report(self, buf)
+    }
+
+    fn get_input_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        RusbHid::get_input_report(self, buf)
+    }
+
+    fn read_flush(&mut self) {
+        RusbHid::read_flush(self)
+    }
 }

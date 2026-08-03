@@ -10,10 +10,9 @@
 use crate::traits::LcdDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use lianli_transport::RusbHid;
+use crate::registry::SharedHid;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 static CHAIN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -92,7 +91,7 @@ pub struct TlLcdIdentity {
 /// Wraps an opened HID device for a TLLCD fan (0x04FC:0x7393).
 /// Provides LCD streaming via 512-byte HID output reports.
 pub struct TlLcdDevice {
-    device: Arc<Mutex<RusbHid>>,
+    device: SharedHid,
     identity: Option<TlLcdIdentity>,
     brightness: u8,
     rotation: ScreenRotation,
@@ -101,7 +100,7 @@ pub struct TlLcdDevice {
 
 impl TlLcdDevice {
     /// Create a new TLLCD device from an opened HID device handle.
-    pub fn new(device: Arc<Mutex<RusbHid>>) -> Self {
+    pub fn new(device: SharedHid) -> Self {
         Self {
             device,
             identity: None,
@@ -512,13 +511,14 @@ impl crate::registry::DeviceDriver for TlLcdDriver {
         &self,
         ctx: &crate::registry::OpenContext,
     ) -> anyhow::Result<crate::registry::OpenedDevice> {
-        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
-            ctx.device.clone(),
+        let backend: crate::registry::SharedHid = crate::detect::open_shared_hid(
+            &ctx.device,
             ctx.hid_usage_page,
             ctx.vid,
             ctx.pid,
             ctx.bus,
-            ctx.device.port_numbers().unwrap_or_default(),
+            &ctx.device.port_numbers().unwrap_or_default(),
+            ctx.hid_backend,
         )?;
         let mut lcd = TlLcdDevice::new(backend);
         crate::traits::LcdDevice::initialize(&mut lcd)?;

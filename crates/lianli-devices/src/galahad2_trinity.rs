@@ -10,7 +10,7 @@
 use crate::traits::{AioDevice, FanDevice, RgbDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use lianli_transport::RusbHid;
+use crate::registry::SharedHid;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,7 +83,7 @@ pub struct Galahad2Handshake {
 /// Provides pump + fan speed control and RGB/LED effects.
 /// Does NOT have LCD or coolant temp sensor.
 pub struct Galahad2TrinityController {
-    device: Arc<Mutex<RusbHid>>,
+    device: SharedHid,
     model: Galahad2TrinityModel,
     handshake_cache: Mutex<Option<(Galahad2Handshake, Instant)>>,
     mb_sync: AtomicBool,
@@ -93,7 +93,7 @@ pub struct Galahad2TrinityController {
 const HANDSHAKE_REFRESH: Duration = Duration::from_millis(500);
 
 impl Galahad2TrinityController {
-    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
+    pub fn new(device: SharedHid, pid: u16) -> Result<Self> {
         let model = Galahad2TrinityModel::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown Galahad2 Trinity PID: {pid:#06x}"))?;
 
@@ -535,13 +535,14 @@ impl crate::registry::DeviceDriver for Galahad2TrinityDriver {
         &self,
         ctx: &crate::registry::OpenContext,
     ) -> anyhow::Result<crate::registry::OpenedDevice> {
-        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
-            ctx.device.clone(),
+        let backend: crate::registry::SharedHid = crate::detect::open_shared_hid(
+            &ctx.device,
             ctx.hid_usage_page,
             ctx.vid,
             ctx.pid,
             ctx.bus,
-            ctx.device.port_numbers().unwrap_or_default(),
+            &ctx.device.port_numbers().unwrap_or_default(),
+            ctx.hid_backend,
         )?;
         let ctrl = std::sync::Arc::new(Galahad2TrinityController::new(backend.clone(), ctx.pid)?);
         let model = ctrl.model().name().to_string();

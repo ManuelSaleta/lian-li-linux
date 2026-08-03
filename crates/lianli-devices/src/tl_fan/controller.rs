@@ -2,9 +2,9 @@ use super::{TlFanHandshake, TlFanInfo};
 use crate::traits::FanDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode};
-use lianli_transport::RusbHid;
+use crate::registry::SharedHid;
+use lianli_transport::HidTransport;
 use parking_lot::Mutex;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub(super) const REPORT_ID: u8 = 0x01;
@@ -34,7 +34,7 @@ pub(super) const CMD_BLINK_PORT: u8 = 0xB4;
 /// Wraps an opened HID device for a TL Fan controller (0x0416:0x7372).
 /// Provides fan speed control, RPM reading, and RGB/LED effects.
 pub struct TlFanController {
-    pub(super) device: Arc<Mutex<RusbHid>>,
+    pub(super) device: SharedHid,
     /// Last handshake result. Behind a Mutex for interior mutability — allows
     /// `read_fan_rpm(&self)` to refresh RPMs while the device is shared across threads.
     pub(super) last_handshake: Mutex<Option<TlFanHandshake>>,
@@ -42,7 +42,7 @@ pub struct TlFanController {
 
 impl TlFanController {
     /// Open a TL Fan controller from an already-opened HID device.
-    pub fn new(device: Arc<Mutex<RusbHid>>) -> Result<Self> {
+    pub fn new(device: SharedHid) -> Result<Self> {
         let ctrl = Self {
             device,
             last_handshake: Mutex::new(None),
@@ -54,6 +54,11 @@ impl TlFanController {
 
     fn initialize(&self) -> Result<()> {
         info!("Initializing TL Fan Controller (0x0416:0x7372)");
+
+        {
+            let mut dev = self.device.lock();
+            dev.read_flush();
+        }
 
         match self.read_product_info() {
             Ok(version) => info!("  Firmware: {version}"),
@@ -80,7 +85,7 @@ impl TlFanController {
                     warn!("  Failed to set up fan groups: {e}");
                 }
             }
-            Err(e) => warn!("  Handshake failed: {e}"),
+            Err(e) => warn!("  Handshake failed: {e} — will retry on next fan tick"),
         }
 
         Ok(())
@@ -214,7 +219,7 @@ impl TlFanController {
         Ok(())
     }
 
-    fn send_speed_locked(dev: &mut RusbHid, port: u8, fan_index: u8, duty: u8) -> Result<()> {
+    fn send_speed_locked(dev: &mut dyn HidTransport, port: u8, fan_index: u8, duty: u8) -> Result<()> {
         let addr = (port << 4) | (fan_index & 0x0F);
         let pkt = Self::build_packet(CMD_SET_FAN_SPEED, &[addr, duty]);
         dev.read_flush();
@@ -225,21 +230,18 @@ impl TlFanController {
     }
 
     pub fn set_port_speed(&self, port: u8, duty: u8) -> Result<()> {
-        let mut fan_count = self
+        if self.last_handshake.lock().is_none() {
+            let _ = self.handshake_with_timeout(INIT_READ_TIMEOUT_MS);
+        }
+        let fan_count = self
             .last_handshake
             .lock()
             .as_ref()
             .map(|hs| hs.port_fan_counts[port as usize])
-            .unwrap_or(1);
+            .unwrap_or(0);
 
         if fan_count == 0 {
-            let _ = self.handshake();
-            fan_count = self
-                .last_handshake
-                .lock()
-                .as_ref()
-                .map(|hs| hs.port_fan_counts[port as usize])
-                .unwrap_or(1);
+            return Ok(());
         }
 
         for idx in 0..fan_count {
@@ -250,25 +252,23 @@ impl TlFanController {
 
     /// Set all port speeds atomically under one device lock.
     pub fn set_all_port_speeds(&self, duties: &[u8]) -> Result<()> {
-        let mut fan_counts: [u8; 4] = self
+        let needs_handshake = self.last_handshake.lock().is_none();
+        if needs_handshake {
+            let _ = self.handshake_with_timeout(INIT_READ_TIMEOUT_MS);
+        }
+        let fan_counts: [u8; 4] = self
             .last_handshake
             .lock()
             .as_ref()
             .map(|hs| hs.port_fan_counts)
-            .unwrap_or([1, 1, 1, 1]);
+            .unwrap_or([0; 4]);
         if fan_counts.iter().all(|&c| c == 0) {
-            let _ = self.handshake();
-            fan_counts = self
-                .last_handshake
-                .lock()
-                .as_ref()
-                .map(|hs| hs.port_fan_counts)
-                .unwrap_or([1, 1, 1, 1]);
+            return Ok(());
         }
         let mut dev = self.device.lock();
         for (port, &duty) in duties.iter().take(4).enumerate() {
             for idx in 0..fan_counts[port] {
-                Self::send_speed_locked(&mut dev, port as u8, idx, duty)?;
+                Self::send_speed_locked(&mut *dev, port as u8, idx, duty)?;
             }
         }
         Ok(())

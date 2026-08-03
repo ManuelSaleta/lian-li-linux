@@ -329,6 +329,7 @@ export interface Ene6k77DeviceConfig {
 // ─── AppConfig ───────────────────────────────────────────────────────────────
 export interface AppConfig {
   default_fps: number;
+  hid_backend: "hidraw" | "rusb";
   lcds: LcdConfig[];
   fan_curves: FanCurve[];
   fans: FanConfig | null;

@@ -33,13 +33,14 @@ impl DeviceDriver for TlFanDriver {
     }
 
     fn open(&self, ctx: &OpenContext) -> Result<OpenedDevice> {
-        let backend: SharedHid = crate::detect::open_hid_with_reopener(
-            ctx.device.clone(),
+        let backend: SharedHid = crate::detect::open_shared_hid(
+            &ctx.device,
             ctx.hid_usage_page,
             ctx.vid,
             ctx.pid,
             ctx.bus,
-            ctx.device.port_numbers().unwrap_or_default(),
+            &ctx.device.port_numbers().unwrap_or_default(),
+            ctx.hid_backend,
         )?;
         let ctrl = std::sync::Arc::new(TlFanController::new(backend.clone())?);
         let rgb = ctrl

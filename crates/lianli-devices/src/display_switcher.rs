@@ -17,7 +17,7 @@
 //!   0xAD26 — Vision 9.2"
 
 use anyhow::{Context, Result};
-use lianli_transport::RusbHid;
+use lianli_shared::config::HidBackend;
 use tracing::info;
 
 pub const SWITCHER_VID: u16 = 0x1A86;
@@ -37,7 +37,7 @@ fn is_lancool_pid(pid: u16) -> bool {
 ///
 /// Opens the CH340 HID device via libusb and sends the mode-switch bytes.
 /// The device will reboot and re-enumerate as VID=0x1CBE on USB.
-pub fn switch_to_lcd_mode(pid: u16) -> Result<()> {
+pub fn switch_to_lcd_mode(pid: u16, backend: HidBackend) -> Result<()> {
     let device = rusb::devices()?
         .iter()
         .find(|d| {
@@ -47,7 +47,10 @@ pub fn switch_to_lcd_mode(pid: u16) -> Result<()> {
         })
         .context("opening CH340 display-mode device")?;
 
-    let mut hid = RusbHid::open_by_usage(device, None)?;
+    let mut hid = crate::detect::open_hid_transient(
+        &device, None, SWITCHER_VID, pid, device.bus_number(),
+        &device.port_numbers().unwrap_or_default(), backend,
+    )?;
     let payload = if is_lancool_pid(pid) {
         SWITCH_TO_LCD_LANCOOL
     } else {

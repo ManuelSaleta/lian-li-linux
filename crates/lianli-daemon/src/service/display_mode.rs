@@ -76,7 +76,7 @@ impl ServiceManager {
         self.mark_mode_switch(device_id);
         thread::sleep(Duration::from_millis(300));
 
-        match lianli_devices::display_switcher::switch_to_lcd_mode(pid) {
+        match lianli_devices::display_switcher::switch_to_lcd_mode(pid, self.hid_backend()) {
             Ok(()) => info!("Switched {device_id} to LCD mode"),
             Err(e) => warn!("Failed to switch {device_id} to LCD mode: {e:#}"),
         }

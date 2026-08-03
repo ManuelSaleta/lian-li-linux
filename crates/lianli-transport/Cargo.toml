@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rusb = { workspace = true }
+hidapi = { version = "2.6", default-features = false, features = ["linux-shared-hidraw"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

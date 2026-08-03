@@ -1,5 +1,5 @@
 use super::ServiceManager;
-use lianli_devices::detect::{enumerate_devices, probe_tl_lcd_port_indices_rusb};
+use lianli_devices::detect::{enumerate_devices, probe_tl_lcd_port_indices};
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::DeviceInfo;
 use lianli_shared::screen::screen_info_for;
@@ -39,7 +39,7 @@ impl ServiceManager {
         if current_ids == cached_ids {
             return;
         }
-        let probed = probe_tl_lcd_port_indices_rusb(usb_devices);
+        let probed = probe_tl_lcd_port_indices(usb_devices, self.hid_backend());
         self.registry.tl_lcd_port_index.clear();
 
         let mut entries: Vec<(String, Vec<u8>, (u8, u8))> = Vec::new();
@@ -90,13 +90,15 @@ impl ServiceManager {
     }
 
     fn build_usb_device_cache(&mut self, usb_devices: Vec<lianli_devices::detect::DetectedDevice>) {
-        let v2_hid_entries = lianli_devices::wireless::query_v2_hid_macs();
+        if self.registry.v2_hid_entries.is_empty() {
+            self.registry.v2_hid_entries = lianli_devices::wireless::query_v2_hid_macs(self.hid_backend());
+        }
+        let v2_hid_entries = self.registry.v2_hid_entries.clone();
         let known_wireless_macs: HashSet<[u8; 6]> =
             self.wireless.devices().iter().map(|d| d.mac).collect();
         if !v2_hid_entries.is_empty() {
             debug!("V2 HID MAC map: {} entr(y/ies)", v2_hid_entries.len());
         }
-
         let mut cached = Vec::new();
         for det in usb_devices {
             if matches!(

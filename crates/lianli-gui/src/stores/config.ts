@@ -15,6 +15,7 @@ import type {
 function defaultConfig(): AppConfig {
   return {
     default_fps: 30,
+    hid_backend: "hidraw",
     lcds: [],
     fan_curves: [],
     fans: null,

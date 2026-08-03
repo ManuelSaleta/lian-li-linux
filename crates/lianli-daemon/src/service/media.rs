@@ -316,7 +316,7 @@ impl ServiceManager {
                                 serial: Some(candidate.device_id.clone()),
                                 hid_usage_page: None,
                             };
-                            match open_hid_lcd_device(&det) {
+                            match open_hid_lcd_device(&det, self.hid_backend()) {
                                 Some(result) => result.map(|d| {
                                     LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
                                 }),

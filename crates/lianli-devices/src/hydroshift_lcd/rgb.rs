@@ -5,18 +5,16 @@ use super::AioLcdVariant;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use lianli_transport::RusbHid;
-use parking_lot::Mutex;
-use std::sync::Arc;
+use crate::registry::SharedHid;
 use tracing::{debug, info};
 
 pub struct AioLcdRgbController {
-    device: Arc<Mutex<RusbHid>>,
+    device: SharedHid,
     variant: AioLcdVariant,
 }
 
 impl AioLcdRgbController {
-    pub fn new(device: Arc<Mutex<RusbHid>>, pid: u16) -> Result<Self> {
+    pub fn new(device: SharedHid, pid: u16) -> Result<Self> {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
         info!("Opened {} RGB controller", variant.name());

@@ -140,13 +140,14 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
         &self,
         ctx: &crate::registry::OpenContext,
     ) -> anyhow::Result<crate::registry::OpenedDevice> {
-        let backend: crate::registry::SharedHid = crate::detect::open_hid_with_reopener(
-            ctx.device.clone(),
+        let backend: crate::registry::SharedHid = crate::detect::open_shared_hid(
+            &ctx.device,
             ctx.hid_usage_page,
             ctx.vid,
             ctx.pid,
             ctx.bus,
-            ctx.device.port_numbers().unwrap_or_default(),
+            &ctx.device.port_numbers().unwrap_or_default(),
+            ctx.hid_backend,
         )?;
         let pid = ctx.pid;
         let variant = AioLcdVariant::from_pid(pid).unwrap_or(AioLcdVariant::HydroShiftLcd);

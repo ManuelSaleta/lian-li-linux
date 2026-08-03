@@ -1,7 +1,6 @@
 use crate::ipc::{self, DaemonState};
 use anyhow::Result;
 use lianli_devices::crypto::PacketBuilder;
-use lianli_devices::detect::ensure_hid_devices_bound;
 use lianli_devices::wireless::WirelessController;
 use lianli_shared::config::AppConfig;
 use lianli_shared::systeminfo::SysSensor;
@@ -127,16 +126,6 @@ impl ServiceManager {
         })
     }
 
-    /// Check if the configured HID driver is rusb.
-    ///
-    /// Always `true` after the hidapi backend was dropped. Kept as a thin
-    /// helper so legacy call sites can stay readable while they're being
-    /// migrated off the `use_rusb()` branch pattern during the daemon rewrite.
-    fn use_rusb(&self) -> bool {
-        true
-    }
-
-    /// Stable device ID for a rusb device — uses serial or USB port path.
     fn rusb_device_id(det: &lianli_devices::detect::DetectedDevice) -> String {
         det.device_id()
     }
@@ -279,9 +268,6 @@ impl ServiceManager {
         if self.wireless.has_discovered_devices() {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        if !self.use_rusb() {
-            ensure_hid_devices_bound();
-        }
         self.init_wired_devices();
         self.start_openrgb_server();
         self.ensure_aio_defaults();
@@ -422,12 +408,16 @@ impl ServiceManager {
                     self.handle_set_ene6k77_fan_quantity(&device_id, quantity);
                 }
                 DaemonEvent::IpcUpdate => {
-                    // Check for IPC-triggered config reload
                     let ipc_state = self.ipc.state.lock();
                     info!("Config reload triggered via IPC");
-                    // Force the config watcher to pick up the new file
                     drop(ipc_state);
+                    let old_backend = self.config.as_ref().map(|c| c.hid_backend);
                     if self.load_config(tx.clone()) {
+                        if old_backend != self.config.as_ref().map(|c| c.hid_backend) {
+                            info!("HID backend changed — requesting daemon restart");
+                            self.restart_requested = true;
+                            break;
+                        }
                         self.start_fan_control();
                         if let (Some(aio), Some(cfg)) =
                             (self.controllers.aio.as_ref(), self.config.as_ref())

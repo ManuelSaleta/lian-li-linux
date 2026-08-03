@@ -25,6 +25,7 @@ jobs:
         sudo apt-get install -y \
           libudev-dev \
           libusb-1.0-0-dev \
+          libhidapi-dev \
           libfontconfig-dev \
           pkg-config \
           nasm \

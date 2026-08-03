@@ -88,10 +88,19 @@ impl RusbBulk {
             Err(e) => return Err(e.into()),
         }
 
-        match self.handle.set_active_configuration(1) {
-            Ok(()) | Err(rusb::Error::Busy) | Err(rusb::Error::NotFound) => {}
-            Err(e) => {
-                debug!("{name} set_active_configuration: {e}, continuing");
+        let need_reconfig = self
+            .handle
+            .device()
+            .active_config_descriptor()
+            .ok()
+            .map(|c| c.number() != 1)
+            .unwrap_or(true);
+        if need_reconfig {
+            match self.handle.set_active_configuration(1) {
+                Ok(()) | Err(rusb::Error::Busy) | Err(rusb::Error::NotFound) => {}
+                Err(e) => {
+                    debug!("{name} set_active_configuration: {e}, continuing");
+                }
             }
         }
 
@@ -103,8 +112,8 @@ impl RusbBulk {
             Err(rusb::Error::Busy) => {
                 warn!("{name} interface 0 busy, retrying...");
                 let mut claimed = false;
-                for attempt in 1..=5u32 {
-                    std::thread::sleep(Duration::from_millis(200));
+                for attempt in 1..=20u32 {
+                    std::thread::sleep(Duration::from_millis(250));
                     if let Ok(true) = self.handle.kernel_driver_active(0) {
                         let _ = self.handle.detach_kernel_driver(0);
                     }
@@ -114,7 +123,7 @@ impl RusbBulk {
                             break;
                         }
                         Err(rusb::Error::Busy) => {
-                            debug!("{name} interface 0 still busy (attempt {attempt}/5)");
+                            debug!("{name} interface 0 still busy (attempt {attempt}/20)");
                             continue;
                         }
                         Err(e) => return Err(e.into()),
