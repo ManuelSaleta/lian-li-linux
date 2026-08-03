@@ -186,17 +186,12 @@ fn default_gpu_settings() -> ThermalAlertSourceSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HidBackend {
+    #[default]
     Hidraw,
     Rusb,
-}
-
-impl Default for HidBackend {
-    fn default() -> Self {
-        Self::Hidraw
-    }
 }
 
 impl std::fmt::Display for HidBackend {

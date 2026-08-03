@@ -136,15 +136,14 @@ fn open_hidraw_device(
     port_numbers: &[u8],
     usage_page: Option<u16>,
 ) -> Result<hidapi::HidDevice> {
-    let api = hidapi::HidApi::new()
-        .map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
+    let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
 
     let candidates: Vec<_> = api
         .device_list()
         .filter(|info| {
             info.vendor_id() == vid
                 && info.product_id() == pid
-                && usage_page.map_or(true, |up| info.usage_page() == up)
+                && usage_page.is_none_or(|up| info.usage_page() == up)
         })
         .collect();
 

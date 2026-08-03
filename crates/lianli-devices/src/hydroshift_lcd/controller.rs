@@ -6,10 +6,10 @@ use super::protocol::{
     READ_TIMEOUT_MS, REPORT_ID_A, REPORT_ID_B, REPORT_ID_C,
 };
 use super::{AioHandshake, AioLcdVariant, LcdControlMode, ScreenRotation};
+use crate::registry::SharedHid;
 use crate::traits::{AioDevice, FanDevice, LcdDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use crate::registry::SharedHid;
 use lianli_transport::HidTransport;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -476,7 +476,12 @@ impl HydroShiftLcdController {
         self.write_a_command_internal(&mut *dev, cmd, data)
     }
 
-    fn write_a_command_internal(&self, dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
+    fn write_a_command_internal(
+        &self,
+        dev: &mut dyn HidTransport,
+        cmd: u8,
+        data: &[u8],
+    ) -> Result<()> {
         let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
         if data.len() > max_payload {
             bail!(

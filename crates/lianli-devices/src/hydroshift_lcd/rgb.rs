@@ -2,10 +2,10 @@ use super::protocol::{
     A_HEADER_LEN, A_PACKET_SIZE, CMD_SET_FAN_LIGHT, CMD_SET_PUMP_LIGHT, FAN_LED_COUNT, REPORT_ID_A,
 };
 use super::AioLcdVariant;
+use crate::registry::SharedHid;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use crate::registry::SharedHid;
 use tracing::{debug, info};
 
 pub struct AioLcdRgbController {

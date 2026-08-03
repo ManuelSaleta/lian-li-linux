@@ -83,12 +83,12 @@ pub fn query_v2_hid_macs(backend: HidBackend) -> Vec<V2HidEntry> {
 /// vendor's wire format, and auto-detect the MAC offset on read (the
 /// response may or may not include the Report ID byte depending on the
 /// device's HID descriptor).
-fn query_single_mac(
-    device: rusb::Device<GlobalContext>,
-    backend: HidBackend,
-) -> Result<[u8; 6]> {
+fn query_single_mac(device: rusb::Device<GlobalContext>, backend: HidBackend) -> Result<[u8; 6]> {
     let mut hid = crate::detect::open_hid_transient(
-        &device, None, V2_HID_VID, V2_HID_PID,
+        &device,
+        None,
+        V2_HID_VID,
+        V2_HID_PID,
         device.bus_number(),
         &device.port_numbers().unwrap_or_default(),
         backend,

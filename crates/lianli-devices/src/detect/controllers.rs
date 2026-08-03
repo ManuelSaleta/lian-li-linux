@@ -1,6 +1,6 @@
+use crate::registry::SharedHid;
 use anyhow::Result;
 use lianli_shared::device_id::DeviceFamily;
-use crate::registry::SharedHid;
 use std::sync::Arc;
 
 pub struct WiredControllerSet {

@@ -4,10 +4,10 @@
 //! data. 40 ms inter-command delay (double the ENE6K77 family's 20 ms).
 //! 12 ports across 2 channels, up to 27 LEDs per port.
 
+use crate::registry::SharedHid;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use crate::registry::SharedHid;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::thread;

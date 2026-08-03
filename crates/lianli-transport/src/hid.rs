@@ -429,7 +429,10 @@ fn detach_and_claim_interface(
                 Ok(()) => debug!("RusbHid: detached kernel driver from interface {iface}"),
                 Err(rusb::Error::NotFound) => {}
                 Err(e) => {
-                    debug!("RusbHid: detach interface {iface} (attempt {}): {e}", attempt + 1)
+                    debug!(
+                        "RusbHid: detach interface {iface} (attempt {}): {e}",
+                        attempt + 1
+                    )
                 }
             }
         }

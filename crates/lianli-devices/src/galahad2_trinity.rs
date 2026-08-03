@@ -7,10 +7,10 @@
 //! RPM is read via the handshake command (0x81).
 //! No coolant temperature sensor — CPU temp must come from the system.
 
+use crate::registry::SharedHid;
 use crate::traits::{AioDevice, FanDevice, RgbDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
-use crate::registry::SharedHid;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

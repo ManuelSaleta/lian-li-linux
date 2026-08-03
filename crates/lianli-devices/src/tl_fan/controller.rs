@@ -1,8 +1,8 @@
 use super::{TlFanHandshake, TlFanInfo};
+use crate::registry::SharedHid;
 use crate::traits::FanDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode};
-use crate::registry::SharedHid;
 use lianli_transport::HidTransport;
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
@@ -219,7 +219,12 @@ impl TlFanController {
         Ok(())
     }
 
-    fn send_speed_locked(dev: &mut dyn HidTransport, port: u8, fan_index: u8, duty: u8) -> Result<()> {
+    fn send_speed_locked(
+        dev: &mut dyn HidTransport,
+        port: u8,
+        fan_index: u8,
+        duty: u8,
+    ) -> Result<()> {
         let addr = (port << 4) | (fan_index & 0x0F);
         let pkt = Self::build_packet(CMD_SET_FAN_SPEED, &[addr, duty]);
         dev.read_flush();

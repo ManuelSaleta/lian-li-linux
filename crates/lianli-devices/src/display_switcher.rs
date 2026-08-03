@@ -48,8 +48,13 @@ pub fn switch_to_lcd_mode(pid: u16, backend: HidBackend) -> Result<()> {
         .context("opening CH340 display-mode device")?;
 
     let mut hid = crate::detect::open_hid_transient(
-        &device, None, SWITCHER_VID, pid, device.bus_number(),
-        &device.port_numbers().unwrap_or_default(), backend,
+        &device,
+        None,
+        SWITCHER_VID,
+        pid,
+        device.bus_number(),
+        &device.port_numbers().unwrap_or_default(),
+        backend,
     )?;
     let payload = if is_lancool_pid(pid) {
         SWITCH_TO_LCD_LANCOOL

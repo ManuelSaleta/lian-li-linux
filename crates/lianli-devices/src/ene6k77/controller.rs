@@ -1,8 +1,8 @@
 use super::{Ene6k77Firmware, Ene6k77Model, CMD_DELAY, REPORT_ID};
+use crate::registry::SharedHid;
 use crate::traits::FanDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope};
-use crate::registry::SharedHid;
 use parking_lot::Mutex;
 use std::thread;
 use tracing::{debug, info, warn};

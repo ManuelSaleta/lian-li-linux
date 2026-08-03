@@ -91,7 +91,8 @@ impl ServiceManager {
 
     fn build_usb_device_cache(&mut self, usb_devices: Vec<lianli_devices::detect::DetectedDevice>) {
         if self.registry.v2_hid_entries.is_empty() {
-            self.registry.v2_hid_entries = lianli_devices::wireless::query_v2_hid_macs(self.hid_backend());
+            self.registry.v2_hid_entries =
+                lianli_devices::wireless::query_v2_hid_macs(self.hid_backend());
         }
         let v2_hid_entries = self.registry.v2_hid_entries.clone();
         let known_wireless_macs: HashSet<[u8; 6]> =

@@ -16,7 +16,6 @@ impl HidTransport for HidrawTransport {
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
         self.device
             .write(data)
-            .map(|n| n as usize)
             .map_err(|e| TransportError::Write(e.to_string()))
     }
 

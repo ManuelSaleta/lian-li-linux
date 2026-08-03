@@ -7,10 +7,10 @@
 //! JPEG frames are chunked into 501-byte payloads per packet.
 //! Display is 400x400 pixels, max ~30fps.
 
+use crate::registry::SharedHid;
 use crate::traits::LcdDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
-use crate::registry::SharedHid;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};

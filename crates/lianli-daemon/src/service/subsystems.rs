@@ -16,8 +16,8 @@ use parking_lot::Mutex;
 use crate::controllers::rgb::{DirectColorBuffer, RgbController};
 use crate::ipc::DaemonState;
 use crate::openrgb_server;
-use lianli_shared::ipc::DeviceInfo;
 use lianli_devices::registry::SharedHid;
+use lianli_shared::ipc::DeviceInfo;
 
 // ──────────────────────────────────────────────────────────────────────
 // IPC subsystem

@@ -179,7 +179,10 @@ impl ServiceManager {
     }
 
     pub(super) fn hid_backend(&self) -> HidBackend {
-        self.config.as_ref().map(|c| c.hid_backend).unwrap_or_default()
+        self.config
+            .as_ref()
+            .map(|c| c.hid_backend)
+            .unwrap_or_default()
     }
 
     /// Initialize all wired USB devices (fan + RGB + LCD + AIO) via the
@@ -217,10 +220,15 @@ impl ServiceManager {
             }
         };
 
-        let present_ids: HashSet<String> = usb_devs.iter().map(|det| Self::rusb_device_id(det)).collect();
+        let present_ids: HashSet<String> = usb_devs
+            .iter()
+            .map(|det| Self::rusb_device_id(det))
+            .collect();
         fan_devices.retain(|id, _| present_ids.contains(id));
         self.registry.fan_device_info.retain(|info| {
-            present_ids.iter().any(|id| info.device_id.starts_with(id.as_str()))
+            present_ids
+                .iter()
+                .any(|id| info.device_id.starts_with(id.as_str()))
         });
 
         const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -341,7 +349,10 @@ impl ServiceManager {
 
         if failed_ids.is_empty() {
             if self.registry.init_retry_count > 0 {
-                info!("All wired devices opened successfully after {} retry/retries", self.registry.init_retry_count);
+                info!(
+                    "All wired devices opened successfully after {} retry/retries",
+                    self.registry.init_retry_count
+                );
             }
             self.registry.init_retry_count = 0;
         } else {
