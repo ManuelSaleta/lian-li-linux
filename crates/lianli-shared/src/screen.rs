@@ -14,6 +14,10 @@ pub struct ScreenInfo {
     /// background layer). Used by the HS2 OLED Curve, whose firmware renders
     /// the PNG layer on the OLED panel.
     pub png: bool,
+    /// StartPlay (0x79) header byte[13] play-count / region selector. The HS2
+    /// OLED Curve (WinUsbHS2 firmware) requires 1 for single-screen; all other
+    /// WinUSB LCDs leave this field unused (0).
+    pub play_count: u8,
 }
 
 impl ScreenInfo {
@@ -27,6 +31,7 @@ impl ScreenInfo {
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     pub const TLLCD: Self = Self {
@@ -38,6 +43,7 @@ impl ScreenInfo {
         h264: false,
         needs_keepalive: true,
         png: false,
+        play_count: 0,
     };
 
     pub const AIO_LCD_480: Self = Self {
@@ -49,73 +55,80 @@ impl ScreenInfo {
         h264: true,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     pub const HYDROSHIFT2: Self = Self {
         width: 480,
         height: 480,
-        max_fps: 24,
+        max_fps: 60,
         jpeg_quality: 85,
         max_payload: 153_600,
         h264: true,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     /// HydroShift II OLED Curve (0x1CBE:0xA068) — 1080×2288 OLED panel.
     pub const HYDROSHIFT2_OLED_CURVE: Self = Self {
         width: 1080,
         height: 2288,
-        max_fps: 30,
+        max_fps: 60,
         jpeg_quality: 95,
         max_payload: 1_048_576,
         h264: true,
         needs_keepalive: false,
         png: true,
+        play_count: 1,
     };
 
     pub const LANCOOL_207: Self = Self {
         width: 720,
         height: 1472,
-        max_fps: 24,
+        max_fps: 120,
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     pub const UNIVERSAL_SCREEN: Self = Self {
         width: 480,
         height: 1920,
-        max_fps: 24,
+        max_fps: 120,
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: true,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     pub const VISION_9P2: Self = Self {
         width: 464,
         height: 1920,
-        max_fps: 24,
+        max_fps: 120,
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     pub const FLEX_LCD: Self = Self {
         width: 400,
         height: 400,
-        max_fps: 24,
+        max_fps: 120,
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: true,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 }
 

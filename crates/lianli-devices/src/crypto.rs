@@ -185,11 +185,16 @@ impl PacketBuilder {
         self.build_winusb(CMD_GET_VER, &[])
     }
 
-    pub fn start_play_header_winusb(&mut self, chunk_len: usize, is_last: bool) -> Vec<u8> {
+    pub fn start_play_header_winusb(
+        &mut self,
+        chunk_len: usize,
+        is_last: bool,
+        play_count: u8,
+    ) -> Vec<u8> {
         let play_tick = self.start_time.elapsed().as_millis() as u32;
         let mut params = (chunk_len as u32).to_be_bytes().to_vec();
         params.push(if is_last { 1 } else { 0 });
-        params.push(0);
+        params.push(play_count);
         params.extend_from_slice(&play_tick.to_be_bytes());
         self.build_winusb(CMD_START_PLAY, &params)
     }

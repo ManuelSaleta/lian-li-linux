@@ -242,6 +242,7 @@ impl WinUsbLcdDevice {
         if !self.initialized {
             self.do_init()?;
         }
+        self.apply_stream_fps(fps)?;
 
         let mut file = std::fs::File::open(path).context("opening h264 file")?;
         let mut file_buf = vec![0u8; self.h264_chunk_size];
@@ -284,11 +285,10 @@ impl WinUsbLcdDevice {
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
 
-        let _ = fps;
-
         if !self.initialized {
             self.do_init()?;
         }
+        self.apply_stream_fps(fps)?;
 
         let mut buf = vec![0u8; self.h264_chunk_size];
 
@@ -311,7 +311,9 @@ impl WinUsbLcdDevice {
     }
 
     fn send_h264_chunk(&mut self, data: &[u8], is_last: bool) -> Result<()> {
-        let header = self.builder.start_play_header_winusb(data.len(), is_last);
+        let header =
+            self.builder
+                .start_play_header_winusb(data.len(), is_last, self.screen.play_count);
         let mut packet = vec![0u8; 512 + data.len()];
         packet[..512].copy_from_slice(&header);
         packet[512..512 + data.len()].copy_from_slice(data);
@@ -366,6 +368,14 @@ impl WinUsbLcdDevice {
         self.read_response("frame rate", LCD_READ_TIMEOUT);
         debug!("Set frame rate to {fps}");
         Ok(())
+    }
+
+    /// Clamp the requested stream fps to the screen's advertised ceiling and
+    /// push it to the firmware. Called at the start of every H264 stream so
+    /// the device playback rate matches the source.
+    fn apply_stream_fps(&mut self, fps: f32) -> Result<()> {
+        let clamped = fps.round().clamp(1.0, self.screen.max_fps as f32) as u8;
+        self.set_frame_rate(clamped)
     }
 
     /// Switch the device from LCD mode to desktop mode.
@@ -443,7 +453,6 @@ impl WinUsbLcdDevice {
         self.send_command(stop_clock, "StopClock");
 
         self.clear_layers();
-        self.set_frame_rate(30)?;
 
         self.initialized = true;
         Ok(())

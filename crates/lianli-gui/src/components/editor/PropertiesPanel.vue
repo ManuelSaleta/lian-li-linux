@@ -24,6 +24,23 @@ const w = computed(() => props.widget);
 // on every inline handler. `current` is only read when `w` is non-null.
 const current = computed(() => w.value as Widget);
 
+const needsFps = computed(() => {
+  const t = w.value?.kind.type;
+  return t === "video" || t === "clock_digital" || t === "clock_analog";
+});
+
+const needsUpdateInterval = computed(() => {
+  const t = w.value?.kind.type;
+  return (
+    t === "value_text" ||
+    t === "radial_gauge" ||
+    t === "vertical_bar" ||
+    t === "horizontal_bar" ||
+    t === "speedometer" ||
+    t === "sparkline"
+  );
+});
+
 // Keys of the kind payload (everything except `type`), in declaration order.
 const kindKeys = computed<string[]>(() => {
   if (!w.value) return [];
@@ -264,6 +281,12 @@ async function browsePath(key: string) {
           <n-input-number :value="current.rotation ?? 0" size="small" @update:value="(v) => emit('patchCommon', current.id, 'rotation', v ?? 0)" />
         </div>
         <div class="field check"><n-checkbox :checked="current.visible !== false" @update:checked="(v) => emit('patchCommon', current.id, 'visible', v)">Visible</n-checkbox></div>
+      </div>
+      <div v-if="needsFps" class="field"><label class="muted">FPS</label>
+        <n-input-number :value="current.fps ?? 30" size="small" :min="1" :max="60" @update:value="(v) => emit('patchCommon', current.id, 'fps', v ?? 30)" />
+      </div>
+      <div v-if="needsUpdateInterval" class="field"><label class="muted">Update interval (ms)</label>
+        <n-input-number :value="current.update_interval_ms ?? 1000" size="small" :min="100" :max="10000" :step="100" @update:value="(v) => emit('patchCommon', current.id, 'update_interval_ms', v ?? 1000)" />
       </div>
 
       <div class="group-title">{{ current.kind.type }}</div>

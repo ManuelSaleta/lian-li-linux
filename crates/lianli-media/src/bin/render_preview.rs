@@ -71,6 +71,7 @@ fn main() -> Result<()> {
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
 
     let asset = CustomAsset::new(&template, 0.0, &screen, &[], false)

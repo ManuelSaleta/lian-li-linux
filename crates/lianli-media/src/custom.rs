@@ -185,7 +185,8 @@ impl CustomAsset {
 
             if let WidgetKind::Video { path, .. } = &widget.kind {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
-                let decode_fps = crate::video::cap_fps_to_source(path, widget.fps.unwrap_or(30.0));
+                let requested = widget.fps.unwrap_or(30.0).min(screen.max_fps as f32);
+                let decode_fps = crate::video::cap_fps_to_source(path, requested);
                 match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1)) {
                     Ok((frames, durations)) => {
                         let total_ms: u64 = durations

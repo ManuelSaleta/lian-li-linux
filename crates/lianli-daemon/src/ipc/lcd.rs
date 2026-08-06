@@ -59,6 +59,7 @@ pub fn render_template_preview(
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
     let all_sensors = lianli_shared::sensors::enumerate_sensors();
     match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false) {

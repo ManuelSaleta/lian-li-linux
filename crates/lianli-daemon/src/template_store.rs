@@ -83,6 +83,7 @@ fn render_template_preview(template: &LcdTemplate, sensors: &[SensorInfo]) -> Re
         h264: false,
         needs_keepalive: false,
         png: false,
+        play_count: 0,
     };
     let asset =
         CustomAsset::new(template, 0.0, &screen, sensors, false).context("CustomAsset::new")?;
