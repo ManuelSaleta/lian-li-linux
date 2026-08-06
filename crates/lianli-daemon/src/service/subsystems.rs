@@ -145,7 +145,7 @@ impl Default for Controllers {
 // Wired device registry
 // ──────────────────────────────────────────────────────────────────────
 
-use lianli_devices::traits::FanDevice;
+use lianli_devices::traits::{FanDevice, LcdDevice};
 use std::collections::{HashMap, HashSet};
 
 /// Wired USB device registry: shared fan device handles, cached HID backends,
@@ -173,6 +173,7 @@ pub struct DeviceRegistry {
     /// TL LCD `(port, fan_index)` per device_id. Probed once at init.
     pub tl_lcd_port_index: HashMap<String, (u8, u8)>,
     pub v2_hid_entries: Vec<lianli_devices::wireless::V2HidEntry>,
+    pub aio_lcd_devices: HashMap<String, Box<dyn LcdDevice>>,
 }
 
 impl DeviceRegistry {
@@ -188,6 +189,7 @@ impl DeviceRegistry {
             cached_usb_devices: Vec::new(),
             tl_lcd_port_index: HashMap::new(),
             v2_hid_entries: Vec::new(),
+            aio_lcd_devices: HashMap::new(),
         }
     }
 
@@ -198,6 +200,7 @@ impl DeviceRegistry {
         self.hid_backends.clear();
         self.usb_backends.clear();
         self.cached_usb_devices.clear();
+        self.aio_lcd_devices.clear();
         // Keep `last_wired_ids` and `tl_lcd_port_index` — they describe what
         // *should* be plugged in, not what currently is.
     }

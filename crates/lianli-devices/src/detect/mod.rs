@@ -10,7 +10,7 @@ pub use backends::{
     open_hid_lcd_device, open_hid_transient, open_shared_hid, open_usb_bulk_backend,
 };
 pub use binding::ensure_hid_devices_bound;
-pub use controllers::{create_hid_lcd_device, create_wired_controllers, WiredControllerSet};
+pub use controllers::create_hid_lcd_device;
 pub use enumerate::{enumerate_devices, probe_tl_lcd_port_indices};
 
 use lianli_shared::device_id::DeviceFamily;

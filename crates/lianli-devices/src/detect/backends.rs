@@ -258,7 +258,7 @@ pub fn open_hid_lcd_device(
             shared.lock().read_flush();
             Some(
                 crate::hydroshift_lcd::HydroShiftLcdController::new(shared, pid)
-                    .map(|d| Box::new(d) as Box<dyn crate::traits::LcdDevice>),
+                    .map(|d| Box::new(std::sync::Arc::new(d)) as Box<dyn crate::traits::LcdDevice>),
             )
         }
         DeviceFamily::TlLcd => {

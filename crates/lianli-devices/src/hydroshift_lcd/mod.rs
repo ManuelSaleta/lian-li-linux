@@ -158,11 +158,12 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
             _ => lianli_shared::device_id::DeviceFamily::HydroShiftLcd,
         };
 
-        let mut lcd_ctrl = HydroShiftLcdController::new(std::sync::Arc::clone(&backend), pid)?;
-        crate::traits::LcdDevice::initialize(&mut lcd_ctrl)?;
-        let firmware = lcd_ctrl.firmware_version_str().map(|s| s.to_string());
-        let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
+        let lcd_ctrl = HydroShiftLcdController::new(std::sync::Arc::clone(&backend), pid)?;
         let lcd_arc = std::sync::Arc::new(lcd_ctrl);
+        let mut init_arc = std::sync::Arc::clone(&lcd_arc);
+        crate::traits::LcdDevice::initialize(&mut init_arc)?;
+        let firmware = lcd_arc.firmware_version_str().map(|s| s.to_string());
+        let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
 
         Ok(crate::registry::OpenedDevice {
             id: ctx.device_id(),
@@ -172,12 +173,12 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
             model_name: variant.name().to_string(),
             firmware,
             fan: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
-            lcd: None,
+            lcd: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
             rgb: vec![(
                 String::new(),
                 Arc::new(rgb_ctrl) as Arc<dyn crate::traits::RgbDevice>,
             )],
-            aio: Some(Box::new(lcd_arc)),
+            aio: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
             shared_hid: Some(backend),
             shared_usb: None,
         })

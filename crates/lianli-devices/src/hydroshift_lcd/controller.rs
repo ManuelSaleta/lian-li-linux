@@ -11,9 +11,10 @@ use crate::traits::{AioDevice, FanDevice, LcdDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
 use lianli_transport::HidTransport;
+use parking_lot::Mutex;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -76,20 +77,104 @@ pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
     None
 }
 
+fn write_a_command_raw(dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
+    let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
+    if data.len() > max_payload {
+        bail!(
+            "AIO LCD: A-command {cmd:#04x} payload too large ({} > {max_payload})",
+            data.len()
+        );
+    }
+    let mut pkt = [0u8; A_PACKET_SIZE];
+    pkt[0] = REPORT_ID_A;
+    pkt[1] = cmd;
+    pkt[5] = data.len() as u8;
+    pkt[A_HEADER_LEN..A_HEADER_LEN + data.len()].copy_from_slice(data);
+    let written = dev.write(&pkt).context("AIO LCD: write A-command")?;
+    debug!(
+        "A-cmd {cmd:#04x}: wrote {written} bytes, payload={:02x?}",
+        data
+    );
+    Ok(())
+}
+
+fn try_parse_handshake(buf: &[u8]) -> Option<AioHandshake> {
+    if buf.len() < A_HEADER_LEN + 4 || (buf[5] as usize) < 4 {
+        return None;
+    }
+    let data_len = buf[5] as usize;
+    let data = &buf[A_HEADER_LEN..];
+    let temp_valid = data_len >= 5 && data[4] != 0;
+    let coolant_temp = if data_len >= 7 {
+        let integer = data[5] as f32;
+        let fraction = (data[6] % 10) as f32 / 10.0;
+        integer + fraction
+    } else {
+        0.0
+    };
+    Some(AioHandshake {
+        fan_rpm: u16::from_be_bytes([data[0], data[1]]),
+        pump_rpm: u16::from_be_bytes([data[2], data[3]]),
+        temp_valid,
+        coolant_temp,
+    })
+}
+
+fn background_reader(
+    device: SharedHid,
+    handshake: Arc<Mutex<Option<AioHandshake>>>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut buf = [0u8; A_PACKET_SIZE];
+    let mut last_query = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        let query_due = now.duration_since(last_query) >= Duration::from_secs(1);
+        {
+            let mut dev = device.lock();
+            if query_due {
+                let _ = write_a_command_raw(&mut *dev, CMD_HANDSHAKE, &[]);
+                let deadline = Instant::now() + Duration::from_millis(500);
+                while Instant::now() < deadline {
+                    let n = dev.read_timeout(&mut buf, 100).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    if buf[1] == CMD_HANDSHAKE {
+                        if let Some(hs) = try_parse_handshake(&buf[..n]) {
+                            *handshake.lock() = Some(hs);
+                        }
+                        break;
+                    }
+                }
+                last_query = now;
+            } else {
+                let n = dev.read_timeout(&mut buf, 20).unwrap_or(0);
+                if n > 0 && buf[1] == CMD_HANDSHAKE {
+                    if let Some(hs) = try_parse_handshake(&buf[..n]) {
+                        *handshake.lock() = Some(hs);
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// HydroShift LCD / Galahad2 LCD AIO controller.
 ///
 /// Provides pump + fan speed control, coolant temperature reading, and LCD streaming.
 pub struct HydroShiftLcdController {
     device: SharedHid,
     variant: AioLcdVariant,
-    last_handshake: Option<AioHandshake>,
-    brightness: u8,
-    rotation: ScreenRotation,
-    initialized: bool,
-    use_c_command: bool,
-    firmware_string: Option<String>,
-    firmware_version: Option<(u32, u32)>,
-    last_recovery_attempt: Option<Instant>,
+    last_handshake: Arc<Mutex<Option<AioHandshake>>>,
+    brightness: AtomicU8,
+    rotation: AtomicU8,
+    initialized: AtomicBool,
+    use_c_command: AtomicBool,
+    firmware_string: OnceLock<String>,
+    firmware_version: OnceLock<(u32, u32)>,
+    last_recovery_attempt: Mutex<Option<Instant>>,
     drain_stop: Arc<AtomicBool>,
 }
 
@@ -101,42 +186,35 @@ impl HydroShiftLcdController {
         Ok(Self {
             device,
             variant,
-            last_handshake: None,
-            brightness: 50,
-            rotation: ScreenRotation::Rotate0,
-            initialized: false,
-            use_c_command: false,
-            firmware_string: None,
-            firmware_version: None,
-            last_recovery_attempt: None,
+            last_handshake: Arc::new(Mutex::new(None)),
+            brightness: AtomicU8::new(50),
+            rotation: AtomicU8::new(ScreenRotation::Rotate0 as u8),
+            initialized: AtomicBool::new(false),
+            use_c_command: AtomicBool::new(false),
+            firmware_string: OnceLock::new(),
+            firmware_version: OnceLock::new(),
+            last_recovery_attempt: Mutex::new(None),
             drain_stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    fn init(&mut self) -> Result<()> {
-        if self.initialized {
+    fn init(&self) -> Result<()> {
+        if self.initialized.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
         let name = self.variant.name();
         info!("Initializing {name} — waiting 10s for device to settle");
         thread::sleep(Duration::from_secs(10));
 
-        match self.handshake() {
-            Ok(hs) => {
-                info!(
-                    "  Fan RPM: {}, Pump RPM: {}, Temp: {:.1}°C (valid={})",
-                    hs.fan_rpm, hs.pump_rpm, hs.coolant_temp, hs.temp_valid
-                );
-            }
-            Err(e) => warn!("  Handshake failed: {e:#}"),
-        }
-
-        if self.firmware_version.is_none() {
+        if self.firmware_version.get().is_none() {
             for attempt in 1..=30u32 {
                 match self.read_firmware_internal(INIT_READ_TIMEOUT_MS) {
                     Ok(fw) => {
-                        self.firmware_version = parse_firmware_version(&fw);
-                        self.firmware_string = Some(fw.clone());
+                        let v = parse_firmware_version(&fw);
+                        let _ = self.firmware_string.set(fw.clone());
+                        if let Some(v) = v {
+                            let _ = self.firmware_version.set(v);
+                        }
                         info!("AIO LCD firmware for {name}: {fw}");
                         break;
                     }
@@ -150,20 +228,20 @@ impl HydroShiftLcdController {
             }
         }
 
-        let device = Arc::clone(&self.device);
-        let stop = Arc::clone(&self.drain_stop);
-        thread::spawn(move || {
-            let mut buf = [0u8; B_PACKET_SIZE];
-            while !stop.load(Ordering::Relaxed) {
-                let mut dev = device.lock();
-                let n = dev.read_timeout(&mut buf, 20).unwrap_or(0);
-                drop(dev);
-                if n > 0 {
-                    debug!("drain: discarded {n} stale bytes (cmd={:#04x})", buf[1]);
-                }
-                thread::sleep(Duration::from_millis(100));
+        match self.handshake() {
+            Ok(hs) => {
+                info!(
+                    "  Fan RPM: {}, Pump RPM: {}, Temp: {:.1}°C (valid={})",
+                    hs.fan_rpm, hs.pump_rpm, hs.coolant_temp, hs.temp_valid
+                );
             }
-        });
+            Err(e) => warn!("  Handshake failed: {e:#}"),
+        }
+
+        let device = Arc::clone(&self.device);
+        let handshake = Arc::clone(&self.last_handshake);
+        let stop = Arc::clone(&self.drain_stop);
+        thread::spawn(move || background_reader(device, handshake, stop));
 
         thread::sleep(Duration::from_secs(2));
 
@@ -171,55 +249,59 @@ impl HydroShiftLcdController {
             warn!("  apply_lcd_settings failed: {e:#}");
         }
 
-        self.initialized = true;
-        self.last_recovery_attempt = Some(Instant::now());
+        *self.last_recovery_attempt.lock() = Some(Instant::now());
         Ok(())
     }
 
     pub fn supports_c_command(&self) -> bool {
         self.firmware_version
-            .map(|v| v >= self.variant.c_command_min_firmware())
+            .get()
+            .map(|v| *v >= self.variant.c_command_min_firmware())
             .unwrap_or(false)
     }
 
-    pub fn set_use_c_command(&mut self, enable: bool) {
-        self.use_c_command = enable && self.supports_c_command();
+    pub fn set_use_c_command(&self, enable: bool) {
+        let supported = self.supports_c_command();
+        self.use_c_command
+            .store(enable && supported, Ordering::SeqCst);
         debug!(
-            "AIO LCD: use_c_command set to {} (request={enable}, supported={})",
-            self.use_c_command,
-            self.supports_c_command()
+            "AIO LCD: use_c_command set to {} (request={enable}, supported={supported})",
+            enable && supported
         );
     }
 
     pub fn firmware_version_str(&self) -> Option<&str> {
-        self.firmware_string.as_deref()
+        self.firmware_string.get().map(String::as_str)
     }
 
-    pub fn try_read_firmware(&mut self) -> Result<()> {
-        if self.firmware_version.is_some() {
+    pub fn try_read_firmware(&self) -> Result<()> {
+        if self.firmware_version.get().is_some() {
             return Ok(());
         }
         let fw = self.read_firmware_internal(INIT_READ_TIMEOUT_MS)?;
-        self.firmware_version = parse_firmware_version(&fw);
-        self.firmware_string = Some(fw.clone());
+        let v = parse_firmware_version(&fw);
+        let _ = self.firmware_string.set(fw.clone());
+        if let Some(v) = v {
+            let _ = self.firmware_version.set(v);
+        }
         info!("AIO LCD firmware for {}: {fw}", self.variant.name());
         Ok(())
     }
 
-    pub fn handshake(&mut self) -> Result<AioHandshake> {
-        let timeout = if self.initialized {
+    pub fn handshake(&self) -> Result<AioHandshake> {
+        let timeout = if self.initialized.load(Ordering::Relaxed) {
             READ_TIMEOUT_MS
         } else {
             INIT_READ_TIMEOUT_MS
         };
         let resp = self.send_a_command(CMD_HANDSHAKE, &[], timeout)?;
-        let data = &resp[A_HEADER_LEN..];
         let data_len = resp[5] as usize;
 
         if data_len < 4 {
             bail!("AIO LCD: handshake response too short ({data_len} bytes)");
         }
 
+        let data = &resp[A_HEADER_LEN..];
         let temp_valid = data_len >= 5 && data[4] != 0;
         let coolant_temp = if data_len >= 7 {
             let integer = data[5] as f32;
@@ -240,22 +322,21 @@ impl HydroShiftLcdController {
             "Handshake: fan={}rpm pump={}rpm temp_valid={} temp={:.1}°C",
             hs.fan_rpm, hs.pump_rpm, hs.temp_valid, hs.coolant_temp
         );
-        self.last_handshake = Some(hs.clone());
+        *self.last_handshake.lock() = Some(hs.clone());
         Ok(hs)
     }
 
     pub fn apply_lcd_settings(&self) -> Result<()> {
+        let brightness = self.brightness.load(Ordering::Relaxed);
+        let rotation = self.rotation.load(Ordering::Relaxed);
         let mut payload = [0u8; 8];
         payload[0] = LcdControlMode::Application as u8;
-        payload[1] = self.brightness;
-        payload[2] = self.rotation as u8;
+        payload[1] = brightness;
+        payload[2] = rotation;
         payload[7] = 24;
 
         self.send_b_command(CMD_LCD_CONTROL, &payload)?;
-        debug!(
-            "LCD settings applied: brightness={}, rotation={:?}",
-            self.brightness, self.rotation
-        );
+        debug!("LCD settings applied: brightness={brightness}, rotation={rotation}");
         Ok(())
     }
 
@@ -338,7 +419,7 @@ impl HydroShiftLcdController {
         const MAX_ATTEMPTS: u32 = 20;
 
         let mut dev = self.device.lock();
-        if let Err(e) = self.write_a_command_internal(&mut *dev, CMD_RESET_DEVICE, &[]) {
+        if let Err(e) = write_a_command_raw(&mut *dev, CMD_RESET_DEVICE, &[]) {
             warn!("AIO LCD: reset device failed: {e}");
             return false;
         }
@@ -372,11 +453,12 @@ impl HydroShiftLcdController {
         false
     }
 
-    pub fn check_and_recover_lcd(&mut self) -> Result<crate::traits::RecoveryAction> {
+    pub fn check_and_recover_lcd(&self) -> Result<crate::traits::RecoveryAction> {
         use crate::traits::RecoveryAction;
         const RECOVERY_COOLDOWN: Duration = Duration::from_secs(2);
         if self
             .last_recovery_attempt
+            .lock()
             .map(|t| t.elapsed() < RECOVERY_COOLDOWN)
             .unwrap_or(false)
         {
@@ -386,7 +468,7 @@ impl HydroShiftLcdController {
             Ok(true) => Ok(RecoveryAction::NoChange),
             Ok(false) => {
                 warn!("LCD not available, attempting reset");
-                self.last_recovery_attempt = Some(Instant::now());
+                *self.last_recovery_attempt.lock() = Some(Instant::now());
                 if self.reset_device() {
                     info!("Device reset successful, reinitializing LCD");
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -407,7 +489,7 @@ impl HydroShiftLcdController {
     fn read_firmware_internal(&self, timeout_ms: i32) -> Result<String> {
         let mut dev = self.device.lock();
 
-        self.write_a_command_internal(&mut *dev, CMD_GET_FIRMWARE, &[])?;
+        write_a_command_raw(&mut *dev, CMD_GET_FIRMWARE, &[])?;
 
         // Loop reading until we see a firmware response, discarding stale
         // responses from a previous session (e.g. handshake/reset).
@@ -450,57 +532,43 @@ impl HydroShiftLcdController {
 
     fn send_a_command(&self, cmd: u8, data: &[u8], timeout_ms: i32) -> Result<Vec<u8>> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut *dev, cmd, data)?;
+        write_a_command_raw(&mut *dev, cmd, data)?;
 
         let mut buf = [0u8; A_PACKET_SIZE];
-        let n = dev
-            .read_timeout(&mut buf, timeout_ms)
-            .context("AIO LCD: read A-response")?;
+        loop {
+            let n = dev
+                .read_timeout(&mut buf, timeout_ms)
+                .context("AIO LCD: read A-response")?;
 
-        debug!(
-            "A-cmd {cmd:#04x}: response {n} bytes, raw={:02x?}",
-            &buf[..n.min(20)]
-        );
+            if n == 0 {
+                bail!("AIO LCD: no response to A-command {cmd:#04x} (timeout after {timeout_ms}ms)");
+            }
 
-        if n == 0 {
-            bail!("AIO LCD: no response to A-command {cmd:#04x} (timeout after {timeout_ms}ms)");
+            if buf[1] == cmd {
+                debug!(
+                    "A-cmd {cmd:#04x}: response {n} bytes, raw={:02x?}",
+                    &buf[..n.min(20)]
+                );
+                return Ok(buf[..n].to_vec());
+            }
+
+            if cmd != CMD_HANDSHAKE && buf[1] == CMD_HANDSHAKE {
+                if let Some(hs) = try_parse_handshake(&buf[..n]) {
+                    *self.last_handshake.lock() = Some(hs);
+                }
+            }
+            debug!(
+                "A-cmd {cmd:#04x}: skipping non-matching response cmd={:#04x}",
+                buf[1]
+            );
         }
-
-        Ok(buf[..n].to_vec())
     }
 
     /// Public write_a_command. Locks `RusbHid` for the duration of the call —
     /// do NOT call when the device is already locked.
     pub fn write_a_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
-        self.write_a_command_internal(&mut *dev, cmd, data)
-    }
-
-    fn write_a_command_internal(
-        &self,
-        dev: &mut dyn HidTransport,
-        cmd: u8,
-        data: &[u8],
-    ) -> Result<()> {
-        let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
-        if data.len() > max_payload {
-            bail!(
-                "AIO LCD: A-command {cmd:#04x} payload too large ({} > {max_payload})",
-                data.len()
-            );
-        }
-        let mut pkt = [0u8; A_PACKET_SIZE];
-        pkt[0] = REPORT_ID_A;
-        pkt[1] = cmd;
-        pkt[5] = data.len() as u8;
-        pkt[A_HEADER_LEN..A_HEADER_LEN + data.len()].copy_from_slice(data);
-
-        let written = dev.write(&pkt).context("AIO LCD: write A-command")?;
-        debug!(
-            "A-cmd {cmd:#04x}: wrote {written} bytes, payload={:02x?}",
-            data
-        );
-        Ok(())
+        write_a_command_raw(&mut *dev, cmd, data)
     }
 
     fn send_b_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
@@ -541,7 +609,7 @@ impl HydroShiftLcdController {
     }
 
     fn send_chunked(&self, cmd: u8, data: &[u8]) -> Result<()> {
-        let (report_id, pkt_size, max_payload) = if self.use_c_command {
+        let (report_id, pkt_size, max_payload) = if self.use_c_command.load(Ordering::Relaxed) {
             (REPORT_ID_C, C_PACKET_SIZE, C_MAX_PAYLOAD)
         } else {
             (REPORT_ID_B, B_PACKET_SIZE, B_MAX_PAYLOAD)
@@ -656,6 +724,7 @@ impl FanDevice for HydroShiftLcdController {
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
         Ok(vec![self
             .last_handshake
+            .lock()
             .as_ref()
             .map(|hs| hs.fan_rpm)
             .unwrap_or(0)])
@@ -674,13 +743,11 @@ impl FanDevice for HydroShiftLcdController {
     }
 
     fn poll_coolant_temp(&self) -> Option<f32> {
-        self.last_handshake
-            .as_ref()
-            .filter(|hs| {
+        self.last_handshake.lock().as_ref().filter(|hs| {
+            hs.temp_valid
                 // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
-                !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
-            })
-            .map(|hs| hs.coolant_temp)
+                && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
+        }).map(|hs| hs.coolant_temp)
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
@@ -714,13 +781,14 @@ impl AioDevice for HydroShiftLcdController {
     fn read_pump_rpm(&self) -> Result<u16> {
         Ok(self
             .last_handshake
+            .lock()
             .as_ref()
             .map(|hs| hs.pump_rpm)
             .unwrap_or(0))
     }
 
     fn read_coolant_temp(&self) -> Result<f32> {
-        match &self.last_handshake {
+        match &*self.last_handshake.lock() {
             Some(hs) if hs.temp_valid => Ok(hs.coolant_temp),
             Some(_) => bail!("Coolant temperature sensor reports invalid"),
             None => bail!("No handshake data available"),
@@ -734,7 +802,7 @@ impl Drop for HydroShiftLcdController {
     }
 }
 
-impl LcdDevice for HydroShiftLcdController {
+impl LcdDevice for Arc<HydroShiftLcdController> {
     fn screen_info(&self) -> &ScreenInfo {
         &ScreenInfo::AIO_LCD_480
     }
@@ -744,32 +812,29 @@ impl LcdDevice for HydroShiftLcdController {
     }
 
     fn set_brightness(&self, brightness: u8) -> Result<()> {
+        let b = brightness.min(100);
+        self.brightness.store(b, Ordering::Relaxed);
         let mut payload = [0u8; 8];
         payload[0] = LcdControlMode::LcdSetting as u8;
-        payload[1] = brightness.min(100);
-        payload[2] = self.rotation as u8;
+        payload[1] = b;
+        payload[2] = self.rotation.load(Ordering::Relaxed);
         payload[7] = 24;
-        self.send_b_command(CMD_LCD_CONTROL, &payload)?;
-        Ok(())
+        self.send_b_command(CMD_LCD_CONTROL, &payload)
     }
 
     fn set_rotation(&self, degrees: u16) -> Result<()> {
         let rotation = ScreenRotation::from_degrees(degrees);
+        self.rotation.store(rotation as u8, Ordering::Relaxed);
         let mut payload = [0u8; 8];
         payload[0] = LcdControlMode::LcdSetting as u8;
-        payload[1] = self.brightness;
+        payload[1] = self.brightness.load(Ordering::Relaxed);
         payload[2] = rotation as u8;
         payload[7] = 24;
-        self.send_b_command(CMD_LCD_CONTROL, &payload)?;
-        Ok(())
+        self.send_b_command(CMD_LCD_CONTROL, &payload)
     }
 
     fn initialize(&mut self) -> Result<()> {
-        if self.initialized {
-            return Ok(());
-        }
-        self.init()?;
-        Ok(())
+        self.init()
     }
 
     fn check_and_recover_lcd(&mut self) -> Result<crate::traits::RecoveryAction> {

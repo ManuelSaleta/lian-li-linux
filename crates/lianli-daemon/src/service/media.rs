@@ -287,10 +287,42 @@ impl ServiceManager {
                         lianli_devices::winusb::lcd::open_for_pid(candidate.pid, device)
                             .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                     }
-                    DeviceFamily::HydroShiftLcd
-                    | DeviceFamily::Galahad2Lcd
-                    | DeviceFamily::TlLcd => {
-                        // Try to reuse a shared HID backend (opened by init_rgb_controller).
+                    DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => {
+                        if let Some(d) = self.registry.aio_lcd_devices.remove(&candidate.device_id) {
+                            Ok(LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d))))
+                        } else if let Some(backend) =
+                            self.registry.hid_backends.get(&candidate.device_id)
+                        {
+                            match create_hid_lcd_device(
+                                candidate.family,
+                                candidate.pid,
+                                Arc::clone(backend),
+                            ) {
+                                Some(result) => result
+                                    .map(|d| LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))),
+                                None => Err(anyhow::anyhow!("Not an LCD device")),
+                            }
+                        } else {
+                            let device = Device::clone(candidate.usb_device.as_ref().unwrap());
+                            let det = lianli_devices::detect::DetectedDevice {
+                                device,
+                                family: candidate.family,
+                                name: "HydroShift/Galahad LCD",
+                                vid: candidate.vid,
+                                pid: candidate.pid,
+                                bus: candidate.bus,
+                                address: candidate.address,
+                                serial: Some(candidate.device_id.clone()),
+                                hid_usage_page: None,
+                            };
+                            match open_hid_lcd_device(&det, self.hid_backend()) {
+                                Some(result) => result
+                                    .map(|d| LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))),
+                                None => Err(anyhow::anyhow!("Not an LCD device")),
+                            }
+                        }
+                    }
+                    DeviceFamily::TlLcd => {
                         if let Some(backend) = self.registry.hid_backends.get(&candidate.device_id)
                         {
                             match create_hid_lcd_device(
@@ -308,7 +340,7 @@ impl ServiceManager {
                             let det = lianli_devices::detect::DetectedDevice {
                                 device,
                                 family: candidate.family,
-                                name: "HydroShift/Galahad LCD",
+                                name: "TL LCD",
                                 vid: candidate.vid,
                                 pid: candidate.pid,
                                 bus: candidate.bus,
@@ -343,15 +375,17 @@ impl ServiceManager {
                                     candidate.device_id
                                 );
                             }
-                            guard.set_use_c_command(device_cfg.aio_512_frame());
-                            self.aio_lcd_firmware
-                                .record(&candidate.device_id, None, false);
-                            if !self.aio_lcd_firmware.should_skip(&candidate.device_id) {
-                                self.aio_lcd_firmware.schedule(
-                                    &candidate.device_id,
-                                    std::time::Duration::from_secs(10),
-                                    device_cfg.aio_512_frame(),
-                                );
+                            if is_wired_aio_lcd(candidate.family) {
+                                guard.set_use_c_command(device_cfg.aio_512_frame());
+                                self.aio_lcd_firmware
+                                    .record(&candidate.device_id, None, false);
+                                if !self.aio_lcd_firmware.should_skip(&candidate.device_id) {
+                                    self.aio_lcd_firmware.schedule(
+                                        &candidate.device_id,
+                                        std::time::Duration::from_secs(10),
+                                        device_cfg.aio_512_frame(),
+                                    );
+                                }
                             }
                         }
                         let screen =

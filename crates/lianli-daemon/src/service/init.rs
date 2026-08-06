@@ -148,6 +148,9 @@ impl ServiceManager {
             self.registry
                 .hid_backends
                 .retain(|k, _| current.contains(k));
+            self.registry
+                .aio_lcd_devices
+                .retain(|k, _| current.contains(k));
             self.registry.v2_hid_entries.clear();
             self.init_wired_devices();
             self.start_fan_control();
@@ -231,7 +234,7 @@ impl ServiceManager {
                 .any(|id| info.device_id.starts_with(id.as_str()))
         });
 
-        const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
         let mut pending: Vec<(
             String,
@@ -374,7 +377,7 @@ impl ServiceManager {
         vid: u16,
         pid: u16,
         serial: Option<&str>,
-        opened: registry::OpenedDevice,
+        mut opened: registry::OpenedDevice,
         fan_devices: &mut HashMap<String, Box<dyn FanDevice>>,
         wired_rgb: &mut HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>>,
     ) {
@@ -454,6 +457,10 @@ impl ServiceManager {
                 format!("{base_id}:{suffix}")
             };
             wired_rgb.insert(device_id, rgb);
+        }
+
+        if let Some(lcd) = opened.lcd.take() {
+            self.registry.aio_lcd_devices.insert(base_id.clone(), lcd);
         }
     }
 
