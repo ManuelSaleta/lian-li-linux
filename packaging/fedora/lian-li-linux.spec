@@ -1,4 +1,4 @@
-Name:           lianli-linux
+Name:           lian-li-linux
 Version:        0.7.6
 Release:        1%{?dist}
 Summary:        Open-source Linux replacement for L-Connect 3

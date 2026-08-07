@@ -1,29 +1,13 @@
 #!/usr/bin/env bash
-# Build a source RPM for COPR. Run on Fedora (or any RPM distro) with the
-# build-time libraries installed (see the spec's BuildRequires), plus rpm-build,
-# cargo, npm, nodejs, git, and rsync. Produces:
-#
-#   tmp/rpmbuild/SRPMS/lianli-linux-<ver>-<rel>.src.rpm
-#
-# What this does:
-#   1. Stage the working tree (including checked-out submodules) into a
-#      versioned directory, excluding build artifacts.
-#   2. `cargo vendor` the dependencies and write .cargo/config.toml so mock can
-#      build offline (COPR disables network in buildroots).
-#   3. Build the Vue frontend with `npm` into dist/, then drop node_modules so
-#      they don't bloat the tarball.
-#   4. Download the pinned evdi source tarball (Source1) into SOURCES/.
-#   5. Tar it up and run `rpmbuild -bs` against the spec.
+
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-PKG="lianli-linux"
+PKG="lian-li-linux"
 EVDI_VERSION="1.15.0"
 
-# Resolve version: prefer the triggering git tag, fall back to Cargo.toml.
-if [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-    VERSION="${GITHUB_REF_NAME#v}"
-else
+VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
+if [ -z "${VERSION:-}" ]; then
     VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 fi
 echo ">> Building SRPM for ${PKG} ${VERSION}"
@@ -76,7 +60,7 @@ curl -fsSL -o "$TOPDIR/SOURCES/evdi-${EVDI_VERSION}.tar.gz" \
 
 echo ">> Assembling SRPM"
 SPEC="$TOPDIR/SPECS/${PKG}.spec"
-cp packaging/fedora/lianli-linux.spec "$SPEC"
+cp packaging/fedora/lian-li-linux.spec "$SPEC"
 # Inject the resolved version so Cargo.toml stays the single source of truth.
 sed -i "s/^Version:.*/Version:        ${VERSION}/" "$SPEC"
 rpmbuild -bs --define "_topdir $TOPDIR" "$SPEC"
