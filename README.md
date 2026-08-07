@@ -126,6 +126,18 @@ This installs binaries, udev rules, the systemd user service, desktop entry, and
 
 The daemon runs as a systemd user service and reads `~/.config/lianli/config.json`. If you want it to stay active when no desktop session is logged in, enable linger: `sudo loginctl enable-linger $USER`.
 
+### Fedora (COPR)
+
+```bash
+# libevdi is not in Fedora repos — enable the COPR that ships it first
+sudo dnf copr enable crashdummy/DisplayLink
+# Then the project repo
+sudo dnf copr enable sgtaziz/lianli
+sudo dnf install lianli-linux
+```
+
+This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and (re)starts it for any active session — no manual `systemctl` step required. Desktop-mode devices additionally need the `evdi` kernel module: `sudo dnf copr enable crashdummy/Displaylink && sudo dnf install displaylink`.
+
 ### From Source
 
 1) Clone the repo and submodules:
