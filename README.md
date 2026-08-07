@@ -133,7 +133,8 @@ The daemon runs as a systemd user service and reads `~/.config/lianli/config.jso
 sudo dnf copr enable crashdummy/DisplayLink
 # Then the project repo
 sudo dnf copr enable sgtaziz/lianli
-sudo dnf install lianli-linux
+sudo dnf update
+sudo dnf install lian-li-linux
 ```
 
 This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and (re)starts it for any active session — no manual `systemctl` step required. Desktop-mode devices additionally need the `evdi` kernel module: `sudo dnf copr enable crashdummy/Displaylink && sudo dnf install displaylink`.
