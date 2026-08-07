@@ -129,15 +129,20 @@ The daemon runs as a systemd user service and reads `~/.config/lianli/config.jso
 ### Fedora (COPR)
 
 ```bash
-# libevdi is not in Fedora repos — enable the COPR that ships it first
-sudo dnf copr enable crashdummy/DisplayLink
+# libx264 (H.264 LCD streaming) is GPL, only in rpmfusion (non-free). Enable it first
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
 # Then the project repo
-sudo dnf copr enable sgtaziz/lianli
-sudo dnf update
+sudo dnf copr enable sgtaziz/lian-li-linux
 sudo dnf install lian-li-linux
 ```
 
-This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and (re)starts it for any active session — no manual `systemctl` step required. Desktop-mode devices additionally need the `evdi` kernel module: `sudo dnf copr enable crashdummy/Displaylink && sudo dnf install displaylink`.
+This installs binaries, udev rules, the systemd user service, desktop entry, and icons, and pulls in full `ffmpeg` (with libx264) from rpmfusion. The package also globally enables `lianli-daemon.service` and (re)starts it for any active session — no manual `systemctl` step required.
+
+Desktop-mode devices (HydroShift II, Lancool 207, Universal Screen 8.8") additionally need the `evdi` kernel module:
+```bash
+sudo dnf copr enable crashdummy/Displaylink
+sudo dnf install displaylink
+```
 
 ### From Source
 
