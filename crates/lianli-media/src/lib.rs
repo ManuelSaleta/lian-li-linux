@@ -192,7 +192,18 @@ pub fn prepare_media_asset(
                 .ok_or_else(|| {
                     MediaError::InvalidConfig(format!("unknown template id '{template_id}'"))
                 })?;
-            let custom_fps = cfg.fps.unwrap_or(default_fps).min(fps_cap).max(1.0);
+            let widget_fps = template
+                .widgets
+                .iter()
+                .filter_map(|w| w.fps.filter(|&f| f >= 1.0))
+                .fold(0.0f32, f32::max);
+            let custom_fps = if widget_fps >= 1.0 {
+                widget_fps
+            } else {
+                cfg.fps.unwrap_or(default_fps)
+            }
+            .min(fps_cap)
+            .max(1.0);
             let asset = CustomAsset::new(
                 &template,
                 cfg.orientation,

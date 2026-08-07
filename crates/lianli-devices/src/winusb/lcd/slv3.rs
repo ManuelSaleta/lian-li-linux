@@ -93,23 +93,25 @@ impl WinUsbLcd for Slv3WinUsbLcd {
         path: &Path,
         looping: bool,
         stop: &AtomicBool,
-        _fps: f32,
+        fps: f32,
     ) -> Result<()> {
         if !self.core.initialized {
             self.do_init()?;
         }
+        self.core.apply_stream_fps(fps)?;
         self.core
-            .stream_h264(path, looping, stop, 30.0, self.core.screen().play_count, 0)
+            .stream_h264(path, looping, stop, fps, self.core.screen().play_count, 0)
     }
     fn stream_h264_reader(
         &mut self,
         reader: &mut dyn std::io::Read,
         stop: &AtomicBool,
-        _fps: f32,
+        fps: f32,
     ) -> Result<()> {
         if !self.core.initialized {
             self.do_init()?;
         }
+        self.core.apply_stream_fps(fps)?;
         self.core
             .stream_h264_reader(reader, stop, self.core.screen().play_count, 0)
     }

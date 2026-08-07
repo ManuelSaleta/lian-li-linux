@@ -55,6 +55,7 @@ pub struct CustomAsset {
     screen: ScreenInfo,
     orientation: f32,
     update_interval: Duration,
+    render_fps: f32,
     uniform_scale: f32,
     offset_x: i32,
     offset_y: i32,
@@ -227,6 +228,7 @@ impl CustomAsset {
             screen: *screen,
             orientation,
             update_interval: frame_interval,
+            render_fps: fps,
             uniform_scale,
             offset_x,
             offset_y,
@@ -242,6 +244,10 @@ impl CustomAsset {
 
     pub fn update_interval(&self) -> Duration {
         self.update_interval
+    }
+
+    pub fn render_fps(&self) -> f32 {
+        self.render_fps
     }
 
     pub fn canvas_width(&self) -> u32 {

@@ -73,12 +73,15 @@ impl ServiceManager {
                     &user_templates,
                 ) {
                     Ok(asset_kind) => {
-                        let stream_fps = device
-                            .fps
-                            .unwrap_or(cfg.default_fps)
-                            .min(cfg.default_fps)
-                            .min(screen.max_fps as f32)
-                            .max(1.0);
+                        let stream_fps = match &asset_kind {
+                            lianli_media::MediaAssetKind::Custom { asset } => asset.render_fps(),
+                            _ => device
+                                .fps
+                                .unwrap_or(cfg.default_fps)
+                                .min(cfg.default_fps)
+                                .min(screen.max_fps as f32)
+                                .max(1.0),
+                        };
                         let asset = MediaAsset {
                             kind: asset_kind,
                             config_key: cfg_key,
