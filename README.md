@@ -129,7 +129,7 @@ The daemon runs as a systemd user service and reads `~/.config/lianli/config.jso
 ### Fedora (COPR)
 
 ```bash
-# libx264 (H.264 LCD streaming) is GPL, only in rpmfusion (non-free). Enable it first
+# libx264 (H.264 LCD streaming) is GPL, ffmpeg with it is only available in rpmfusion free repo. Enable it first
 sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
 # Then the project repo
 sudo dnf copr enable sgtaziz/lian-li-linux
