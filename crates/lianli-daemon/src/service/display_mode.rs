@@ -47,9 +47,7 @@ impl ServiceManager {
                 if let Ok(usb_devs) = lianli_devices::detect::enumerate_devices() {
                     for usb_det in usb_devs {
                         if usb_det.family == family && usb_det.device_id() == *device_id {
-                            let screen = lianli_shared::screen::screen_info_for(family)
-                                .unwrap_or(lianli_shared::screen::ScreenInfo::AIO_LCD_480);
-                            match WinUsbLcdDevice::new(usb_det.device, screen, det.name.as_str()) {
+                            match WinUsbLcdDevice::open(usb_det.device.clone(), usb_det.pid) {
                                 Ok(mut lcd) => match lcd.switch_to_desktop_mode() {
                                     Ok(()) => {
                                         info!("Switched {device_id} to desktop mode");

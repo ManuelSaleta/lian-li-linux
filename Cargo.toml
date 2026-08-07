@@ -48,7 +48,7 @@ notify = { version = "7.0", default-features = false, features = ["macos_kqueue"
 clap = { version = "4.5", features = ["derive"] }
 
 # Time
-time = "0.3"
+time = { version = "0.3", features = ["local-offset"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Misc

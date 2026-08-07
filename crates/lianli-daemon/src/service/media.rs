@@ -285,15 +285,18 @@ impl ServiceManager {
                             .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                         } else {
                             let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                            lianli_devices::winusb::lcd::open_for_pid(candidate.pid, device)
-                                .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
+                            lianli_devices::winusb::lcd::WinUsbLcdDevice::open(
+                                device,
+                                candidate.pid,
+                            )
+                            .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                         }
                     }
                     DeviceFamily::HydroShift2OledCurveLcd
                     | DeviceFamily::Lancool207
                     | DeviceFamily::UniversalScreen => {
                         let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                        lianli_devices::winusb::lcd::open_for_pid(candidate.pid, device)
+                        lianli_devices::winusb::lcd::WinUsbLcdDevice::open(device, candidate.pid)
                             .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                     }
                     DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => {

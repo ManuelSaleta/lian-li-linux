@@ -17,6 +17,8 @@ pub const CMD_SET_CLOCK: u8 = 0x33;
 pub const CMD_STOP_CLOCK: u8 = 0x34;
 pub const CMD_PUSH_JPG: u8 = 0x65;
 pub const CMD_PUSH_PNG: u8 = 0x66;
+pub const CMD_CLEAR_PNG: u8 = 0x67;
+pub const CMD_HIDE_SHOW_FRAMES: u8 = 0x68;
 pub const CMD_START_PLAY: u8 = 0x79;
 pub const CMD_QUERY_BLOCK: u8 = 0x7A;
 pub const CMD_STOP_PLAY: u8 = 0x7B;
@@ -190,13 +192,21 @@ impl PacketBuilder {
         chunk_len: usize,
         is_last: bool,
         play_count: u8,
+        play_tick: u32,
     ) -> Vec<u8> {
-        let play_tick = self.start_time.elapsed().as_millis() as u32;
         let mut params = (chunk_len as u32).to_be_bytes().to_vec();
         params.push(if is_last { 1 } else { 0 });
         params.push(play_count);
         params.extend_from_slice(&play_tick.to_be_bytes());
         self.build_winusb(CMD_START_PLAY, &params)
+    }
+
+    pub fn clear_png_header_winusb(&mut self) -> Vec<u8> {
+        self.build_winusb(CMD_CLEAR_PNG, &[])
+    }
+
+    pub fn hide_show_frames_none_header_winusb(&mut self) -> Vec<u8> {
+        self.build_winusb(CMD_HIDE_SHOW_FRAMES, &[0u8; 32])
     }
 
     pub fn get_h264_block_header_winusb(&mut self) -> Vec<u8> {
@@ -212,7 +222,8 @@ impl PacketBuilder {
     }
 
     pub fn sync_clock_header_winusb(&mut self, mode: u8) -> Vec<u8> {
-        let now = time::OffsetDateTime::now_utc();
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         let y = now.year() as u16;
         self.build_winusb(
             CMD_SET_CLOCK,
