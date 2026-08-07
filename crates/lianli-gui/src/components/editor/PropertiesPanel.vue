@@ -283,7 +283,7 @@ async function browsePath(key: string) {
         <div class="field check"><n-checkbox :checked="current.visible !== false" @update:checked="(v) => emit('patchCommon', current.id, 'visible', v)">Visible</n-checkbox></div>
       </div>
       <div v-if="needsFps" class="field"><label class="muted">FPS</label>
-        <n-input-number :value="current.fps ?? 30" size="small" :min="1" :max="60" @update:value="(v) => emit('patchCommon', current.id, 'fps', v ?? 30)" />
+        <n-input-number :value="current.fps ?? 30" size="small" :min="1" :max="120" @update:value="(v) => emit('patchCommon', current.id, 'fps', v ?? 30)" />
       </div>
       <div v-if="needsUpdateInterval" class="field"><label class="muted">Update interval (ms)</label>
         <n-input-number :value="current.update_interval_ms ?? 1000" size="small" :min="100" :max="10000" :step="100" @update:value="(v) => emit('patchCommon', current.id, 'update_interval_ms', v ?? 1000)" />

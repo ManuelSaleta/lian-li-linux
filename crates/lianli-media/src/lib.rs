@@ -22,6 +22,7 @@ use tempfile::TempDir;
 pub struct MediaAsset {
     pub config_key: ConfigKey,
     pub kind: MediaAssetKind,
+    pub stream_fps: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -63,12 +64,13 @@ pub fn prepare_media_asset(
     all_sensors: &[SensorInfo],
     user_templates: &[LcdTemplate],
 ) -> Result<MediaAssetKind, MediaError> {
+    let fps_cap = default_fps.min(screen.max_fps as f32).max(1.0);
     match cfg.media_type {
         MediaType::Image if h264 => {
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "image entry requires a 'path' field".into(),
             ))?;
-            let fps = cfg.fps.unwrap_or(default_fps).max(1.0);
+            let fps = cfg.fps.unwrap_or(default_fps).min(fps_cap).max(1.0);
             let (h264_path, temp, encoded_fps) =
                 video::encode_h264(path, fps, cfg.orientation, screen)?;
             Ok(MediaAssetKind::H264Stream {
@@ -94,7 +96,7 @@ pub fn prepare_media_asset(
             let temp = TempDir::new()?;
             let jpeg_path = temp.path().join("color.jpg");
             std::fs::write(&jpeg_path, image::build_color_frame(rgb, screen))?;
-            let fps = cfg.fps.unwrap_or(default_fps).max(1.0);
+            let fps = cfg.fps.unwrap_or(default_fps).min(fps_cap).max(1.0);
             let (h264_path, h264_temp, encoded_fps) =
                 video::encode_h264(&jpeg_path, fps, cfg.orientation, screen)?;
             drop(temp);
@@ -118,7 +120,7 @@ pub fn prepare_media_asset(
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "video/gif entry requires a 'path' field".into(),
             ))?;
-            let fps = video::cap_fps_to_source(path, cfg.fps.unwrap_or(default_fps));
+            let fps = video::cap_fps_to_source(path, cfg.fps.unwrap_or(default_fps).min(fps_cap));
             let (h264_path, temp, encoded_fps) =
                 video::encode_h264(path, fps, cfg.orientation, screen)?;
             Ok(MediaAssetKind::H264Stream {
@@ -129,7 +131,7 @@ pub fn prepare_media_asset(
             })
         }
         MediaType::Video => {
-            let desired_fps = cfg.fps.unwrap_or(default_fps);
+            let desired_fps = cfg.fps.unwrap_or(default_fps).min(fps_cap);
             if desired_fps <= 0.0 {
                 return Err(MediaError::InvalidFps);
             }
@@ -148,7 +150,10 @@ pub fn prepare_media_asset(
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "gif entry requires a 'path' field".into(),
             ))?;
-            let capped_fps = cfg.fps.map(|f| video::cap_fps_to_source(path, f));
+            let capped_fps = Some(video::cap_fps_to_source(
+                path,
+                cfg.fps.unwrap_or(default_fps).min(fps_cap),
+            ));
             let (frames, durations) =
                 video::build_gif_frames(path, cfg.orientation, screen, capped_fps)?;
             Ok(MediaAssetKind::Video {
@@ -187,12 +192,14 @@ pub fn prepare_media_asset(
                 .ok_or_else(|| {
                     MediaError::InvalidConfig(format!("unknown template id '{template_id}'"))
                 })?;
+            let custom_fps = cfg.fps.unwrap_or(default_fps).min(fps_cap).max(1.0);
             let asset = CustomAsset::new(
                 &template,
                 cfg.orientation,
                 screen,
                 all_sensors,
                 cfg.smooth_edges(),
+                custom_fps,
             )?;
             Ok(MediaAssetKind::Custom { asset })
         }

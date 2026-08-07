@@ -74,7 +74,7 @@ fn main() -> Result<()> {
         play_count: 0,
     };
 
-    let asset = CustomAsset::new(&template, 0.0, &screen, &[], false)
+    let asset = CustomAsset::new(&template, 0.0, &screen, &[], false, 30.0)
         .map_err(|e| anyhow!("building custom asset: {e}"))?;
     asset.seed_preview_history();
     let frame = asset

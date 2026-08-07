@@ -62,7 +62,7 @@ pub fn render_template_preview(
         play_count: 0,
     };
     let all_sensors = lianli_shared::sensors::enumerate_sensors();
-    match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false) {
+    match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false, 30.0) {
         Ok(asset) => {
             asset.seed_preview_history();
             match asset.render_frame(true) {

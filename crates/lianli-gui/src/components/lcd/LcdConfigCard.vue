@@ -438,7 +438,7 @@ const brightness = computed({
     <div class="grid">
       <div v-if="['video', 'gif'].includes(entry.type)" class="field">
         <label class="muted">FPS</label>
-        <n-input-number :value="entry.fps ?? 30" size="small" :min="1" :max="60" @update:value="onFps" />
+        <n-input-number :value="entry.fps ?? 30" size="small" :min="1" :max="120" @update:value="onFps" />
       </div>
       <div v-if="entry.type === 'sensor'" class="field">
         <label class="muted">Update interval (ms)</label>

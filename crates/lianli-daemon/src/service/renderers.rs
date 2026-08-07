@@ -346,8 +346,8 @@ impl AsyncCustomH264Renderer {
         canvas_w: u32,
         canvas_h: u32,
         rotation_deg: u16,
+        fps: f32,
     ) -> anyhow::Result<Self> {
-        let fps = screen.max_fps as f32;
         let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, rotation_deg, screen)
             .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
         let stdout = encoder
@@ -446,6 +446,7 @@ impl AsyncSensorH264Renderer {
         asset: Arc<lianli_media::SensorAsset>,
         lcd: &LcdBackend,
         screen: &ScreenInfo,
+        fps: f32,
     ) -> anyhow::Result<Self> {
         let initial = match asset.render_frame_rgba(true)? {
             Some(img) => img,
@@ -455,7 +456,6 @@ impl AsyncSensorH264Renderer {
         };
         let canvas_w = initial.width();
         let canvas_h = initial.height();
-        let fps = screen.max_fps as f32;
         let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, 0, screen)
             .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
         let stdout = encoder

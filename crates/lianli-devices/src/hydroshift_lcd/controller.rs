@@ -541,7 +541,9 @@ impl HydroShiftLcdController {
                 .context("AIO LCD: read A-response")?;
 
             if n == 0 {
-                bail!("AIO LCD: no response to A-command {cmd:#04x} (timeout after {timeout_ms}ms)");
+                bail!(
+                    "AIO LCD: no response to A-command {cmd:#04x} (timeout after {timeout_ms}ms)"
+                );
             }
 
             if buf[1] == cmd {
@@ -743,11 +745,15 @@ impl FanDevice for HydroShiftLcdController {
     }
 
     fn poll_coolant_temp(&self) -> Option<f32> {
-        self.last_handshake.lock().as_ref().filter(|hs| {
-            hs.temp_valid
+        self.last_handshake
+            .lock()
+            .as_ref()
+            .filter(|hs| {
+                hs.temp_valid
                 // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
                 && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
-        }).map(|hs| hs.coolant_temp)
+            })
+            .map(|hs| hs.coolant_temp)
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {

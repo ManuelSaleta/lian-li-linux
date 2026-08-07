@@ -85,6 +85,7 @@ impl CustomAsset {
         screen: &ScreenInfo,
         all_sensors: &[SensorInfo],
         smooth_edges: bool,
+        fps: f32,
     ) -> Result<Arc<Self>, MediaError> {
         let default_path = default_font_path().ok_or_else(|| {
             MediaError::Sensor("no system font available; install fontconfig or DejaVu Sans".into())
@@ -185,7 +186,7 @@ impl CustomAsset {
 
             if let WidgetKind::Video { path, .. } = &widget.kind {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
-                let requested = widget.fps.unwrap_or(30.0).min(screen.max_fps as f32);
+                let requested = widget.fps.unwrap_or(30.0).min(fps);
                 let decode_fps = crate::video::cap_fps_to_source(path, requested);
                 match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1)) {
                     Ok((frames, durations)) => {
@@ -213,7 +214,7 @@ impl CustomAsset {
             widget_states.push(state);
         }
 
-        let fps = screen.max_fps.max(1);
+        let fps = fps.max(1.0);
         let frame_interval =
             Duration::from_nanos(1_000_000_000 / fps as u64).max(Duration::from_millis(16));
 

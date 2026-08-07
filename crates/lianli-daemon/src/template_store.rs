@@ -85,8 +85,8 @@ fn render_template_preview(template: &LcdTemplate, sensors: &[SensorInfo]) -> Re
         png: false,
         play_count: 0,
     };
-    let asset =
-        CustomAsset::new(template, 0.0, &screen, sensors, false).context("CustomAsset::new")?;
+    let asset = CustomAsset::new(template, 0.0, &screen, sensors, false, 30.0)
+        .context("CustomAsset::new")?;
     asset.seed_preview_history();
     let frame = match asset.render_frame(true).context("render_frame")? {
         Some(f) => f,

@@ -694,7 +694,12 @@ fn make_frame_source(
             asset: sensor_asset,
         } => {
             if screen.h264 {
-                match AsyncSensorH264Renderer::new(Arc::clone(sensor_asset), lcd, screen) {
+                match AsyncSensorH264Renderer::new(
+                    Arc::clone(sensor_asset),
+                    lcd,
+                    screen,
+                    asset.stream_fps,
+                ) {
                     Ok(renderer) => {
                         info!("Sensor mode using live h264 pipeline");
                         return Box::new(SensorH264Source {
@@ -733,6 +738,7 @@ fn make_frame_source(
                     custom_asset.canvas_width(),
                     custom_asset.canvas_height(),
                     custom_asset.total_rotation_deg(),
+                    asset.stream_fps,
                 ) {
                     Ok(renderer) => {
                         info!("Custom mode using live h264 pipeline");

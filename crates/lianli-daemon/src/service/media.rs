@@ -20,8 +20,9 @@ fn asset_cache_key(
     device: &LcdConfig,
     user_templates: &[LcdTemplate],
     _sensors: &[SensorInfo],
+    default_fps: f32,
 ) -> ConfigKey {
-    let base = config_identity(device);
+    let base = format!("{}|fps:{default_fps}", config_identity(device));
     if device.media_type != MediaType::Custom {
         return base;
     }
@@ -59,7 +60,8 @@ impl ServiceManager {
                     .as_ref()
                     .and_then(|s| screen_map.get(s).copied())
                     .unwrap_or(ScreenInfo::WIRELESS_LCD);
-                let cfg_key = asset_cache_key(device, &user_templates, &all_sensors);
+                let cfg_key =
+                    asset_cache_key(device, &user_templates, &all_sensors, cfg.default_fps);
                 let device_id = device.device_id();
 
                 match prepare_media_asset(
@@ -71,9 +73,16 @@ impl ServiceManager {
                     &user_templates,
                 ) {
                     Ok(asset_kind) => {
+                        let stream_fps = device
+                            .fps
+                            .unwrap_or(cfg.default_fps)
+                            .min(cfg.default_fps)
+                            .min(screen.max_fps as f32)
+                            .max(1.0);
                         let asset = MediaAsset {
                             kind: asset_kind,
                             config_key: cfg_key,
+                            stream_fps,
                         };
                         let asset_arc = Arc::new(asset);
                         self.media_assets.insert(idx, Arc::clone(&asset_arc));
@@ -288,7 +297,8 @@ impl ServiceManager {
                             .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                     }
                     DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => {
-                        if let Some(d) = self.registry.aio_lcd_devices.remove(&candidate.device_id) {
+                        if let Some(d) = self.registry.aio_lcd_devices.remove(&candidate.device_id)
+                        {
                             Ok(LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d))))
                         } else if let Some(backend) =
                             self.registry.hid_backends.get(&candidate.device_id)
@@ -298,8 +308,9 @@ impl ServiceManager {
                                 candidate.pid,
                                 Arc::clone(backend),
                             ) {
-                                Some(result) => result
-                                    .map(|d| LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))),
+                                Some(result) => result.map(|d| {
+                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                }),
                                 None => Err(anyhow::anyhow!("Not an LCD device")),
                             }
                         } else {
@@ -316,8 +327,9 @@ impl ServiceManager {
                                 hid_usage_page: None,
                             };
                             match open_hid_lcd_device(&det, self.hid_backend()) {
-                                Some(result) => result
-                                    .map(|d| LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))),
+                                Some(result) => result.map(|d| {
+                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                }),
                                 None => Err(anyhow::anyhow!("Not an LCD device")),
                             }
                         }

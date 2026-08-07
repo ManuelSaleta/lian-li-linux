@@ -125,8 +125,8 @@ function onHidBackend(v: "hidraw" | "rusb") {
       </div>
       <div class="kv"><span class="muted">LCD count</span><span>{{ config.config.lcds.length }}</span></div>
       <div class="kv"><span class="muted">Fan curve count</span><span>{{ config.config.fan_curves.length }}</span></div>
-      <div class="kv"><span class="muted">Default FPS</span>
-        <n-input-number :value="config.config.default_fps" :min="1" :max="60" size="small" @update:value="onDefaultFps" />
+      <div class="kv"><span class="muted">Max FPS Limit</span>
+        <n-input-number :value="config.config.default_fps" :min="1" :max="120" size="small" @update:value="onDefaultFps" />
       </div>
     </section>
 
