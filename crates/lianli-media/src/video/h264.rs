@@ -15,6 +15,15 @@ pub fn encode_h264(
     let temp = TempDir::new()?;
     let output = temp.path().join("stream.h264");
 
+    let is_image = matches!(
+        input
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "bmp" | "webp" | "tiff" | "gif")
+    );
+
     let (rw, rh) = render_dimensions(screen, orientation);
     let mut vf_parts = vec![format!("scale={rw}:{rh}:flags=lanczos")];
     let rot = (orientation % 360.0 + 360.0) % 360.0;
@@ -37,7 +46,7 @@ pub fn encode_h264(
 
     let mut last_stderr: Option<String> = None;
     for kind in encoder_chain() {
-        match run_encode(input, &vf, &fps_str, &bitrate_str, *kind, &output) {
+        match run_encode(input, &vf, &fps_str, &bitrate_str, *kind, &output, is_image) {
             Ok(()) => {
                 info!(
                     "LCD H.264 transcode: {out_w}x{out_h}@{FILE_OUTPUT_FPS}fps (sampled {sample_fps}) via {}",
@@ -250,9 +259,11 @@ pub(super) fn encoder_codec_args_live(
         }
         EncoderKind::Libx264 => {
             args.extend(["-preset".into(), "ultrafast".into()]);
-            args.extend(["-tune".into(), "zerolatency".into()]);
             args.extend(["-b:v".into(), bitrate_str.into()]);
-            args.extend(["-x264-params".into(), "bframes=0".into()]);
+            args.extend([
+                "-x264-params".into(),
+                "bframes=0:rc-lookahead=0:sync-lookahead=0".into(),
+            ]);
             args.extend(["-threads".into(), "4".into()]);
         }
     }
@@ -274,9 +285,13 @@ fn run_encode(
     bitrate_str: &str,
     kind: EncoderKind,
     output: &Path,
+    loop_image: bool,
 ) -> Result<(), String> {
     let mut args: Vec<String> = vec!["-y".into(), "-loglevel".into(), "error".into()];
     args.extend(hwaccel_input_args(kind));
+    if loop_image {
+        args.extend(["-loop".into(), "1".into(), "-t".into(), "1".into()]);
+    }
     args.extend(["-i".into(), input.to_string_lossy().into_owned()]);
     args.extend(["-vf".into(), finalize_vf(kind, vf)]);
     args.extend(encoder_codec_args_file(kind, fps_str, bitrate_str));
