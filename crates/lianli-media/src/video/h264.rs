@@ -218,53 +218,45 @@ pub(super) fn encoder_codec_args_live(
     fps_str: &str,
     bitrate_str: &str,
 ) -> Vec<String> {
-    let gop = fps_str.parse::<u32>().unwrap_or(30).max(1).to_string();
     let mut args: Vec<String> = vec![
         "-r".into(),
         fps_str.into(),
-        "-g".into(),
-        gop.clone(),
-        "-keyint_min".into(),
-        gop,
         "-c:v".into(),
         kind.name().into(),
     ];
 
     match kind {
+        EncoderKind::Libx264 => {
+            args.extend(["-preset".into(), "ultrafast".into()]);
+            args.extend(["-tune".into(), "zerolatency".into()]);
+            args.extend(["-threads".into(), "1".into()]);
+            args.extend(["-x264-params".into(), "slices=1".into()]);
+        }
         EncoderKind::Nvenc => {
-            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "p1".into()]);
             args.extend(["-rc".into(), "vbr".into()]);
             args.extend(["-forced-idr".into(), "1".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
         }
         EncoderKind::Amf => {
-            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-usage".into(), "lowlatency".into()]);
             args.extend(["-quality".into(), "speed".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
         }
         EncoderKind::Vaapi => {
-            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-rc_mode".into(), "VBR".into()]);
             args.extend(["-bf".into(), "0".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
         }
         EncoderKind::Vulkan => {
             args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-bf".into(), "0".into()]);
         }
         EncoderKind::Qsv => {
-            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "veryfast".into()]);
             args.extend(["-look_ahead".into(), "0".into()]);
             args.extend(["-bf".into(), "0".into()]);
-        }
-        EncoderKind::Libx264 => {
-            args.extend(["-preset".into(), "ultrafast".into()]);
             args.extend(["-b:v".into(), bitrate_str.into()]);
-            args.extend([
-                "-x264-params".into(),
-                "bframes=0:rc-lookahead=0:sync-lookahead=0".into(),
-            ]);
-            args.extend(["-threads".into(), "4".into()]);
         }
     }
 
@@ -295,6 +287,7 @@ fn run_encode(
     args.extend(["-i".into(), input.to_string_lossy().into_owned()]);
     args.extend(["-vf".into(), finalize_vf(kind, vf)]);
     args.extend(encoder_codec_args_file(kind, fps_str, bitrate_str));
+    args.extend(["-color_range".into(), "pc".into()]);
     args.extend([
         "-an".into(),
         "-f".into(),
