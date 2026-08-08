@@ -146,16 +146,24 @@ sudo dnf install displaylink
 
 ### Immutable Fedora (Bazzite)
 
-On rpm-ostree based Fedora spins, `dnf install` doesn't apply to the running system, packages layer into a new deployment that only activates after a reboot. The package's auto-enable scriptlet won't run here. Enable rpmfusion + the COPR first as above, then:
+On Bazzite and other immutable Fedora spins, `dnf install` doesn't apply to the running system. Packages get layered into a new deployment that only takes effect after a reboot, and the daemon won't start on its own. If you can, it's better to use distrobox/toolbox.
 
 ```bash
+# 1. Enable rpmfusion (full ffmpeg with libx264)
+sudo rpm-ostree install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+sudo systemctl reboot
+
+# 2. After reboot: add the project repo and install
+sudo curl --output-dir /etc/yum.repos.d/ --remote-name \
+  https://copr.fedorainfracloud.org/coprs/sgtaziz/lian-li-linux/repo/fedora-$(rpm -E %fedora)/sgtaziz-lian-li-linux-fedora-$(rpm -E %fedora).repo
 sudo rpm-ostree install lian-li-linux
-# Make sure you reboot, after logging back in:
+sudo systemctl reboot
+
+# 3. After reboot: start the daemon
 systemctl --user daemon-reload
 systemctl --user enable --now lianli-daemon.service
 ```
 
-The daemon won't appear until you reboot. If `systemctl --user enable` reports "Unit does not exist", you likely haven't rebooted into the new deployment yet.
 
 ### From Source
 

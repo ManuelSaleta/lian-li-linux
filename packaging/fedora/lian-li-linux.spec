@@ -132,6 +132,7 @@ fi
 
 %package evdi
 Summary:        Bundled libevdi library for %{name}
+Provides:       libevdi.so.1()(64bit)
 
 %description evdi
 Bundled libevdi (v%{evdi_version}) userspace library, used by lianli-daemon.
