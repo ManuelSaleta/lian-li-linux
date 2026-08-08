@@ -114,18 +114,6 @@ async function browsePath() {
   }
 }
 
-// Solid color
-function onColorR(v: number | null) { setColor(0, v); }
-function onColorG(v: number | null) { setColor(1, v); }
-function onColorB(v: number | null) { setColor(2, v); }
-function setColor(i: number, v: number | null) {
-  const cur = props.entry.rgb ?? [0, 0, 0];
-  const next = [...cur] as [number, number, number];
-  next[i] = v ?? 0;
-  props.entry.rgb = next;
-  config.markDirty();
-}
-
 // Sensor
 const sensorOptions = computed(() => enumerateSensorsAsOptions(config.sensors, true));
 function ensureSensor(): SensorDescriptor {
@@ -379,10 +367,8 @@ const brightness = computed({
     </div>
 
     <!-- Solid Color -->
-    <div v-if="entry.type === 'color'" class="color-row">
-      <n-input-number :value="entry.rgb?.[0] ?? 0" size="small" :min="0" :max="255" @update:value="onColorR"><template #prefix>R</template></n-input-number>
-      <n-input-number :value="entry.rgb?.[1] ?? 0" size="small" :min="0" :max="255" @update:value="onColorG"><template #prefix>G</template></n-input-number>
-      <n-input-number :value="entry.rgb?.[2] ?? 0" size="small" :min="0" :max="255" @update:value="onColorB"><template #prefix>B</template></n-input-number>
+    <div v-if="entry.type === 'color'" class="field">
+      <label class="muted">Color</label>
       <ColorPicker :model-value="entry.rgb ?? [0,0,0]" @update:model-value="(v: any) => { entry.rgb = v; config.markDirty(); }" />
     </div>
 
@@ -491,11 +477,6 @@ const brightness = computed({
 .path-row {
   display: flex;
   gap: var(--space-1);
-}
-.color-row {
-  display: flex;
-  gap: var(--space-2);
-  align-items: flex-end;
 }
 .template-section {
   display: flex;
