@@ -119,8 +119,6 @@ fi
 
 %files
 %license LICENSE
-%{_libdir}/libevdi.so.1
-%{_libdir}/libevdi.so.%{evdi_version}
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
 %{_udevrulesdir}/99-lianli.rules
@@ -131,6 +129,16 @@ fi
 %{_datadir}/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
 %{_datadir}/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
 %{_datadir}/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
+
+%package evdi
+Summary:        Bundled libevdi library for %{name}
+
+%description evdi
+Bundled libevdi (v%{evdi_version}) userspace library, used by lianli-daemon.
+
+%files evdi
+%{_libdir}/libevdi.so.1
+%{_libdir}/libevdi.so.%{evdi_version}
 
 %changelog
 * Fri Aug 07 2026 sgtaziz <sgtaziz013@gmail.com> - 0.7.6-1
