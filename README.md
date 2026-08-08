@@ -144,6 +144,19 @@ sudo dnf copr enable crashdummy/Displaylink
 sudo dnf install displaylink
 ```
 
+### Immutable Fedora (Bazzite)
+
+On rpm-ostree based Fedora spins, `dnf install` doesn't apply to the running system, packages layer into a new deployment that only activates after a reboot. The package's auto-enable scriptlet won't run here. Enable rpmfusion + the COPR first as above, then:
+
+```bash
+sudo rpm-ostree install lian-li-linux
+# Make sure you reboot, after logging back in:
+systemctl --user daemon-reload
+systemctl --user enable --now lianli-daemon.service
+```
+
+The daemon won't appear until you reboot. If `systemctl --user enable` reports "Unit does not exist", you likely haven't rebooted into the new deployment yet.
+
 ### From Source
 
 1) Clone the repo and submodules:
