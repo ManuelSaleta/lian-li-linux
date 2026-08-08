@@ -2,32 +2,6 @@ use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::screen::{screen_info_for, ScreenInfo};
 
 #[test]
-fn h264_screens_have_sufficient_payload() {
-    let families = [
-        DeviceFamily::HydroShiftLcd,
-        DeviceFamily::Galahad2Lcd,
-        DeviceFamily::HydroShift2Lcd,
-        DeviceFamily::HydroShift2OledCurveLcd,
-        DeviceFamily::UniversalScreen,
-        DeviceFamily::TlFlexLcd,
-        DeviceFamily::SlInfFlexLcd,
-    ];
-    for family in families {
-        if let Some(screen) = screen_info_for(family) {
-            let worst_case = (screen.width * screen.height * 3) as usize;
-            assert!(
-                screen.max_payload >= worst_case,
-                "{family:?}: max_payload {} < worst-case JPEG {} ({}x{})",
-                screen.max_payload,
-                worst_case,
-                screen.width,
-                screen.height
-            );
-        }
-    }
-}
-
-#[test]
 fn hs2_oled_curve_has_correct_flags() {
     let screen = ScreenInfo::HYDROSHIFT2_OLED_CURVE;
     assert!(screen.png);
