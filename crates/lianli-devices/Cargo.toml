@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 lianli-shared = { path = "../lianli-shared" }
 lianli-transport = { path = "../lianli-transport" }
-hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+hidapi = { workspace = true }
 cbc = { workspace = true }
 des = { workspace = true }
 hex = { workspace = true }
@@ -24,7 +24,7 @@ time = { workspace = true }
 clap = { workspace = true }
 
 [build-dependencies]
-cc = "1.0"
+cc = { workspace = true }
 
 [[bin]]
 name = "desktop-mode-probe"

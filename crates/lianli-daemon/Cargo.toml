@@ -25,5 +25,5 @@ rusb = { workspace = true }
 notify = { workspace = true }
 image = { workspace = true }
 turbojpeg = { workspace = true }
-signal-hook = "0.3"
+signal-hook = { workspace = true }
 libc = { workspace = true }
