@@ -21,7 +21,7 @@ pub fn encode_h264(
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .as_deref(),
-        Some("jpg" | "jpeg" | "png" | "bmp" | "webp" | "tiff" | "gif")
+        Some("jpg" | "jpeg" | "png" | "bmp" | "webp" | "tiff")
     );
 
     let (rw, rh) = render_dimensions(screen, orientation);
