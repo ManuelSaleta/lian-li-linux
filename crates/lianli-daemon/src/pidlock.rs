@@ -82,7 +82,11 @@ fn lock_pidfile(path: &Path) -> std::result::Result<File, LockFailure> {
         .create(true)
         .truncate(false)
         .open(path)
-        .map_err(|e| LockFailure::Unopenable(anyhow::Error::from(e).context(format!("opening {}", path.display()))))?;
+        .map_err(|e| {
+            LockFailure::Unopenable(
+                anyhow::Error::from(e).context(format!("opening {}", path.display())),
+            )
+        })?;
 
     let fd = file.as_raw_fd();
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
