@@ -144,9 +144,47 @@ sudo dnf copr enable crashdummy/Displaylink
 sudo dnf install displaylink
 ```
 
+### Distrobox / toolbx (containers)
+
+On Bazzite and other immutable systems, the recommended way to add software is a distrobox or toolbx container rather than layering onto the base. lian-li-linux runs fine in one — just make sure your USB devices are exposed to the box so the daemon can see them.
+
+Inside the container:
+```bash
+# 1. Enable rpmfusion (full ffmpeg with libx264)
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+# 2. Enable the project COPR
+sudo dnf copr enable sgtaziz/lian-li-linux
+# 3. Install, skipping Recommends — displaylink pulls a DKMS kernel-module build
+#    that triggers dracut, which fails in a container. Kernel modules don't belong
+#    in a box anyway.
+sudo dnf install --setopt=install_weak_deps=False lian-li-linux
+```
+
+Don't enable `crashdummy/Displaylink` inside the box either, same reason.
+
+A container doesn't run systemd, so the shipped `lianli-daemon.service` can't manage the daemon from inside the box. To start it on login, create a user systemd unit on the **host** that enters the box, e.g. `~/.config/systemd/user/lianli-daemon.service`:
+```ini
+[Unit]
+Description=Lian Li Daemon (distrobox)
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/distrobox-enter -n BOX -- lianli-daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+Replace `BOX` with your container name (check the path with `command -v distrobox-enter`), then:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lianli-daemon.service
+```
+Run the GUI with `distrobox-enter -n BOX -- lianli-gui`.
+
 ### Immutable Fedora (Bazzite)
 
-On Bazzite and other immutable Fedora spins, `dnf install` doesn't apply to the running system. Packages get layered into a new deployment that only takes effect after a reboot, and the daemon won't start on its own. If you can, it's better to use distrobox/toolbox.
+Prefer the distrobox method above. If you need to install directly on the base instead, `dnf install` doesn't apply on rpm-ostree. Packages layer into a new deployment that only takes effect after a reboot, and the daemon won't start on its own.
 
 ```bash
 # 1. Enable rpmfusion (full ffmpeg with libx264)
