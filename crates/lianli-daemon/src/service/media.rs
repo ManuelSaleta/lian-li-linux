@@ -445,6 +445,7 @@ fn is_wired_aio_lcd(family: DeviceFamily) -> bool {
         family,
         DeviceFamily::HydroShiftLcd
             | DeviceFamily::Galahad2Lcd
+            | DeviceFamily::HydroShift2Lcd
             | DeviceFamily::HydroShift2OledCurveLcd
     )
 }

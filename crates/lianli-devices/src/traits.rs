@@ -72,6 +72,12 @@ pub trait FanDevice: Send + Sync {
     fn stop_pwm(&self) -> u8 {
         0
     }
+
+    fn wireless_link_mac(&self) -> Option<[u8; 6]> {
+        None
+    }
+
+    fn set_wireless_bound(&self, _bound: bool) {}
 }
 
 /// Blanket forwarding impl so any `Arc<T>` can be used as a `FanDevice`
@@ -123,6 +129,12 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn stop_pwm(&self) -> u8 {
         (**self).stop_pwm()
+    }
+    fn wireless_link_mac(&self) -> Option<[u8; 6]> {
+        (**self).wireless_link_mac()
+    }
+    fn set_wireless_bound(&self, bound: bool) {
+        (**self).set_wireless_bound(bound)
     }
 }
 

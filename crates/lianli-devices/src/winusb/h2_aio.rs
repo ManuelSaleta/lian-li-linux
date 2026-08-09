@@ -59,6 +59,7 @@ pub struct H2AioController {
     last_pump_duty: Mutex<u8>,
     is_square: bool,
     is_wireless: AtomicBool,
+    mac: Mutex<Option<[u8; 6]>>,
 }
 
 impl H2AioController {
@@ -70,6 +71,7 @@ impl H2AioController {
             last_pump_duty: Mutex::new(128),
             is_square: pid == 0xA034,
             is_wireless: AtomicBool::new(false),
+            mac: Mutex::new(None),
         };
         wake(&transport);
         tracing::info!("HydroShift II control channel opened (shared transport)");
@@ -82,6 +84,10 @@ impl H2AioController {
 
     pub fn is_wireless_mode(&self) -> bool {
         self.is_wireless.load(Ordering::Relaxed)
+    }
+
+    pub fn mac(&self) -> Option<[u8; 6]> {
+        *self.mac.lock()
     }
 
     pub fn get_h2_params(&self) -> Result<H2Params> {
@@ -105,6 +111,18 @@ impl H2AioController {
             anyhow::bail!("H2: GetH2Params response too short ({n} bytes)");
         }
 
+        let mac = {
+            let m = [buf[22], buf[23], buf[24], buf[25], buf[26], buf[27]];
+            if m.iter().all(|&b| b == 0) {
+                None
+            } else {
+                Some(m)
+            }
+        };
+        if mac.is_some() {
+            *self.mac.lock() = mac;
+        }
+
         Ok(H2Params {
             cpu_temp: 0,
             cpu_load: 0,
@@ -117,14 +135,7 @@ impl H2AioController {
                 u16::from_be_bytes([buf[18], buf[19]]),
             ],
             coolant_temp: buf[13],
-            mac: {
-                let m = [buf[22], buf[23], buf[24], buf[25], buf[26], buf[27]];
-                if m.iter().all(|&b| b == 0) {
-                    None
-                } else {
-                    Some(m)
-                }
-            },
+            mac,
         })
     }
 
@@ -278,6 +289,9 @@ impl FanDevice for H2AioController {
     }
 
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
+        if self.is_wireless_mode() {
+            return Ok(Vec::new());
+        }
         let params = self.get_h2_params()?;
         Ok(params.fan_rpm.to_vec())
     }
@@ -291,6 +305,9 @@ impl FanDevice for H2AioController {
     }
 
     fn poll_coolant_temp(&self) -> Option<f32> {
+        if self.is_wireless_mode() {
+            return None;
+        }
         self.get_h2_params().ok().map(|p| p.coolant_temp as f32)
     }
 
@@ -300,15 +317,29 @@ impl FanDevice for H2AioController {
         let fans = *self.last_fan_duties.lock();
         self.sync_pump_fan(pump_pwm, fans)
     }
+
+    fn wireless_link_mac(&self) -> Option<[u8; 6]> {
+        self.mac()
+    }
+
+    fn set_wireless_bound(&self, bound: bool) {
+        self.set_wireless_mode(bound);
+    }
 }
 
 impl AioDevice for H2AioController {
     fn read_pump_rpm(&self) -> Result<u16> {
+        if self.is_wireless_mode() {
+            return Ok(0);
+        }
         let params = self.get_h2_params()?;
         Ok(params.pump_rpm)
     }
 
     fn read_coolant_temp(&self) -> Result<f32> {
+        if self.is_wireless_mode() {
+            return Ok(0.0);
+        }
         let params = self.get_h2_params()?;
         Ok(params.coolant_temp as f32)
     }

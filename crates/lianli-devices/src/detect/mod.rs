@@ -54,6 +54,20 @@ impl DetectedDevice {
             }
         }
     }
+
+    pub fn topology_key(&self) -> String {
+        let port = self
+            .device
+            .port_numbers()
+            .ok()
+            .filter(|p| !p.is_empty())
+            .map(|ports| {
+                let parts: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+                parts.join(".")
+            })
+            .unwrap_or_else(|| self.address.to_string());
+        format!("{:04x}:{:04x}:{}-{}", self.vid, self.pid, self.bus, port)
+    }
 }
 
 /// Known non-unique HID serial strings (chip manufacturer names, firmware

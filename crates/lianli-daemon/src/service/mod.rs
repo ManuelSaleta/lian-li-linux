@@ -201,6 +201,7 @@ impl ServiceManager {
         }
 
         self.check_wired_hotplug();
+        self.reconcile_wired_wireless_binding();
         self.refresh_targets();
         self.process_pending_lcd_firmware();
         self.check_thermal_alert();

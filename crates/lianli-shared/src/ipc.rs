@@ -251,6 +251,8 @@ pub struct DeviceInfo {
     /// when no V2 dongle is present.
     #[serde(default)]
     pub wireless_group_mac: Option<String>,
+    #[serde(default)]
+    pub topology_key: Option<String>,
 }
 
 /// Status of the OpenRGB SDK server.

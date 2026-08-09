@@ -188,6 +188,21 @@ impl ServiceManager {
             .unwrap_or_default()
     }
 
+    pub(super) fn reconcile_wired_wireless_binding(&self) {
+        let aio_macs: HashSet<[u8; 6]> = self
+            .wireless
+            .devices()
+            .iter()
+            .filter(|d| d.is_aio())
+            .map(|d| d.mac)
+            .collect();
+        for dev in self.registry.fan_devices.values() {
+            if let Some(mac) = dev.wireless_link_mac() {
+                dev.set_wireless_bound(aio_macs.contains(&mac));
+            }
+        }
+    }
+
     /// Initialize all wired USB devices (fan + RGB + LCD + AIO) via the
     /// [`registry`] dispatch table. Each device is opened on its own thread
     /// with a timeout so that one unresponsive controller cannot block the
@@ -225,18 +240,21 @@ impl ServiceManager {
 
         let present_ids: HashSet<String> = usb_devs
             .iter()
-            .map(|det| Self::rusb_device_id(det))
+            .map(Self::rusb_device_id)
             .collect();
+        let present_topos: HashSet<String> =
+            usb_devs.iter().map(|det| det.topology_key()).collect();
         fan_devices.retain(|id, _| present_ids.contains(id));
         self.registry.fan_device_info.retain(|info| {
-            present_ids
-                .iter()
-                .any(|id| info.device_id.starts_with(id.as_str()))
+            info.topology_key
+                .as_ref()
+                .is_some_and(|t| present_topos.contains(t))
         });
 
         const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
         let mut pending: Vec<(
+            String,
             String,
             &str,
             DeviceFamily,
@@ -278,6 +296,7 @@ impl ServiceManager {
             let vid = det.vid;
             let pid = det.pid;
             let serial = det.serial.clone();
+            let topology_key = det.topology_key();
 
             let (tx, rx) =
                 std::sync::mpsc::sync_channel::<anyhow::Result<registry::OpenedDevice>>(1);
@@ -289,7 +308,7 @@ impl ServiceManager {
                 })
                 .ok();
 
-            pending.push((base_id, name, family, vid, pid, serial, rx));
+            pending.push((base_id, topology_key, name, family, vid, pid, serial, rx));
             debug!("Spawned open thread for {label}");
         }
 
@@ -297,7 +316,7 @@ impl ServiceManager {
         // devices waste at most OPEN_TIMEOUT total, not N × OPEN_TIMEOUT.
         let deadline = std::time::Instant::now() + OPEN_TIMEOUT;
         let mut failed_ids: HashSet<String> = HashSet::new();
-        for (base_id, name, family, vid, pid, serial, rx) in pending {
+        for (base_id, topology_key, name, family, vid, pid, serial, rx) in pending {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 warn!("Skipped {name} ({vid:04x}:{pid:04x}) — global open deadline exceeded");
@@ -318,6 +337,7 @@ impl ServiceManager {
                     }
                     self.register_opened_device(
                         base_id,
+                        topology_key,
                         name,
                         family,
                         vid,
@@ -372,6 +392,7 @@ impl ServiceManager {
     fn register_opened_device(
         &mut self,
         base_id: String,
+        topology_key: String,
         name: &str,
         family: DeviceFamily,
         vid: u16,
@@ -444,6 +465,7 @@ impl ServiceManager {
                     supports_c_command: false,
                     port_index: None,
                     wireless_group_mac: None,
+                    topology_key: Some(topology_key.clone()),
                 });
             }
             fan_devices.insert(base_id.clone(), fan_ctrl);

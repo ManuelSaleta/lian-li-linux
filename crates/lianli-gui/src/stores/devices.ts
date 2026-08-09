@@ -71,12 +71,13 @@ export const useDevicesStore = defineStore("devices", () => {
     const real = visible.value.filter((d) => {
       const fam = d.family;
       return (
-        fam === "Galahad2Trinity" ||
-        fam === "HydroShiftLcd" ||
-        fam === "Galahad2Lcd" ||
-        fam === "HydroShift2Lcd" ||
-        fam === "HydroShift2OledCurveLed" ||
-        fam === "WirelessAio"
+        (fam === "Galahad2Trinity" ||
+          fam === "HydroShiftLcd" ||
+          fam === "Galahad2Lcd" ||
+          fam === "HydroShift2Lcd" ||
+          fam === "HydroShift2OledCurveLed" ||
+          fam === "WirelessAio") &&
+        (d.has_fan || d.has_pump)
       );
     });
     // DEV ONLY: inject a mock AIO device so the AIO page can be exercised

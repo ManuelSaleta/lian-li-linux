@@ -175,6 +175,7 @@ impl ServiceManager {
                 supports_c_command,
                 port_index,
                 wireless_group_mac,
+                topology_key: Some(det.topology_key()),
             });
         }
 
@@ -273,6 +274,7 @@ impl ServiceManager {
                 supports_c_command: false,
                 port_index: None,
                 wireless_group_mac: None,
+                topology_key: None,
             });
 
             // Update RPM telemetry keyed by device_id
@@ -342,11 +344,36 @@ impl ServiceManager {
                 supports_c_command: false,
                 port_index: None,
                 wireless_group_mac: None,
+                topology_key: None,
             });
         }
 
-        // Add wired USB/HID fan devices (per-port entries from open_wired_fan_devices)
-        devices.extend(self.registry.fan_device_info.clone());
+        let aio_macs: HashSet<[u8; 6]> = self
+            .wireless
+            .devices()
+            .iter()
+            .filter(|d| d.is_aio())
+            .map(|d| d.mac)
+            .collect();
+        let wireless_bound_base: HashSet<String> = self
+            .registry
+            .fan_devices
+            .iter()
+            .filter(|(_, d)| {
+                d.wireless_link_mac()
+                    .is_some_and(|m| aio_macs.contains(&m))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let visible_fan_info: Vec<DeviceInfo> = self
+            .registry
+            .fan_device_info
+            .iter()
+            .filter(|d| !wireless_bound_base.contains(base_of_port_suffix(&d.device_id)))
+            .cloned()
+            .collect();
+        devices.extend(visible_fan_info.clone());
 
         // Read wired fan RPMs and split per port.
         for (base_id, dev) in self.registry.fan_devices.iter() {
@@ -376,26 +403,35 @@ impl ServiceManager {
             }
         }
 
-        // Cache is refreshed every USB_ENUM_INTERVAL (30s) to avoid
+        // Cache is refreshed every USB_ENUM_INTERVAL (10s) to avoid
         // USB bus contention from opening every device for serial reads.
         // Drop entries already emitted from fan_device_info above so each
         // physical endpoint surfaces exactly once.
-        let opened_ids: std::collections::HashSet<&str> = self
-            .registry
-            .fan_device_info
+        let opened_topos: HashSet<&str> = visible_fan_info
             .iter()
-            .map(|d| d.device_id.as_str())
+            .filter_map(|d| d.topology_key.as_deref())
             .collect();
         devices.extend(
             self.registry
                 .cached_usb_devices
                 .iter()
-                .filter(|d| !opened_ids.contains(d.device_id.as_str()))
+                .filter(|d| {
+                    d.topology_key
+                        .as_deref()
+                        .is_none_or(|t| !opened_topos.contains(t))
+                })
                 .cloned(),
         );
 
         ipc_state.devices = devices;
     }
+}
+
+fn base_of_port_suffix(device_id: &str) -> &str {
+    device_id
+        .rsplit_once(":port")
+        .map(|(base, _)| base)
+        .unwrap_or(device_id)
 }
 
 /// Check if a wired device at `bus`:`ports` shares a USB parent hub with
