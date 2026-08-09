@@ -13,7 +13,7 @@ use lianli_shared::screen::ScreenInfo;
 use lianli_transport::HidTransport;
 use parking_lot::Mutex;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -134,26 +134,12 @@ fn background_reader(
             let mut dev = device.lock();
             if query_due {
                 let _ = write_a_command_raw(&mut *dev, CMD_HANDSHAKE, &[]);
-                let deadline = Instant::now() + Duration::from_millis(500);
-                while Instant::now() < deadline {
-                    let n = dev.read_timeout(&mut buf, 100).unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    if buf[1] == CMD_HANDSHAKE {
-                        if let Some(hs) = try_parse_handshake(&buf[..n]) {
-                            *handshake.lock() = Some(hs);
-                        }
-                        break;
-                    }
-                }
                 last_query = now;
-            } else {
-                let n = dev.read_timeout(&mut buf, 20).unwrap_or(0);
-                if n > 0 && buf[1] == CMD_HANDSHAKE {
-                    if let Some(hs) = try_parse_handshake(&buf[..n]) {
-                        *handshake.lock() = Some(hs);
-                    }
+            }
+            let n = dev.read_timeout(&mut buf, 20).unwrap_or(0);
+            if n > 0 && buf[1] == CMD_HANDSHAKE {
+                if let Some(hs) = try_parse_handshake(&buf[..n]) {
+                    *handshake.lock() = Some(hs);
                 }
             }
         }
@@ -176,6 +162,7 @@ pub struct HydroShiftLcdController {
     firmware_version: OnceLock<(u32, u32)>,
     last_recovery_attempt: Mutex<Option<Instant>>,
     drain_stop: Arc<AtomicBool>,
+    lcd_unavailable_count: AtomicU32,
 }
 
 impl HydroShiftLcdController {
@@ -195,6 +182,7 @@ impl HydroShiftLcdController {
             firmware_version: OnceLock::new(),
             last_recovery_attempt: Mutex::new(None),
             drain_stop: Arc::new(AtomicBool::new(false)),
+            lcd_unavailable_count: AtomicU32::new(0),
         })
     }
 
@@ -456,6 +444,7 @@ impl HydroShiftLcdController {
     pub fn check_and_recover_lcd(&self) -> Result<crate::traits::RecoveryAction> {
         use crate::traits::RecoveryAction;
         const RECOVERY_COOLDOWN: Duration = Duration::from_secs(2);
+        const UNAVAILABLE_THRESHOLD: u32 = 3;
         if self
             .last_recovery_attempt
             .lock()
@@ -465,9 +454,20 @@ impl HydroShiftLcdController {
             return Ok(RecoveryAction::NoChange);
         }
         match self.is_lcd_available() {
-            Ok(true) => Ok(RecoveryAction::NoChange),
+            Ok(true) => {
+                self.lcd_unavailable_count.store(0, Ordering::Relaxed);
+                Ok(RecoveryAction::NoChange)
+            }
             Ok(false) => {
-                warn!("LCD not available, attempting reset");
+                let count = self.lcd_unavailable_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if count < UNAVAILABLE_THRESHOLD {
+                    debug!(
+                        "LCD not available ({count}/{UNAVAILABLE_THRESHOLD}) — waiting for confirmation"
+                    );
+                    return Ok(RecoveryAction::NoChange);
+                }
+                self.lcd_unavailable_count.store(0, Ordering::Relaxed);
+                warn!("LCD not available ({count}/{UNAVAILABLE_THRESHOLD}) — attempting reset");
                 *self.last_recovery_attempt.lock() = Some(Instant::now());
                 if self.reset_device() {
                     info!("Device reset successful, reinitializing LCD");
