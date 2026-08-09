@@ -137,6 +137,14 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
         lianli_shared::device_id::DeviceFamily::HydroShiftLcd
     }
 
+    fn handles(&self, family: lianli_shared::device_id::DeviceFamily) -> bool {
+        matches!(
+            family,
+            lianli_shared::device_id::DeviceFamily::HydroShiftLcd
+                | lianli_shared::device_id::DeviceFamily::Galahad2Lcd
+        )
+    }
+
     fn open(
         &self,
         ctx: &crate::registry::OpenContext,

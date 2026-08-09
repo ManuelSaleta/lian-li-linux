@@ -91,6 +91,11 @@ pub trait DeviceDriver: Send + Sync {
     /// The family this driver handles.
     fn family(&self) -> DeviceFamily;
 
+    /// Whether this driver should open a device of the given family.
+    fn handles(&self, family: DeviceFamily) -> bool {
+        family == self.family()
+    }
+
     /// Open the device, initialise it, and return the populated
     /// [`OpenedDevice`].
     fn open(&self, ctx: &OpenContext) -> Result<OpenedDevice>;
@@ -116,7 +121,7 @@ pub static REGISTRY: &[&dyn DeviceDriver] = &[
 
 /// Look up the driver for a given family.
 pub fn driver_for_family(family: DeviceFamily) -> Option<&'static dyn DeviceDriver> {
-    REGISTRY.iter().copied().find(|d| d.family() == family)
+    REGISTRY.iter().copied().find(|d| d.handles(family))
 }
 
 /// Convenience: open a detected device by delegating to its registered driver.
