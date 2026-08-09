@@ -359,10 +359,7 @@ impl ServiceManager {
             .registry
             .fan_devices
             .iter()
-            .filter(|(_, d)| {
-                d.wireless_link_mac()
-                    .is_some_and(|m| aio_macs.contains(&m))
-            })
+            .filter(|(_, d)| d.wireless_link_mac().is_some_and(|m| aio_macs.contains(&m)))
             .map(|(id, _)| id.clone())
             .collect();
 

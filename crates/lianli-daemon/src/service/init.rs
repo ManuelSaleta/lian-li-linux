@@ -238,10 +238,7 @@ impl ServiceManager {
             }
         };
 
-        let present_ids: HashSet<String> = usb_devs
-            .iter()
-            .map(Self::rusb_device_id)
-            .collect();
+        let present_ids: HashSet<String> = usb_devs.iter().map(Self::rusb_device_id).collect();
         let present_topos: HashSet<String> =
             usb_devs.iter().map(|det| det.topology_key()).collect();
         fan_devices.retain(|id, _| present_ids.contains(id));
