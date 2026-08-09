@@ -198,7 +198,7 @@ impl HydroShiftLcdController {
         })
     }
 
-    fn init(&self) -> Result<()> {
+    pub(crate) fn init(&self) -> Result<()> {
         if self.initialized.swap(true, Ordering::SeqCst) {
             return Ok(());
         }

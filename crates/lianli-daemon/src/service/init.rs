@@ -425,7 +425,7 @@ impl ServiceManager {
                     serial: serial.map(|s| s.to_string()),
                     vid,
                     pid,
-                    has_lcd: false,
+                    has_lcd: opened.lcd.is_some(),
                     has_fan: true,
                     has_pump: pump_control,
                     has_rgb: family.has_rgb(),

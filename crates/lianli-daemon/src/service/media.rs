@@ -320,24 +320,10 @@ impl ServiceManager {
                                 None => Err(anyhow::anyhow!("Not an LCD device")),
                             }
                         } else {
-                            let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                            let det = lianli_devices::detect::DetectedDevice {
-                                device,
-                                family: candidate.family,
-                                name: "HydroShift/Galahad LCD",
-                                vid: candidate.vid,
-                                pid: candidate.pid,
-                                bus: candidate.bus,
-                                address: candidate.address,
-                                serial: Some(candidate.device_id.clone()),
-                                hid_usage_page: None,
-                            };
-                            match open_hid_lcd_device(&det, self.hid_backend()) {
-                                Some(result) => result.map(|d| {
-                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
-                                }),
-                                None => Err(anyhow::anyhow!("Not an LCD device")),
-                            }
+                            Err(anyhow::anyhow!(
+                                "AIO LCD '{}' not opened yet; deferring attach",
+                                candidate.device_id
+                            ))
                         }
                     }
                     DeviceFamily::TlLcd => {

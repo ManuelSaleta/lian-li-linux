@@ -13,6 +13,7 @@
 //! Coolant temperature sensor available.
 
 use std::sync::Arc;
+use tracing::warn;
 mod controller;
 mod protocol;
 mod rgb;
@@ -160,8 +161,15 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
 
         let lcd_ctrl = HydroShiftLcdController::new(std::sync::Arc::clone(&backend), pid)?;
         let lcd_arc = std::sync::Arc::new(lcd_ctrl);
-        let mut init_arc = std::sync::Arc::clone(&lcd_arc);
-        crate::traits::LcdDevice::initialize(&mut init_arc)?;
+        let init_arc = std::sync::Arc::clone(&lcd_arc);
+        std::thread::Builder::new()
+            .name(format!("aio-lcd-init-{pid:04x}"))
+            .spawn(move || {
+                if let Err(e) = init_arc.init() {
+                    warn!("Deferred AIO LCD init failed: {e:#}");
+                }
+            })
+            .ok();
         let firmware = lcd_arc.firmware_version_str().map(|s| s.to_string());
         let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
 
