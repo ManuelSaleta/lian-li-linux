@@ -9,19 +9,51 @@ use lianli_shared::ipc::{IpcResponse, TelemetrySnapshot};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tracing::debug;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Resolved daemon socket path (`$XDG_RUNTIME_DIR/lianli-daemon.sock`).
-pub fn socket_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-        format!("{runtime_dir}/lianli-daemon.sock")
-    })
+const SYSTEM_SOCKET: &str = "/run/lianli/lianli-daemon.sock";
+
+/// Last socket that accepted a connection
+static ACTIVE_SOCKET: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+fn active_lock() -> &'static Mutex<Option<String>> {
+    ACTIVE_SOCKET.get_or_init(|| Mutex::new(None))
+}
+
+fn user_socket() -> String {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    format!("{runtime_dir}/lianli-daemon.sock")
+}
+
+/// Candidate daemon socket paths
+fn candidate_paths() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut v: Vec<String> = Vec::new();
+    for p in active_lock()
+        .lock()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .chain(std::iter::once(user_socket()))
+        .chain(std::iter::once(SYSTEM_SOCKET.to_string()))
+    {
+        if seen.insert(p.clone()) {
+            v.push(p);
+        }
+    }
+    v
+}
+
+/// Socket path to surface to the UI (the active one, else the per-user default).
+pub fn socket_path() -> String {
+    active_lock()
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(user_socket)
 }
 
 /// Combined result of a single poll cycle, returned to the frontend store.
@@ -35,14 +67,37 @@ pub struct PollResult {
 
 /// Send a raw JSON request object to the daemon and return the parsed response.
 fn send_raw(request: &serde_json::Value) -> Result<IpcResponse, String> {
-    let path = socket_path();
-    let stream = UnixStream::connect(path)
-        .map_err(|e| format!("cannot connect to daemon at {path}: {e}"))?;
+    let json = serde_json::to_string(request).map_err(|e| format!("serialize error: {e}"))?;
+    let mut last_err: Option<String> = None;
 
+    for path in candidate_paths() {
+        let stream = match UnixStream::connect(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = Some(format!("cannot connect to daemon at {path}: {e}"));
+                continue;
+            }
+        };
+        match ipc_round_trip(stream, &json) {
+            Ok(resp) => {
+                *active_lock().lock().unwrap() = Some(path);
+                return Ok(resp);
+            }
+            Err(e) => {
+                *active_lock().lock().unwrap() = None;
+                last_err = Some(e);
+            }
+        }
+    }
+
+    *active_lock().lock().unwrap() = None;
+    Err(last_err.unwrap_or_else(|| "no daemon socket candidates".to_string()))
+}
+
+/// Write one JSON request on a connected stream and read one JSON response.
+fn ipc_round_trip(stream: UnixStream, json: &str) -> Result<IpcResponse, String> {
     stream.set_read_timeout(Some(TIMEOUT)).ok();
     stream.set_write_timeout(Some(TIMEOUT)).ok();
-
-    let json = serde_json::to_string(request).map_err(|e| format!("serialize error: {e}"))?;
 
     {
         let mut writer = &stream;

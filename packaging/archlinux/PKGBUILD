@@ -46,8 +46,15 @@ package() {
   # udev rules
   install -Dm644 packaging/udev/99-lianli.rules "$pkgdir/usr/lib/udev/rules.d/99-lianli.rules"
 
-  # Systemd user service
+  # System user/group for the optional system service
+  install -Dm644 packaging/sysusers.d/lianli.conf "$pkgdir/usr/lib/sysusers.d/lianli.conf"
+
+  # Shared cross-mode lock file (prevents user + system daemons running at once)
+  install -Dm644 packaging/tmpfiles.d/lianli.conf "$pkgdir/usr/lib/tmpfiles.d/lianli.conf"
+
+  # Systemd services: per-user + system service, user enables either
   install -Dm644 packaging/systemd/lianli-daemon.service "$pkgdir/usr/lib/systemd/user/lianli-daemon.service"
+  install -Dm644 packaging/systemd/lianli-daemon-system.service "$pkgdir/usr/lib/systemd/system/lianli-daemon-system.service"
 
   # Auto-load the evdi kernel module at boot so udev can grant user access to it
   install -Dm644 packaging/modules-load.d/lianli-evdi.conf "$pkgdir/usr/lib/modules-load.d/lianli-evdi.conf"

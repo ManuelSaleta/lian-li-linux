@@ -17,14 +17,9 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::thread;
 use tracing::{debug, error, info, warn};
-
-pub static SOCKET_PATH: LazyLock<String> = LazyLock::new(|| {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    format!("{runtime_dir}/lianli-daemon.sock")
-});
 
 /// Shared state between the daemon main loop and the IPC server thread.
 pub struct DaemonState {
@@ -69,9 +64,10 @@ pub fn start_ipc_server(
     state: Arc<Mutex<DaemonState>>,
     stop_flag: Arc<AtomicBool>,
     tx: Sender<DaemonEvent>,
+    socket_path: PathBuf,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        if let Err(e) = run_server(state, stop_flag, tx) {
+        if let Err(e) = run_server(state, stop_flag, tx, socket_path) {
             error!("IPC server error: {e}");
         }
     })
@@ -81,8 +77,9 @@ fn run_server(
     state: Arc<Mutex<DaemonState>>,
     stop_flag: Arc<AtomicBool>,
     tx: Sender<DaemonEvent>,
+    socket_path: PathBuf,
 ) -> anyhow::Result<()> {
-    let socket_path = Path::new(SOCKET_PATH.as_str());
+    let socket_path = Path::new(&socket_path);
     if socket_path.exists() {
         fs::remove_file(socket_path)?;
     }
@@ -101,7 +98,7 @@ fn run_server(
 
     listener.set_nonblocking(true)?;
 
-    info!("IPC server listening on {}", *SOCKET_PATH);
+    info!("IPC server listening on {}", socket_path.display());
 
     while !stop_flag.load(Ordering::Relaxed) {
         match listener.accept() {

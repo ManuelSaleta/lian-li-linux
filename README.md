@@ -87,16 +87,14 @@ Requirements:
 The daemon will still start without the kernel module loaded, but desktop-mode devices (HydroShift II,
 Lancool 207, Universal Screen 8.8") won't get attached as virtual displays until the module is present.
 
-`/sys/devices/evdi/add` is root-only by default; the package ships a udev rule that grants the
-active user write access to it (and a `modules-load.d` drop-in that auto-loads the `evdi` module
-at boot), so the per-user daemon creates and opens its own evdi nodes with no root setup step.
+`/sys/devices/evdi/add` is root-only by default; the package ships a udev rule that grants write access to it (and a `modules-load.d` drop-in that auto-loads the `evdi` module at boot), so the daemon creates and opens its own evdi nodes with no root setup step.
 
 If you've tested a device that isn't marked as tested above, please [open an issue or PR](https://github.com/sgtaziz/lian-li-linux/issues) to update this table.
 
 ## Architecture
 
 ```
-lianli-daemon          User service - fan control loop + LCD streaming
+lianli-daemon          Daemon (user or system service) - fan control loop + LCD streaming
   lianli-devices       HID/USB device drivers
   lianli-transport     USB bulk transport (wireless protocol, display streaming)
   lianli-media         Image/video/GIF encoding, sensor gauge rendering
@@ -105,8 +103,7 @@ lianli-daemon          User service - fan control loop + LCD streaming
 lianli-gui             Tauri desktop app (Rust + Vue) - connects to daemon via Unix socket
 ```
 
-The daemon runs as a user systemd service. USB access is granted via udev rules (no root required).
-The GUI connects over `$XDG_RUNTIME_DIR/lianli-daemon.sock`.
+The daemon runs as either a per-user or system systemd service (see [Service modes](#service-modes)), neither is enabled automatically. USB access is granted via udev rules (no root required). The GUI connects over `$XDG_RUNTIME_DIR/lianli-daemon.sock` (per-user daemon) or `/run/lianli/lianli-daemon.sock` (system daemon) and auto-detects which.
 
 ## Installing
 
@@ -122,14 +119,12 @@ git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && c
 makepkg -si
 ```
 
-Apply the udev rules and enable the daemon:
+The package installs binaries, udev rules, both systemd units, and creates the `lianli` system user/group automatically. Reload udev, then pick a service mode:
 ```bash
 sudo udevadm control --reload-rules && sudo udevadm trigger
-systemctl --user daemon-reload
-systemctl --user enable --now lianli-daemon.service
 ```
 
-Config lives at `~/.config/lianli/config.json`. To keep it running without an active login: `sudo loginctl enable-linger $USER`.
+See [Service modes](#service-modes) for the per-user vs system choice and how to enable each.
 
 ### Fedora (COPR)
 
@@ -141,7 +136,7 @@ sudo dnf copr enable sgtaziz/lian-li-linux
 sudo dnf install lian-li-linux
 ```
 
-This installs binaries, udev rules, the systemd user service, desktop entry, and icons, and pulls in full `ffmpeg` (with libx264) from rpmfusion. The package also globally enables `lianli-daemon.service` and (re)starts it for any active session — no manual `systemctl` step required.
+This installs binaries, udev rules, both systemd units, the `lianli` system user/group, desktop entry, and icons, and pulls in full `ffmpeg` (with libx264) from rpmfusion. It does **not** auto-start the daemon. Pick a mode in [Service modes](#service-modes).
 
 Desktop-mode devices (HydroShift II, Lancool 207, Universal Screen 8.8") additionally need the `evdi` kernel module:
 ```bash
@@ -271,23 +266,27 @@ sudo udevadm trigger
 [ -e /sys/module/evdi ] && sudo udevadm trigger --action=add /sys/module/evdi
 ```
 
-5) Install and start the daemon:
+For headless operation, run the [system service](#service-modes). This allows control even when no users are logged in.
+
+5) Install binaries, service units, and the system user/group:
 ```bash
-# Copy binaries
 sudo install -Dm755 target/release/lianli-daemon /usr/bin/lianli-daemon
 sudo install -Dm755 target/release/lianli-gui /usr/bin/lianli-gui
 
-# Install user service
 sudo install -Dm644 packaging/systemd/lianli-daemon.service /usr/lib/systemd/user/lianli-daemon.service
+sudo install -Dm644 packaging/systemd/lianli-daemon-system.service /usr/lib/systemd/system/lianli-daemon-system.service
+sudo install -Dm644 packaging/sysusers.d/lianli.conf /usr/lib/sysusers.d/lianli.conf
+sudo install -Dm644 packaging/tmpfiles.d/lianli.conf /usr/lib/tmpfiles.d/lianli.conf
+sudo systemd-sysusers lianli.conf
+sudo systemd-tmpfiles --create lianli.conf
 
 # Auto-load evdi at boot (for desktop-mode LCD support)
 sudo install -Dm644 packaging/modules-load.d/lianli-evdi.conf /usr/lib/modules-load.d/lianli-evdi.conf
-
 systemctl --user daemon-reload
-systemctl --user enable --now lianli-daemon.service
+sudo systemctl daemon-reload
 ```
 
-A default config is created automatically at `~/.config/lianli/config.json` on first run.
+Now enable one service — see [Service modes](#service-modes). A default config is created on first run at `~/.config/lianli/config.json` (user service) or `/var/lib/lianli/config.json` (system service).
 
 6) Install desktop entry and icons:
 ```bash
@@ -303,9 +302,58 @@ cp packaging/desktop/com.sgtaziz.lianlilinux.desktop ~/.local/share/applications
 update-desktop-database ~/.local/share/applications/
 ```
 
+## Udev rules
+
+The default rules grant device access with **no manual setup**:
+- The active logged-in user gets read/write via `uaccess` — used by the per-user daemon.
+- The `lianli` system user (auto-created at install) gets read/write via the `lianli` group — used by the optional [system service](#service-modes) for headless control.
+
+## Service modes
+
+The daemon ships as two systemd units. **Neither is enabled automatically**. Pick one at install (not both, or they'll fight over the same USB devices). The GUI auto-detects whichever is running.
+
+> **Upgrading from an older package?** Previous versions force-enabled the user service in the **global** scope. That lingers across the upgrade, and `systemctl --user disable` alone won't undo it (you'll get a "still started automatically" warning). Clear it first, then pick a mode:
+> ```bash
+> sudo systemctl --global disable lianli-daemon.service
+> systemctl --user disable lianli-daemon.service
+> ```
+
+**Per-user.** Runs as your user, reads `~/.config/lianli/config.json`. Best for multi-user systems (each user has their own profile/LCDs).
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lianli-daemon.service
+```
+
+**System (headless / single-user).** Runs as the `lianli` system user at boot — no login required. Config lives at `/var/lib/lianli/config.json`.
+```bash
+sudo systemctl enable --now lianli-daemon-system.service
+```
+From-source installs must create the user first (packaged installs do it automatically via `sysusers.d`):
+```bash
+sudo groupadd -r lianli && sudo useradd -r -g lianli -d / -s /usr/sbin/nologin -c "Lian Li daemon" lianli
+```
+
+> **LCD media access:** the system daemon reads media files (videos/GIFs/PNGs referenced by your LCD config) directly as the `lianli` user. It can only open files `lianli` has filesystem permission to reach, so if your home dir is hardened to `0700` (`drwx------`), put your media somewhere `lianli` can read (e.g. `/var/lib/lianli/media/`, or any world-readable path). The per-user daemon has no such limit since it runs as you.
+
+### Migrating between modes
+
+Config is stored per mode (user: `~/.config/lianli/`, system: `/var/lib/lianli/`). To keep your settings — profiles, fan curves, RGB presets — when switching, copy the whole directory across and fix ownership:
+
+```bash
+# user to system
+sudo cp -a ~/.config/lianli/. /var/lib/lianli/
+sudo chown -R lianli:lianli /var/lib/lianli
+
+# system to user
+cp -a /var/lib/lianli/. ~/.config/lianli/
+sudo chown -R $USER:$USER ~/.config/lianli
+```
+
+Then enable the other unit and disable the current one (the shared lock refuses to let both run, so stop the old one first). If the old one was the user service and won't disable, see the upgrade note above.
+
 ## Configuration
 
-The daemon reads `~/.config/lianli/config.json`. The GUI edits this file via the daemon's IPC socket. LCD targets, fan curves, and speed modes are all configured through the GUI.
+The daemon reads its config from `~/.config/lianli/config.json` (per-user service) or `/var/lib/lianli/config.json` (system service) — see [Service modes](#service-modes). The GUI edits this file via the daemon's IPC socket. LCD targets, fan curves, and speed modes are all configured through the GUI.
 
 ## Troubleshooting
 
@@ -314,19 +362,21 @@ The daemon reads `~/.config/lianli/config.json`. The GUI edits this file via the
 # Check udev rules are loaded
 sudo udevadm test /sys/bus/usb/devices/<your-device>
 
-# Check daemon logs
-journalctl --user -u lianli-daemon -f
+# Check daemon logs (whichever mode you use)
+journalctl --user -u lianli-daemon -f          # per-user service
+sudo journalctl -u lianli-daemon-system -f     # system service
 ```
 
-The daemon talks to devices via libusb directly (not hidapi), so it needs `MODE="0666"` on the USB device node — confirm the udev rules from step 4 are installed and re-triggered.
+Device access uses `uaccess` (per-user daemon) or the `lianli` group (system service). If you get permission errors or a device isn't detected, confirm the rules are installed and re-triggered. See [Udev rules](#udev-rules) and [Service modes](#service-modes).
 
 **GUI says "Daemon offline":**
 ```bash
-# Verify daemon is running
-systemctl --user status lianli-daemon
+# Verify the daemon is running (whichever mode you use)
+systemctl --user status lianli-daemon          # per-user
+sudo systemctl status lianli-daemon-system     # system
 
-# Check socket exists
-ls -la $XDG_RUNTIME_DIR/lianli-daemon.sock
+# Check the socket exists (GUI auto-detects either)
+ls -la "$XDG_RUNTIME_DIR/lianli-daemon.sock" /run/lianli/lianli-daemon.sock 2>/dev/null
 ```
 
 **GUI won't launch (blank window / webview errors):**

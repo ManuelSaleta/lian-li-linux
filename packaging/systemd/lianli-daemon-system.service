@@ -1,0 +1,16 @@
+[Unit]
+Description=Lian Li Device Daemon (system service)
+
+[Service]
+Type=simple
+User=lianli
+Group=lianli
+RuntimeDirectory=lianli
+StateDirectory=lianli
+ExecStart=/usr/bin/lianli-daemon --system
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

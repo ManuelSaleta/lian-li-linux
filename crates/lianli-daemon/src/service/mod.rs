@@ -75,6 +75,7 @@ pub enum DaemonEvent {
 
 pub struct ServiceManager {
     config_path: PathBuf,
+    socket_path: PathBuf,
     config: Option<AppConfig>,
     media_assets: HashMap<usize, Arc<lianli_media::MediaAsset>>,
     targets: Arc<Mutex<HashMap<usize, ActiveTarget>>>,
@@ -101,11 +102,12 @@ pub struct ServiceManager {
 }
 
 impl ServiceManager {
-    pub fn new(config_path: PathBuf) -> Result<Self> {
+    pub fn new(config_path: PathBuf, socket_path: PathBuf) -> Result<Self> {
         let ipc_state = Arc::new(Mutex::new(DaemonState::new(config_path.clone())));
 
         Ok(Self {
             config_path,
+            socket_path,
             config: None,
             media_assets: HashMap::new(),
             targets: Arc::new(Mutex::new(HashMap::new())),
@@ -263,6 +265,7 @@ impl ServiceManager {
             Arc::clone(&self.ipc.state),
             Arc::clone(&self.ipc.stop),
             tx_cloned,
+            self.socket_path.clone(),
         ));
         self.try_wireless();
         self.last_wireless_count = self.wireless.devices().len();

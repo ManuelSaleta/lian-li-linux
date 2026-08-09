@@ -5,142 +5,111 @@
 # --- USB device node permissions (for LibUSB backend + WinUSB bulk devices) ---
 
 # Wireless TX dongle
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8040", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8040", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Wireless RX dongle
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8041", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8041", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Wireless TX dongle V2 (CH340)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="e304", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="e304", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Wireless RX dongle V2 (CH340)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="e305", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="e305", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Wireless V2 dongle HID interface (wired-LCD MAC pairing)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="2107", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="2107", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Strimer Plus LED strip
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a200", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a200", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # ENE 6K77 SL/AL fan controllers
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a100", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a101", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a102", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a103", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a104", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a105", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a106", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a100", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a101", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a102", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a103", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a104", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a105", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a106", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # TL Fan controller
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7372", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7372", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # TLLCD
-SUBSYSTEM=="usb", ATTR{idVendor}=="04fc", ATTR{idProduct}=="7393", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="04fc", ATTR{idProduct}=="7393", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Galahad II Trinity AIO
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7371", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7373", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7371", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7373", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # HydroShift LCD AIO
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7398", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7399", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="739a", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7398", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7399", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="739a", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Galahad II LCD / Vision AIO
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7391", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7395", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7391", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7395", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Universal Screen 8.8" LED Ring
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8050", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8050", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # SLV3 wireless LCD fan
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="0005", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="0005", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # TLV2 wireless LCD fan
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="0006", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="0006", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # HydroShift II LCD Circle
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a021", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a021", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # HydroShift II LCD Square (H2S)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a034", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a034", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Lancool 207 Digital
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a065", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a065", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Universal Screen 8.8"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a088", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a088", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Vision 9.2"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a092", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a092", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # TL Flex LCD
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a018", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a018", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # SL Infinity Flex LCD
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a019", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a019", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Wired receiver controllers (TL Flex, SL-INF Flex, P28 V2, SLV4, CLV2)
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0101", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0102", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0103", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0104", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0105", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0106", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0107", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0101", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0102", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0103", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0104", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0105", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0106", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="43a8", ATTR{idProduct}=="0107", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # HydroShift II OLED Curve (LCD MCU + LED MCU)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a068", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8051", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1cbe", ATTR{idProduct}=="a068", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8051", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Desktop-mode LCD devices (CH340, VID=0x1A86)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="acd1", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ace1", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad11", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad20", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad21", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad22", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad23", MODE="0666"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad26", MODE="0666"
-
-# --- Force usbhid to bind HID devices the kernel may not claim automatically ---
-# Some devices have HID interfaces that usbhid doesn't recognise, so no
-# /dev/hidraw node is created. Registering VID:PID via new_id fixes this.
-
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7372", RUN+="/bin/sh -c 'echo 0416 7372 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04fc", ATTR{idProduct}=="7393", RUN+="/bin/sh -c 'echo 04fc 7393 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7371", RUN+="/bin/sh -c 'echo 0416 7371 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7373", RUN+="/bin/sh -c 'echo 0416 7373 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7398", RUN+="/bin/sh -c 'echo 0416 7398 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7399", RUN+="/bin/sh -c 'echo 0416 7399 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="739a", RUN+="/bin/sh -c 'echo 0416 739a > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7391", RUN+="/bin/sh -c 'echo 0416 7391 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="7395", RUN+="/bin/sh -c 'echo 0416 7395 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a200", RUN+="/bin/sh -c 'echo 0cf2 a200 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a100", RUN+="/bin/sh -c 'echo 0cf2 a100 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a101", RUN+="/bin/sh -c 'echo 0cf2 a101 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a102", RUN+="/bin/sh -c 'echo 0cf2 a102 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a103", RUN+="/bin/sh -c 'echo 0cf2 a103 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a104", RUN+="/bin/sh -c 'echo 0cf2 a104 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a105", RUN+="/bin/sh -c 'echo 0cf2 a105 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0cf2", ATTR{idProduct}=="a106", RUN+="/bin/sh -c 'echo 0cf2 a106 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="2107", RUN+="/bin/sh -c 'echo 1a86 2107 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="acd1", RUN+="/bin/sh -c 'echo 1a86 acd1 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ace1", RUN+="/bin/sh -c 'echo 1a86 ace1 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad11", RUN+="/bin/sh -c 'echo 1a86 ad11 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad20", RUN+="/bin/sh -c 'echo 1a86 ad20 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad21", RUN+="/bin/sh -c 'echo 1a86 ad21 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad22", RUN+="/bin/sh -c 'echo 1a86 ad22 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad23", RUN+="/bin/sh -c 'echo 1a86 ad23 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad26", RUN+="/bin/sh -c 'echo 1a86 ad26 > /sys/bus/usb/drivers/usbhid/new_id 2>/dev/null || true'"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="acd1", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ace1", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad11", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad20", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad21", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad22", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad23", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="ad26", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # --- hidraw permissions (ATTRS walks up to parent USB device) ---
 
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0416", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0cf2", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04fc", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="2107", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0416", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0cf2", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04fc", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="2107", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # Desktop-mode LCD devices — for display mode switching via hidapi
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="acd1", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ace1", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad11", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad20", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad21", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad22", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad23", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad26", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="acd1", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ace1", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad11", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad20", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad21", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad22", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad23", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad26", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 
 # --- EVDI virtual display (for desktop-mode LCDs) ---
 ACTION=="add", SUBSYSTEM=="module", KERNEL=="evdi", \
   RUN+="/bin/chmod 0666 /sys/devices/evdi/add /sys/devices/evdi/remove_all"
 
 # evdi DRM cards accessible to users
-SUBSYSTEM=="drm", KERNEL=="card*", SUBSYSTEMS=="platform", DRIVERS=="evdi", MODE="0666"
+SUBSYSTEM=="drm", KERNEL=="card*", SUBSYSTEMS=="platform", DRIVERS=="evdi", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"

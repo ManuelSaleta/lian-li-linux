@@ -12,7 +12,10 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-fn default_config_path() -> PathBuf {
+fn default_config_path(system: bool) -> PathBuf {
+    if system {
+        return PathBuf::from("/var/lib/lianli/config.json");
+    }
     let config_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -20,6 +23,15 @@ fn default_config_path() -> PathBuf {
             PathBuf::from(home).join(".config")
         });
     config_dir.join("lianli").join("config.json")
+}
+
+fn default_socket_path(system: bool) -> PathBuf {
+    if system {
+        PathBuf::from("/run/lianli/lianli-daemon.sock")
+    } else {
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        PathBuf::from(runtime_dir).join("lianli-daemon.sock")
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -30,8 +42,16 @@ fn default_config_path() -> PathBuf {
 )]
 struct Cli {
     /// Path to the configuration file
-    #[arg(long, default_value_os_t = default_config_path())]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// IPC socket path
+    #[arg(long)]
+    socket: Option<PathBuf>,
+
+    /// Run as a system service
+    #[arg(long)]
+    system: bool,
 
     /// Logging verbosity (error, warn, info, debug, trace)
     #[arg(long, default_value = "info")]
@@ -40,6 +60,9 @@ struct Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let system = cli.system;
+    let config = cli.config.unwrap_or_else(|| default_config_path(system));
+    let socket = cli.socket.unwrap_or_else(|| default_socket_path(system));
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -48,9 +71,9 @@ fn main() -> anyhow::Result<()> {
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .init();
 
-    let _pidlock = pidlock::PidLock::acquire()?;
+    let _pidlock = pidlock::PidLock::acquire(system)?;
 
-    let mut manager = service::ServiceManager::new(cli.config)?;
+    let mut manager = service::ServiceManager::new(config, socket)?;
     let restart = manager.run()?;
 
     if restart {
