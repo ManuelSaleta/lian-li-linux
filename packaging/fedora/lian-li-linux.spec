@@ -13,7 +13,6 @@ Source1:        https://github.com/DisplayLink/evdi/archive/refs/tags/v%{evdi_ve
 %global debug_package %{nil}
 
 BuildRequires:  make gcc
-BuildRequires:  rust
 BuildRequires:  cargo
 BuildRequires:  pkg-config
 BuildRequires:  clang
@@ -22,31 +21,17 @@ BuildRequires:  nasm
 BuildRequires:  systemd-rpm-macros
 
 BuildRequires:  pkgconfig(libusb-1.0)
-BuildRequires:  pkgconfig(fontconfig)
-BuildRequires:  pkgconfig(xkbcommon)
-BuildRequires:  pkgconfig(wayland-client)
-BuildRequires:  pkgconfig(x11)
-BuildRequires:  pkgconfig(libinput)
+# libdrm is needed directly by the bundled libevdi build.
 BuildRequires:  pkgconfig(libdrm)
-BuildRequires:  pkgconfig(gbm)
-BuildRequires:  pkgconfig(egl)
-BuildRequires:  pkgconfig(gl)
 BuildRequires:  pkgconfig(webkit2gtk-4.1)
 BuildRequires:  pkgconfig(gtk+-3.0)
-BuildRequires:  pkgconfig(glib-2.0)
-BuildRequires:  pkgconfig(libsoup-3.0)
 BuildRequires:  pkgconfig(appindicator3-0.1)
-BuildRequires:  pkgconfig(librsvg-2.0)
-BuildRequires:  pkgconfig(libjpeg)
-BuildRequires:  pkgconfig(libpng)
 # Fedora ships ffmpeg-free; full ffmpeg from rpmfusion is needed for H.264 LCD.
 BuildRequires:  pkgconfig(libavcodec)
 BuildRequires:  pkgconfig(libavformat)
 BuildRequires:  pkgconfig(libswscale)
 BuildRequires:  pkgconfig(libavutil)
 
-Requires:       webkit2gtk4.1
-Requires:       gtk3
 Requires:       hicolor-icon-theme
 Requires:       ffmpeg
 # evdi kernel module for desktop-mode devices
@@ -66,7 +51,6 @@ effects, LCD streaming, and sensor gauges for Lian Li devices.
 %build
 %make_build -C evdi-%{evdi_version}/library
 export LIBRARY_PATH="$PWD/evdi-%{evdi_version}/library${LIBRARY_PATH:+:$LIBRARY_PATH}"
-export LIANLI_NO_FRONTEND=1
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 cargo build --release --frozen
 

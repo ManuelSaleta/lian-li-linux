@@ -43,10 +43,10 @@ directory = "vendor-crates"
 EOF
 
 echo ">> Building Vue frontend with npm into dist/"
-# Tauri's build.rs normally drives this with bun, which isn't in Fedora. We
-# pre-build dist/ here so the mock buildroot never needs npm/nodejs. The repo
-# ships only bun.lock (no package-lock.json), so use `npm install` (not `npm ci`)
-# to resolve a dependency tree from package.json.
+# Tauri's build.rs normally drives this with npm, which isn't in the Fedora mock
+# buildroot. We pre-build dist/ here so the mock build never needs npm/nodejs.
+# The repo ships no JS lockfile, so use `npm install` (not `npm ci`) to resolve
+# a dependency tree from package.json.
 ( cd "$STAGE/crates/lianli-gui" && npm install --no-audit --no-fund && npm run build )
 rm -rf "$STAGE/crates/lianli-gui/node_modules"
 

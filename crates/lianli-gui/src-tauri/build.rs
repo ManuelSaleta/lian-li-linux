@@ -1,13 +1,11 @@
-//! Build script: runs Tauri's codegen, then builds the Vue frontend with bun
+//! Build script: runs Tauri's codegen, then builds the Vue frontend with npm
 //! so a plain `cargo build` (or `cargo build -p lianli-gui-vue`) produces a
 //! runnable GUI without a separate frontend step.
 //!
 //! Behaviour:
-//! - Skips the frontend build when `LIANLI_NO_FRONTEND` is set (useful when the
-//!   `dist/` was produced out-of-band, e.g. by `tauri dev`).
-//! - Falls back gracefully if `bun` is not on PATH: prints a `cargo:warning`
+//! - Falls back gracefully if `npm` is not on PATH: prints a `cargo:warning`
 //!   and leaves the existing `dist/` (or the checked-in placeholder) in place.
-//! - Only re-runs `bun install` / `bun run build` when the frontend sources are
+//! - Only re-runs `npm install` / `npm run build` when the frontend sources are
 //!   newer than the built `dist/`, so Rust-only edits don't pay the vite cost.
 
 use std::path::{Path, PathBuf};
@@ -18,35 +16,31 @@ fn main() {
     // Tauri config validation + codegen (emits its own rerun-if-changed).
     tauri_build::build();
 
-    if std::env::var("LIANLI_NO_FRONTEND").is_ok() {
-        return;
-    }
-
     let frontend = frontend_dir();
     declare_inputs(&frontend);
 
-    let bun = find_bun();
-    if bun.is_none() {
+    let npm = find_npm();
+    if npm.is_none() {
         if !frontend.join("dist/index.html").exists() {
             println!(
-                "cargo:warning=bun not found on PATH and dist/ is missing; \
-                 install bun (https://bun.sh) or run the frontend build manually"
+                "cargo:warning=npm not found on PATH and dist/ is missing; \
+                 install node/npm or run the frontend build manually"
             );
         } else {
-            println!("cargo:warning=bun not found on PATH; using existing dist/ as-is");
+            println!("cargo:warning=npm not found on PATH; using existing dist/ as-is");
         }
         return;
     }
 
     if needs_build(&frontend) {
-        let bun_str = bun
+        let npm_str = npm
             .as_deref()
             .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "bun".to_string());
+            .unwrap_or_else(|| "npm".to_string());
         if !frontend.join("node_modules").exists() {
-            run(&bun_str, &["install", "--frozen-lockfile"], &frontend);
+            run(&npm_str, &["install", "--no-audit", "--no-fund"], &frontend);
         }
-        run(&bun_str, &["run", "build"], &frontend);
+        run(&npm_str, &["run", "build"], &frontend);
     }
 }
 
@@ -60,7 +54,7 @@ fn frontend_dir() -> PathBuf {
 fn declare_inputs(frontend: &Path) {
     for f in [
         "package.json",
-        "bun.lock",
+        "package-lock.json",
         "vite.config.ts",
         "tsconfig.json",
         "index.html",
@@ -70,35 +64,26 @@ fn declare_inputs(frontend: &Path) {
     println!("cargo:rerun-if-changed={}/src", frontend.display());
 }
 
-/// Locate the `bun` executable. Checks PATH directly, then `~/.bun/bin/bun`
-/// (the default install location for `curl ... | bash`), then falls back to
-/// the login shell's resolved PATH (which sources `.bashrc`/`.zshrc`).
-fn find_bun() -> Option<PathBuf> {
+/// Locate the `npm` executable. Checks PATH directly, then falls back to the
+/// login shell's resolved PATH (which sources `.bashrc`/`.zshrc`).
+fn find_npm() -> Option<PathBuf> {
     use std::path::Path;
 
     // 1. Direct PATH check — works when cargo inherits the right env.
-    if Command::new("bun")
+    if Command::new("npm")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
     {
-        return Some(PathBuf::from("bun"));
+        return Some(PathBuf::from("npm"));
     }
 
-    // 2. Default bun install location.
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = Path::new(&home).join(".bun/bin/bun");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    // 3. Login-shell PATH (sources .bashrc / .zshrc / .profile).
+    // 2. Login-shell PATH (sources .bashrc / .zshrc / .profile).
     let out = Command::new("sh")
         .arg("-lc")
-        .arg("command -v bun")
+        .arg("command -v npm")
         .output()
         .ok()?;
     if out.status.success() {
@@ -125,7 +110,7 @@ fn needs_build(frontend: &Path) -> bool {
     let mut newest_src = SystemTime::UNIX_EPOCH;
     for f in [
         "package.json",
-        "bun.lock",
+        "package-lock.json",
         "vite.config.ts",
         "tsconfig.json",
         "index.html",

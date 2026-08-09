@@ -122,9 +122,14 @@ git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && c
 makepkg -si
 ```
 
-This installs binaries, udev rules, the systemd user service, desktop entry, and icons. The package also globally enables `lianli-daemon.service` and attempts to start it in the current session — no manual `systemctl` step is required.
+Apply the udev rules and enable the daemon:
+```bash
+sudo udevadm control --reload-rules && sudo udevadm trigger
+systemctl --user daemon-reload
+systemctl --user enable --now lianli-daemon.service
+```
 
-The daemon runs as a systemd user service and reads `~/.config/lianli/config.json`. If you want it to stay active when no desktop session is logged in, enable linger: `sudo loginctl enable-linger $USER`.
+Config lives at `~/.config/lianli/config.json`. To keep it running without an active login: `sudo loginctl enable-linger $USER`.
 
 ### Fedora (COPR)
 
@@ -213,40 +218,38 @@ git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && c
 
 2) Install dependencies:
 - **Rust** (stable)
-- **bun** (for the Vue frontend — the Tauri build script invokes it automatically)
+- **npm**
 - **ffmpeg** and **ffprobe** in `PATH` (for video/GIF decoding)
 - **System libraries:**
 
 ```bash
 # Arch
 sudo pacman -S libusb ffmpeg fontconfig mesa libxkbcommon wayland libx11 libinput libdrm \
-  libjpeg-turbo clang cmake pkg-config nasm \
+  libjpeg-turbo clang cmake pkg-config nasm npm \
   webkit2gtk-4.1 gtk3 glib2 libsoup3 libayatana-appindicator librsvg
-yay -S evdi-dkms bun         # AUR — evdi-dkms bundles libevdi + DKMS module
+yay -S evdi-dkms             # AUR — evdi-dkms bundles libevdi + DKMS module
 
 # Ubuntu / Debian
 sudo apt install libusb-1.0-0-dev libudev-dev libfontconfig-dev \
   libxkbcommon-dev libwayland-dev libx11-dev libinput-dev libdrm-dev \
-  libgl-dev libegl-dev clang cmake pkg-config ffmpeg nasm \
+  libgl-dev libegl-dev clang cmake pkg-config ffmpeg nasm npm \
   libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
   libevdi0-dev \
   libwebkit2gtk-4.1-dev libglib2.0-dev libgtk-3-dev libsoup-3.0-dev \
   libayatana-appindicator3-dev librsvg2-dev
 sudo apt install evdi-dkms  # optional, only needed at runtime for desktop-mode devices
-# bun: install from https://bun.sh (not in apt)
 
 # Fedora
 sudo dnf install libusb1-devel fontconfig-devel \
   libxkbcommon-devel wayland-devel libX11-devel libinput-devel libdrm-devel \
   mesa-libGL-devel mesa-libEGL-devel clang cmake pkg-config ffmpeg \
-  ffmpeg-devel nasm \
+  ffmpeg-devel nasm npm \
   webkit2gtk4.1-devel gtk3-devel glib2-devel libsoup3-devel \
   libappindicator-gtk3-devel librsvg2-devel
 # evdi is not packaged in Fedora repos — build libevdi from source to link the daemon:
 #   https://github.com/DisplayLink/evdi  (evdi-dkms is only needed at runtime)
-# You can also download https://github.com/displaylink-rpm/displaylink-rpm
-# Make sure to install replace ffmpeg-free with ffmpeg if ffmpeg-free is installed
-# bun: install from https://bun.sh (not in dnf)
+# You can also download https://github.com/displaylink-rpm/displaylink-rpm instead
+# Make sure to replace ffmpeg-free with ffmpeg if ffmpeg-free is installed
 ```
 
 3) Build:
@@ -254,9 +257,8 @@ sudo dnf install libusb1-devel fontconfig-devel \
 cargo build --release
 ```
 
-The GUI crate's build script runs `bun install` + `bun run build` automatically when the frontend
-sources are newer than the built `dist/`. Set `LIANLI_NO_FRONTEND=1` to skip it if you built the
-frontend out-of-band.
+The GUI crate's build script runs `npm install` + `npm run build` automatically when the frontend
+sources are newer than the built `dist/`.
 
 Binaries: `target/release/lianli-daemon` and `target/release/lianli-gui`
 

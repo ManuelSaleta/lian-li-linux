@@ -1,36 +1,39 @@
 # Maintainer: sgtaziz <sgtaziz013 at google dot com>
 pkgname=lianli-linux-git
-pkgver=0.8.3
+pkgver=0.8.3.r0.g2727349
 pkgrel=1
-pkgdesc="Open-source Linux replacement for L-Connect 3 - fan control, RGB, LCD streaming for Lian Li devices"
+pkgdesc="Open-source Linux replacement for L-Connect 3 for Lian Li devices"
 arch=('x86_64')
 url="https://github.com/sgtaziz/lian-li-linux"
 license=('MIT')
-depends=('libusb' 'ffmpeg' 'fontconfig' 'mesa' 'libxkbcommon' 'wayland' 'libx11' 'libinput' 'libdrm' 'libjpeg-turbo' 'evdi-dkms' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3' 'libayatana-appindicator' 'librsvg')
-makedepends=('git' 'rust' 'cargo' 'clang' 'cmake' 'pkg-config' 'nasm' 'bun')
+depends=('libusb' 'ffmpeg' 'evdi-dkms' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
+makedepends=('git' 'cargo' 'clang' 'cmake' 'nasm' 'npm')
 provides=('lianli-linux')
 conflicts=('lianli-linux')
 source=("git+${url}.git")
 sha256sums=('SKIP')
-install=lianli-linux.install
-options=('!debug' '!lto' 'strip')
+options=('!lto')
 
 pkgver() {
   cd lian-li-linux
-  (git describe --tags --abbrev=0 2>/dev/null || git rev-parse --short HEAD) | sed 's/^v//'
+  git describe --long --tags --abbrev=7 --exclude='*[a-zA-Z][a-zA-Z]*' \
+    | sed -E 's/^[^0-9]*//;s/([^-]*-g)/r\1/;s/-/./g'
 }
 
 prepare() {
   cd lian-li-linux
-  git submodule update --init --recursive
-  /usr/bin/cargo fetch --locked --target "$(/usr/bin/rustc -vV | sed -n 's/host: //p')"
+  git submodule update --init --recursive --depth=1
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target host-tuple
 }
 
 build() {
   cd lian-li-linux
-  export CARGO_PROFILE_RELEASE_STRIP=symbols
+
+  export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  RUSTC=/usr/bin/rustc /usr/bin/cargo build --frozen --release
+  export CARGO_PROFILE_RELEASE_STRIP=symbols
+  cargo build --frozen --release
 }
 
 package() {
@@ -43,7 +46,7 @@ package() {
   # udev rules
   install -Dm644 packaging/udev/99-lianli.rules "$pkgdir/usr/lib/udev/rules.d/99-lianli.rules"
 
-  # Systemd user service (enabled globally by the install hook)
+  # Systemd user service
   install -Dm644 packaging/systemd/lianli-daemon.service "$pkgdir/usr/lib/systemd/user/lianli-daemon.service"
 
   # Auto-load the evdi kernel module at boot so udev can grant user access to it
