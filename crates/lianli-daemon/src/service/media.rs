@@ -43,7 +43,7 @@ impl ServiceManager {
             .into_iter()
             .filter_map(|det| {
                 let screen = screen_info_for(det.family)?;
-                let id = det.device_id();
+                let id = hid_id_norm(&det.device_id()).to_string();
                 Some((id, screen))
             })
             .collect();
@@ -58,7 +58,7 @@ impl ServiceManager {
                 let screen = device
                     .serial
                     .as_ref()
-                    .and_then(|s| screen_map.get(s).copied())
+                    .and_then(|s| screen_map.get(hid_id_norm(s)).copied())
                     .unwrap_or(ScreenInfo::WIRELESS_LCD);
                 let cfg_key =
                     asset_cache_key(device, &user_templates, &all_sensors, cfg.default_fps);
@@ -188,7 +188,7 @@ impl ServiceManager {
                     let exact = candidates
                         .iter()
                         .enumerate()
-                        .find(|(idx, c)| !claimed.contains(idx) && &c.device_id == serial);
+                        .find(|(idx, c)| !claimed.contains(idx) && lcd_id_matches(serial, &c.device_id));
                     exact.or_else(|| {
                         // Alias fallback for cold-boot serial changes: only when
                         // exactly one LCD config and one LCD candidate exist.
@@ -485,6 +485,14 @@ mod tests {
             }
         }
     }
+}
+
+fn hid_id_norm(s: &str) -> &str {
+    s.strip_prefix("hid:").unwrap_or(s)
+}
+
+fn lcd_id_matches(serial: &str, device_id: &str) -> bool {
+    hid_id_norm(serial) == hid_id_norm(device_id)
 }
 
 /// Whether a device family is a wired AIO LCD that may benefit from alias matching.
