@@ -190,16 +190,8 @@ impl ServiceManager {
                         .enumerate()
                         .find(|(idx, c)| !claimed.contains(idx) && &c.device_id == serial);
                     exact.or_else(|| {
-                        // Alias fallback: wired AIO firmwares may alternate between
-                        // hardware serial and USB-topology ID across cold boot.
-                        //
-                        // This is a guess, so it is limited to the one case where
-                        // the answer is unambiguous: a single LCD config and a
-                        // single LCD attached to the machine. The candidate count
-                        // covers every streamable panel, not just wired AIOs — if
-                        // any other LCD is present it may well be the intended
-                        // target, and guessing would stream the template to the
-                        // wrong panel.
+                        // Alias fallback for cold-boot serial changes: only when
+                        // exactly one LCD config and one LCD candidate exist.
                         if cfg.lcds.len() == 1
                             && candidates.len() == 1
                             && serial.starts_with("hid:")
@@ -267,21 +259,31 @@ impl ServiceManager {
                     }
                 }
 
-                let backend_result: anyhow::Result<LcdBackend> = match candidate.family {
-                    DeviceFamily::Slv3Lcd | DeviceFamily::Tlv2Lcd => {
-                        let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                        Slv3LcdDevice::new(device).map(LcdBackend::Slv3)
-                    }
-                    DeviceFamily::HydroShift2Lcd => {
-                        if let Some(transport) =
-                            self.registry.usb_backends.get(&candidate.device_id)
-                        {
-                            lianli_devices::winusb::lcd::WinUsbLcdDevice::from_shared_transport(
-                                Arc::clone(transport),
-                                candidate.pid,
-                            )
-                            .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
-                        } else {
+                let backend_result: anyhow::Result<LcdBackend> =
+                    match lcd_backend_kind(candidate.family) {
+                        Some(LcdBackendKind::Slv3) => {
+                            let device = Device::clone(candidate.usb_device.as_ref().unwrap());
+                            Slv3LcdDevice::new(device).map(LcdBackend::Slv3)
+                        }
+                        Some(LcdBackendKind::WinUsbShared) => {
+                            if let Some(transport) =
+                                self.registry.usb_backends.get(&candidate.device_id)
+                            {
+                                lianli_devices::winusb::lcd::WinUsbLcdDevice::from_shared_transport(
+                                    Arc::clone(transport),
+                                    candidate.pid,
+                                )
+                                .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
+                            } else {
+                                let device = Device::clone(candidate.usb_device.as_ref().unwrap());
+                                lianli_devices::winusb::lcd::WinUsbLcdDevice::open(
+                                    device,
+                                    candidate.pid,
+                                )
+                                .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
+                            }
+                        }
+                        Some(LcdBackendKind::WinUsb) => {
                             let device = Device::clone(candidate.usb_device.as_ref().unwrap());
                             lianli_devices::winusb::lcd::WinUsbLcdDevice::open(
                                 device,
@@ -289,88 +291,71 @@ impl ServiceManager {
                             )
                             .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
                         }
-                    }
-                    // Plain WinUSB bulk panels: no shared control transport, so
-                    // the LCD is opened directly. `WinUsbLcdDevice::open`
-                    // dispatches to the right protocol variant by PID.
-                    DeviceFamily::HydroShift2OledCurveLcd
-                    | DeviceFamily::Lancool207
-                    | DeviceFamily::UniversalScreen
-                    | DeviceFamily::Vision9p2
-                    | DeviceFamily::TlFlexLcd
-                    | DeviceFamily::SlInfFlexLcd => {
-                        let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                        lianli_devices::winusb::lcd::WinUsbLcdDevice::open(device, candidate.pid)
-                            .map(|d| LcdBackend::WinUsb(ThreadedWinUsbSender::new(d, cfg_idx)))
-                    }
-                    DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => {
-                        if let Some(d) = self.registry.aio_lcd_devices.remove(&candidate.device_id)
-                        {
-                            Ok(LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d))))
-                        } else if let Some(backend) =
-                            self.registry.hid_backends.get(&candidate.device_id)
-                        {
-                            match create_hid_lcd_device(
-                                candidate.family,
-                                candidate.pid,
-                                Arc::clone(backend),
-                            ) {
-                                Some(result) => result.map(|d| {
-                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
-                                }),
-                                None => Err(anyhow::anyhow!("Not an LCD device")),
-                            }
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "AIO LCD '{}' not opened yet; deferring attach",
-                                candidate.device_id
-                            ))
-                        }
-                    }
-                    DeviceFamily::TlLcd => {
-                        if let Some(backend) = self.registry.hid_backends.get(&candidate.device_id)
-                        {
-                            match create_hid_lcd_device(
-                                candidate.family,
-                                candidate.pid,
-                                Arc::clone(backend),
-                            ) {
-                                Some(result) => result.map(|d| {
-                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
-                                }),
-                                None => Err(anyhow::anyhow!("Not an LCD device")),
-                            }
-                        } else {
-                            let device = Device::clone(candidate.usb_device.as_ref().unwrap());
-                            let det = lianli_devices::detect::DetectedDevice {
-                                device,
-                                family: candidate.family,
-                                name: "TL LCD",
-                                vid: candidate.vid,
-                                pid: candidate.pid,
-                                bus: candidate.bus,
-                                address: candidate.address,
-                                serial: Some(candidate.device_id.clone()),
-                                hid_usage_page: None,
-                            };
-                            match open_hid_lcd_device(&det, self.hid_backend()) {
-                                Some(result) => result.map(|d| {
-                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
-                                }),
-                                None => Err(anyhow::anyhow!("Not an LCD device")),
+                        Some(LcdBackendKind::HidAio) => {
+                            if let Some(d) =
+                                self.registry.aio_lcd_devices.remove(&candidate.device_id)
+                            {
+                                Ok(LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d))))
+                            } else if let Some(backend) =
+                                self.registry.hid_backends.get(&candidate.device_id)
+                            {
+                                match create_hid_lcd_device(
+                                    candidate.family,
+                                    candidate.pid,
+                                    Arc::clone(backend),
+                                ) {
+                                    Some(result) => result.map(|d| {
+                                        LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                    }),
+                                    None => Err(anyhow::anyhow!("Not an LCD device")),
+                                }
+                            } else {
+                                Err(anyhow::anyhow!(
+                                    "AIO LCD '{}' not opened yet; deferring attach",
+                                    candidate.device_id
+                                ))
                             }
                         }
-                    }
-                    // `is_streamable_lcd` admits any family carrying the LCD
-                    // capability, so a newly declared panel reaches this match
-                    // before it has a backend arm. Report it instead of
-                    // panicking: the rest of the daemon keeps running and the
-                    // log says exactly what is missing.
-                    other => Err(anyhow::anyhow!(
-                        "no LCD backend implemented for family {other:?}; \
-                         add an arm in refresh_targets"
-                    )),
-                };
+                        Some(LcdBackendKind::HidTl) => {
+                            if let Some(backend) =
+                                self.registry.hid_backends.get(&candidate.device_id)
+                            {
+                                match create_hid_lcd_device(
+                                    candidate.family,
+                                    candidate.pid,
+                                    Arc::clone(backend),
+                                ) {
+                                    Some(result) => result.map(|d| {
+                                        LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                    }),
+                                    None => Err(anyhow::anyhow!("Not an LCD device")),
+                                }
+                            } else {
+                                let device = Device::clone(candidate.usb_device.as_ref().unwrap());
+                                let det = lianli_devices::detect::DetectedDevice {
+                                    device,
+                                    family: candidate.family,
+                                    name: "TL LCD",
+                                    vid: candidate.vid,
+                                    pid: candidate.pid,
+                                    bus: candidate.bus,
+                                    address: candidate.address,
+                                    serial: Some(candidate.device_id.clone()),
+                                    hid_usage_page: None,
+                                };
+                                match open_hid_lcd_device(&det, self.hid_backend()) {
+                                    Some(result) => result.map(|d| {
+                                        LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                    }),
+                                    None => Err(anyhow::anyhow!("Not an LCD device")),
+                                }
+                            }
+                        }
+                        None => Err(anyhow::anyhow!(
+                            "no LCD backend for family {:?}",
+                            candidate.family
+                        )),
+                    };
 
                 match backend_result {
                     Ok(lcd) => {
@@ -448,22 +433,58 @@ impl ServiceManager {
     }
 }
 
-/// Whether the daemon can stream media to this family over a direct USB attachment.
-///
-/// Derived from the family's own capability flags instead of a hand-kept list,
-/// so a new panel only has to be declared once: add its `DeviceEntry` in
-/// `lianli-shared/src/device_id.rs` with `DeviceCapabilities::LCD` and it
-/// becomes a streaming target here automatically.
-///
-/// Desktop-mode companions are excluded — they present the panel as a virtual
-/// display through EVDI, so the compositor draws to them rather than this
-/// media pipeline.
-///
-/// Adding a family here is only half the job: it also needs a backend arm in
-/// the `match candidate.family` in `refresh_targets`. Without one it is
-/// reported as unsupported and skipped, never bound to a different panel.
+/// Whether the daemon can stream media to this family over USB.
 fn is_streamable_lcd(family: DeviceFamily) -> bool {
     family.has_lcd() && !family.is_desktop_mode()
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LcdBackendKind {
+    Slv3,
+    WinUsbShared,
+    WinUsb,
+    HidAio,
+    HidTl,
+}
+
+/// Single source of truth: maps an LCD family to its backend type.
+fn lcd_backend_kind(family: DeviceFamily) -> Option<LcdBackendKind> {
+    use DeviceFamily::*;
+    Some(match family {
+        Slv3Lcd | Tlv2Lcd => LcdBackendKind::Slv3,
+        HydroShift2Lcd => LcdBackendKind::WinUsbShared,
+        HydroShift2OledCurveLcd
+        | Lancool207
+        | UniversalScreen
+        | Vision9p2
+        | TlFlexLcd
+        | SlInfFlexLcd => LcdBackendKind::WinUsb,
+        HydroShiftLcd | Galahad2Lcd => LcdBackendKind::HidAio,
+        TlLcd => LcdBackendKind::HidTl,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use lianli_shared::device_id::KNOWN_DEVICES;
+
+    #[test]
+    fn all_streamable_lcds_have_backends() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in KNOWN_DEVICES {
+            if !seen.insert(entry.family) {
+                continue;
+            }
+            if super::is_streamable_lcd(entry.family) {
+                assert!(
+                    super::lcd_backend_kind(entry.family).is_some(),
+                    "{:?} is streamable but lcd_backend_kind returns None",
+                    entry.family
+                );
+            }
+        }
+    }
 }
 
 /// Whether a device family is a wired AIO LCD that may benefit from alias matching.
