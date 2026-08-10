@@ -259,12 +259,14 @@ Binaries: `target/release/lianli-daemon` and `target/release/lianli-gui`
 
 4) Install udev rules (required for USB access without root):
 ```bash
-sudo cp packaging/udev/99-lianli.rules /etc/udev/rules.d/
+sudo install -Dm644 packaging/udev/99-lianli.rules /usr/lib/udev/rules.d/99-lianli.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 # If evdi is already loaded, apply the new evdi chmod rule without a reboot:
 [ -e /sys/module/evdi ] && sudo udevadm trigger --action=add /sys/module/evdi
 ```
+
+> Install to `/usr/lib/udev/rules.d/` (the vendor location, same as the package) — **not** `/etc/udev/rules.d/`. A file in `/etc` with the same name would shadow the packaged one and silently override it.
 
 For headless operation, run the [system service](#service-modes). This allows control even when no users are logged in.
 
