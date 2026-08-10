@@ -26,6 +26,7 @@ rsync -a \
     --exclude='.cache' \
     --exclude='node_modules' \
     --exclude='dist' \
+    --exclude='package-lock.json' \
     --exclude='packaging/archlinux/pkg' \
     --exclude='packaging/archlinux/src' \
     --exclude='*.pkg.tar.zst' \
