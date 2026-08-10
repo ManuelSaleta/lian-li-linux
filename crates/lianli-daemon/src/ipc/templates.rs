@@ -27,8 +27,6 @@ pub fn set(
     match template_store::save_user_templates(&path, &templates) {
         Ok(()) => {
             state.user_templates = template_store::load_user_templates(&path);
-            let sensors = lianli_shared::sensors::enumerate_sensors();
-            template_store::regenerate_template_previews(&state.user_templates, &sensors);
             let _ = tx.send(DaemonEvent::IpcUpdate);
             info!("LCD templates updated via IPC");
             IpcResponse::ok(serde_json::json!(null))

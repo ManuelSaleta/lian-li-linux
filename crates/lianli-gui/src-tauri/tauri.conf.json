@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lian Li Linux",
-  "version": "0.6.1",
   "identifier": "com.sgtaziz.lianlilinux",
   "build": {
     "beforeDevCommand": "npm run dev",

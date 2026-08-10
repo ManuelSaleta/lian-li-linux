@@ -3,14 +3,14 @@
 //! The catalog lives at a hardcoded URL on `main`. Browsing is session-only
 //! — [`fetch_manifest`] does a single HTTP GET each time the UI opens the
 //! gallery, nothing is cached to disk. Only [`install_template`] writes to
-//! `~/.config/lianli/templates/<id>/`, after verifying every file's sha256.
+//! `<config_dir>/templates/<id>/`, after verifying every file's sha256.
 
 use crate::sensors::SensorInfo;
 use crate::template::{resolve_sensor_categories, LcdTemplate};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -112,13 +112,12 @@ pub fn is_supported(template: &CatalogTemplate, daemon_version: &str) -> bool {
     version_ge(daemon_version, &template.min_daemon_version)
 }
 
-/// Downloads a template + all referenced files into
-/// `~/.config/lianli/templates/<id>/`, verifies sha256 of every payload, then
-/// parses `template.json`, resolves `sensor_category` hints against the local
-/// machine's sensors, and returns the final in-memory [`LcdTemplate`] ready
-/// for the caller to insert into the user's template list.
-pub fn install_template(template: &CatalogTemplate, sensors: &[SensorInfo]) -> Result<LcdTemplate> {
-    let install_root = templates_install_dir()?;
+pub fn install_template(
+    template: &CatalogTemplate,
+    sensors: &[SensorInfo],
+    config_dir: &Path,
+) -> Result<LcdTemplate> {
+    let install_root = templates_install_dir(config_dir)?;
     let target_dir = install_root.join(&template.id);
     let staging_dir = install_root.join(format!(".{}.staging", template.id));
     if staging_dir.exists() {
@@ -218,29 +217,10 @@ fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
     Ok(())
 }
 
-fn templates_install_dir() -> Result<PathBuf> {
-    let base = config_base_dir()?;
-    let dir = base.join("lianli").join("templates");
+fn templates_install_dir(config_dir: &Path) -> Result<PathBuf> {
+    let dir = config_dir.join("templates");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
-}
-
-fn config_base_dir() -> Result<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .ok_or_else(|| anyhow!("neither $XDG_CONFIG_HOME nor $HOME is set"))
-}
-
-pub fn template_previews_dir() -> Option<PathBuf> {
-    let base = config_base_dir().ok()?;
-    let dir = base.join("lianli").join("template_previews");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
-}
-
-pub fn template_preview_path(template_id: &str) -> Option<PathBuf> {
-    template_previews_dir().map(|d| d.join(format!("{template_id}.png")))
 }
 
 fn version_ge(have: &str, need: &str) -> bool {

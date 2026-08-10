@@ -2,6 +2,7 @@ use crate::config::{AppConfig, LcdConfig};
 use crate::device_id::DeviceFamily;
 use crate::fan::FanConfig;
 use crate::rgb::{RgbAppConfig, RgbEffect};
+use crate::template::catalog::CatalogTemplate;
 use crate::template::LcdTemplate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -119,6 +120,9 @@ pub enum IpcRequest {
     GetLcdTemplates,
     SetLcdTemplates {
         templates: Vec<LcdTemplate>,
+    },
+    InstallTemplate {
+        template: CatalogTemplate,
     },
     /// Returns `{ "jpeg_base64": "..." }` for use in the editor preview.
     RenderTemplatePreview {

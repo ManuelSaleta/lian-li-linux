@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { RefreshCw, Download, CheckCircle, AlertCircle, Loader2, X, ExternalLink } from "lucide-vue-next";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { getVersion } from "@tauri-apps/api/app";
 import type { CatalogManifest, CatalogTemplate } from "@/types";
 import { useConfigStore } from "@/stores/config";
 import { useLcdStore } from "@/stores/lcd";
@@ -39,7 +40,10 @@ async function fetchCatalog() {
     if (manifest.schema_version !== 1) {
       throw new Error(`unsupported catalog schema version ${manifest.schema_version}`);
     }
-    templates.value = manifest.templates;
+    const ver = await getVersion().catch(() => null);
+    templates.value = ver
+      ? manifest.templates.filter((t) => versionGte(ver, t.min_daemon_version))
+      : manifest.templates;
     // Lazily load previews.
     for (const t of templates.value) {
       void loadPreview(t);
@@ -49,6 +53,17 @@ async function fetchCatalog() {
   } finally {
     loading.value = false;
   }
+}
+
+function versionGte(have: string, need: string): boolean {
+  const parse = (s: string) =>
+    s
+      .replace(/^v/, "")
+      .split(".")
+      .map((p) => parseInt(p.replace(/[^0-9].*/, ""), 10) || 0);
+  const [hh = 0, hm = 0, hp = 0] = parse(have);
+  const [nh = 0, nm = 0, np = 0] = parse(need);
+  return hh > nh || (hh === nh && (hm > nm || (hm === nm && hp >= np)));
 }
 
 async function loadPreview(t: CatalogTemplate) {
@@ -71,40 +86,14 @@ async function loadPreview(t: CatalogTemplate) {
 async function install(t: CatalogTemplate) {
   installState.value[t.id] = "installing";
   try {
-    // Fetch template.json + files, build a local LcdTemplate, and persist via
-    // SetLcdTemplates. Asset paths are rewritten to absolute install paths.
-    const tplJson = await (await fetch(`${ASSET_BASE}/${t.folder}/${t.template_file}`)).text();
-    const template = JSON.parse(tplJson);
-
-    // Resolve sensor_category hints against local sensors, if present.
-    for (const w of template.widgets ?? []) {
-      if (w.sensor_category) {
-        const cat = w.sensor_category;
-        const match = config.sensors.find((s) => sensorMatchesCategory(s, cat));
-        if (match && w.kind?.source !== undefined) {
-          w.kind.source = match.source;
-        }
-        delete w.sensor_category;
-      }
-    }
-
-    const idx = config.templates.findIndex((x) => x.id === template.id);
-    if (idx >= 0) config.templates[idx] = template;
-    else config.templates.push(template);
-    await lcd.setTemplates(config.templates);
-    installedIds.value.add(template.id);
+    await lcd.installTemplate(t);
+    installedIds.value.add(t.id);
     installState.value[t.id] = "installed";
     await config.load();
   } catch (e) {
     installState.value[t.id] = "error";
     error.value = `Install failed: ${e}`;
   }
-}
-
-function sensorMatchesCategory(_s: any, _cat: string): boolean {
-  // The daemon's picker does proper categorization; in the browser we accept
-  // any sensor for the requested category as a best-effort default.
-  return true;
 }
 
 function closeWindow() {

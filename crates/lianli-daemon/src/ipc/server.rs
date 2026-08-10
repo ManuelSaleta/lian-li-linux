@@ -279,6 +279,7 @@ fn handle_request(
 
         IpcRequest::GetLcdTemplates => super::templates::get(state),
         IpcRequest::SetLcdTemplates { templates } => super::templates::set(state, tx, templates),
+        IpcRequest::InstallTemplate { template } => super::catalog::install(state, tx, template),
         IpcRequest::RenderTemplatePreview {
             template,
             width,

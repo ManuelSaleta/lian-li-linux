@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { emit } from "@tauri-apps/api/event";
 import { useIpc } from "@/composables/useIpc";
 import { useDebounce } from "@/composables/useDebounce";
-import type { LcdConfig, LcdTemplate } from "@/types";
+import type { CatalogTemplate, LcdConfig, LcdTemplate } from "@/types";
 
 /** Broadcast when SetLcdTemplates changes the template list, so other open
  *  windows (each with their own config store instance) know to reload it. */
@@ -31,6 +31,11 @@ export const useLcdStore = defineStore("lcd", () => {
 
   async function setTemplates(templates: LcdTemplate[]) {
     await ipc.request("SetLcdTemplates", { templates });
+    await emit(LCD_TEMPLATES_CHANGED_EVENT);
+  }
+
+  async function installTemplate(template: CatalogTemplate) {
+    await ipc.request("InstallTemplate", { template });
     await emit(LCD_TEMPLATES_CHANGED_EVENT);
   }
 
@@ -66,6 +71,7 @@ export const useLcdStore = defineStore("lcd", () => {
     switchDisplayMode,
     setLcdMedia,
     setTemplates,
+    installTemplate,
     setBrightness,
     renderPreview,
   };

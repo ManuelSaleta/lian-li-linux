@@ -1,17 +1,11 @@
 //! Persistence for LCD templates.
 
 use anyhow::{Context, Result};
-use lianli_media::CustomAsset;
-use lianli_shared::screen::ScreenInfo;
 use lianli_shared::sensors::SensorInfo;
-use lianli_shared::template::catalog::template_preview_path;
 use lianli_shared::template::LcdTemplate;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
-
-const PREVIEW_WIDTH: u32 = 240;
-const PREVIEW_HEIGHT: u32 = 240;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct TemplateFile {
@@ -61,39 +55,4 @@ pub fn save_user_templates(path: &Path, templates: &[LcdTemplate]) -> Result<()>
 
 pub fn all_templates(user: &[LcdTemplate], _sensors: &[SensorInfo]) -> Vec<LcdTemplate> {
     user.to_vec()
-}
-
-pub fn regenerate_template_previews(templates: &[LcdTemplate], sensors: &[SensorInfo]) {
-    for template in templates {
-        if let Err(e) = render_template_preview(template, sensors) {
-            warn!("preview render failed for template '{}': {e}", template.id);
-        }
-    }
-}
-
-fn render_template_preview(template: &LcdTemplate, sensors: &[SensorInfo]) -> Result<()> {
-    let out_path = template_preview_path(&template.id)
-        .context("computing preview path (no XDG_CONFIG_HOME / HOME)")?;
-    let screen = ScreenInfo {
-        width: PREVIEW_WIDTH,
-        height: PREVIEW_HEIGHT,
-        max_fps: 30,
-        jpeg_quality: 85,
-        max_payload: 4 * 1024 * 1024,
-        h264: false,
-        needs_keepalive: false,
-        png: false,
-        play_count: 0,
-    };
-    let asset = CustomAsset::new(template, 0.0, &screen, sensors, false, 30.0)
-        .context("CustomAsset::new")?;
-    asset.seed_preview_history();
-    let frame = match asset.render_frame(true).context("render_frame")? {
-        Some(f) => f,
-        None => asset.blank_frame(),
-    };
-    let img = image::load_from_memory(&frame.data).context("decoding rendered JPEG")?;
-    img.save(&out_path)
-        .with_context(|| format!("writing {}", out_path.display()))?;
-    Ok(())
 }

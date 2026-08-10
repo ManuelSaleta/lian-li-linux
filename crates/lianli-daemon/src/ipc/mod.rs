@@ -14,6 +14,7 @@
 
 mod server;
 
+pub mod catalog;
 pub mod config;
 pub mod fan;
 pub mod lcd;
