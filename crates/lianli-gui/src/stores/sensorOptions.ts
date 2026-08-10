@@ -41,8 +41,16 @@ export function sourceConfigsAsOptions(
 }
 
 function formatSensorLabel(s: SensorInfo): string {
-  const name = s.display_name ?? s.sensor_name?.sensor_name ?? "sensor";
   const unit = UNIT_LABELS[s.unit];
+  if (s.display_name) {
+    return unit ? `${s.display_name} (${unit})` : s.display_name;
+  }
+  const sensor = s.sensor_name?.sensor_name ?? "sensor";
+  const device = s.sensor_name?.device_name;
+  let name = device && device !== sensor ? `${device}: ${sensor}` : sensor;
+  if (s.source?.type === "hwmon" && s.source.name && !name.includes(s.source.name)) {
+    name = `${name} [${s.source.name}]`;
+  }
   return unit ? `${name} (${unit})` : name;
 }
 
