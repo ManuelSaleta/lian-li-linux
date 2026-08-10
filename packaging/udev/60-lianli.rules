@@ -1,5 +1,5 @@
 # Lian Li USB device permissions
-# Install to: /etc/udev/rules.d/99-lianli.rules
+# Install to: /usr/lib/udev/rules.d/60-lianli.rules
 # Reload with: sudo udevadm control --reload-rules && sudo udevadm trigger
 
 # --- USB device node permissions (for LibUSB backend + WinUSB bulk devices) ---

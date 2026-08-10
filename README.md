@@ -260,7 +260,7 @@ Binaries: `target/release/lianli-daemon` and `target/release/lianli-gui`
 
 4) Install udev rules (required for USB access without root):
 ```bash
-sudo install -Dm644 packaging/udev/99-lianli.rules /usr/lib/udev/rules.d/99-lianli.rules
+sudo install -Dm644 packaging/udev/60-lianli.rules /usr/lib/udev/rules.d/60-lianli.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 # If evdi is already loaded, apply the new evdi chmod rule without a reboot:

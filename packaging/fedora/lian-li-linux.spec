@@ -61,7 +61,7 @@ ln -s libevdi.so.%{evdi_version} %{buildroot}%{_libdir}/libevdi.so.1
 
 install -Dpm755 target/release/lianli-daemon %{buildroot}%{_bindir}/lianli-daemon
 install -Dpm755 target/release/lianli-gui     %{buildroot}%{_bindir}/lianli-gui
-install -Dpm644 packaging/udev/99-lianli.rules %{buildroot}%{_udevrulesdir}/99-lianli.rules
+install -Dpm644 packaging/udev/60-lianli.rules %{buildroot}%{_udevrulesdir}/60-lianli.rules
 install -Dpm644 packaging/systemd/lianli-daemon.service %{buildroot}%{_userunitdir}/lianli-daemon.service
 install -Dpm644 packaging/systemd/lianli-daemon-system.service %{buildroot}%{_unitdir}/lianli-daemon-system.service
 install -Dpm644 packaging/tmpfiles.d/lianli.conf %{buildroot}%{_tmpfilesdir}/lianli.conf
@@ -114,7 +114,7 @@ fi
 %license LICENSE
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
-%{_udevrulesdir}/99-lianli.rules
+%{_udevrulesdir}/60-lianli.rules
 %{_userunitdir}/lianli-daemon.service
 %{_unitdir}/lianli-daemon-system.service
 %{_tmpfilesdir}/lianli.conf
