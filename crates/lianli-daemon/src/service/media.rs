@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+const SERIAL_REWRITE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn asset_cache_key(
     device: &LcdConfig,
     user_templates: &[LcdTemplate],
@@ -169,6 +171,7 @@ impl ServiceManager {
         }
 
         let mut new_targets = HashMap::new();
+        let mut canonicalize: Vec<(String, String)> = Vec::new();
 
         if let Some(cfg) = &self.config {
             let mut claimed: HashSet<usize> = HashSet::new();
@@ -185,10 +188,9 @@ impl ServiceManager {
 
                 let matched = if let Some(serial) = &device_cfg.serial {
                     // Exact match first
-                    let exact = candidates
-                        .iter()
-                        .enumerate()
-                        .find(|(idx, c)| !claimed.contains(idx) && lcd_id_matches(serial, &c.device_id));
+                    let exact = candidates.iter().enumerate().find(|(idx, c)| {
+                        !claimed.contains(idx) && lcd_id_matches(serial, &c.device_id)
+                    });
                     exact.or_else(|| {
                         // Alias fallback for cold-boot serial changes: only when
                         // exactly one LCD config and one LCD candidate exist.
@@ -229,6 +231,16 @@ impl ServiceManager {
                         continue;
                     }
                 };
+
+                // Form rewrites only: the alias fallback may have matched a
+                // different physical device, which must not be persisted.
+                if let Some(serial) = &device_cfg.serial {
+                    if serial != &candidate.device_id
+                        && hid_id_norm(serial) == hid_id_norm(&candidate.device_id)
+                    {
+                        canonicalize.push((serial.clone(), candidate.device_id.clone()));
+                    }
+                }
 
                 let cfg_key = asset.config_key.clone();
                 if let Some(mut existing) = self.targets.lock().remove(&cfg_idx) {
@@ -374,14 +386,16 @@ impl ServiceManager {
                                 );
                             }
                             if is_wired_aio_lcd(candidate.family) {
-                                guard.set_use_c_command(device_cfg.aio_512_frame());
+                                guard.set_use_c_command(
+                                    device_cfg.aio_512_frame_for(candidate.family),
+                                );
                                 self.aio_lcd_firmware
                                     .record(&candidate.device_id, None, false);
                                 if !self.aio_lcd_firmware.should_skip(&candidate.device_id) {
                                     self.aio_lcd_firmware.schedule(
                                         &candidate.device_id,
                                         std::time::Duration::from_secs(10),
-                                        device_cfg.aio_512_frame(),
+                                        device_cfg.aio_512_frame_for(candidate.family),
                                     );
                                 }
                             }
@@ -419,6 +433,36 @@ impl ServiceManager {
                             "[devices] LCD[{}] unavailable during attach: {err}",
                             device_cfg.device_id()
                         );
+                    }
+                }
+            }
+        }
+
+        // This runs every device poll. Without backoff a failing write would
+        // be retried at 1 Hz while holding the IPC state lock.
+        let backoff_expired = self
+            .serial_rewrite_backoff
+            .is_none_or(|t| t.elapsed() >= SERIAL_REWRITE_RETRY_INTERVAL);
+        if !canonicalize.is_empty() && backoff_expired {
+            let mut ipc_state = self.ipc.state.lock();
+            if let Some(mut cfg) = ipc_state.config.clone().or_else(|| self.config.clone()) {
+                let mut changed = false;
+                for (old, canonical) in &canonicalize {
+                    for lcd in &mut cfg.lcds {
+                        if lcd.serial.as_deref() == Some(old.as_str()) {
+                            lcd.serial = Some(canonical.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    if let Err(e) = crate::persistence::write_config(&self.config_path, &cfg) {
+                        self.serial_rewrite_backoff = Some(Instant::now());
+                        warn!("Failed to persist canonicalized LCD serials: {e}");
+                    } else {
+                        self.serial_rewrite_backoff = None;
+                        self.config = Some(cfg.clone());
+                        ipc_state.config = Some(cfg);
                     }
                 }
             }

@@ -99,6 +99,7 @@ pub struct ServiceManager {
     desktop_displays: crate::desktop_display::DesktopDisplayRegistry,
     tx: Option<Sender<DaemonEvent>>,
     mode_switch_suppression: HashMap<String, Instant>,
+    serial_rewrite_backoff: Option<Instant>,
 }
 
 impl ServiceManager {
@@ -125,6 +126,7 @@ impl ServiceManager {
             desktop_displays: crate::desktop_display::DesktopDisplayRegistry::new(),
             tx: None,
             mode_switch_suppression: HashMap::new(),
+            serial_rewrite_backoff: None,
         })
     }
 

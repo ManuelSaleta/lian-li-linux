@@ -31,3 +31,8 @@ export function screenSupportsH264(family: DeviceFamily): boolean {
   );
 }
 
+// Mirrors `LcdConfig::aio_512_frame_for(family)` in the daemon.
+export function aio512FrameDefault(family: DeviceFamily): boolean {
+  return family !== "HydroShiftLcd";
+}
+

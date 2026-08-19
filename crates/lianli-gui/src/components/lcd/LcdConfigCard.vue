@@ -14,7 +14,7 @@ import ColorPicker from "@/components/rgb/ColorPicker.vue";
 import OrientationPicker from "@/components/common/OrientationPicker.vue";
 import LabeledSlider from "@/components/common/LabeledSlider.vue";
 import { enumerateSensorsAsOptions, optionForConfig, decodeOption } from "@/stores/sensorOptions";
-import { screenSupportsH264 } from "@/constants/screen";
+import { screenSupportsH264, aio512FrameDefault } from "@/constants/screen";
 
 const props = defineProps<{
   entry: LcdConfig;
@@ -46,10 +46,15 @@ const deviceOptions = computed(() => {
   });
 });
 
+function hidIdNorm(s: string | null | undefined): string {
+  return s?.replace(/^hid:/, "") ?? "";
+}
+
 // Resolve the LCD entry to the concrete device it targets.
 function deviceForEntry(): DeviceInfo | undefined {
   if (props.entry.serial) {
-    return lcdDevices.value.find((d) => d.serial === props.entry.serial);
+    const wanted = hidIdNorm(props.entry.serial);
+    return lcdDevices.value.find((d) => hidIdNorm(d.serial) === wanted);
   }
   const idx = props.entry.index ?? 0;
   return lcdDevices.value[idx];
@@ -69,13 +74,19 @@ function onSelectDevice(id: string) {
 }
 
 // Ensure the entry targets a real device: prefer serial, fall back to first.
+// Also rewrite legacy serials that only match after normalization to the
+// device's canonical serial, so future saves use the canonical form.
 watch(
   () => lcdDevices.value,
   (devs) => {
     if (devs.length === 0) return;
-    if (!deviceForEntry()) {
+    const dev = deviceForEntry();
+    if (!dev) {
       props.entry.serial = devs[0].serial;
       props.entry.index = devs[0].serial ? undefined : 0;
+      config.markDirty();
+    } else if (props.entry.serial && dev.serial && props.entry.serial !== dev.serial) {
+      props.entry.serial = dev.serial;
       config.markDirty();
     }
   },
@@ -177,6 +188,9 @@ const deviceSupportsH264 = computed(() =>
   screenSupportsH264(selectedDevice.value?.family ?? ("Ene6k77" as any)),
 );
 const supportsCCommand = computed(() => selectedDevice.value?.supports_c_command ?? false);
+const aio512Default = computed(() =>
+  selectedDevice.value ? aio512FrameDefault(selectedDevice.value.family) : true,
+);
 
 function onTemplateId(v: string) {
   props.entry.template_id = v || null;
@@ -415,10 +429,13 @@ const brightness = computed({
         <div class="checkboxes">
           <n-checkbox :checked="entry.smooth_edges ?? false" @update:checked="(v) => { entry.smooth_edges = v; config.markDirty(); }">Smooth edges</n-checkbox>
           <n-checkbox v-if="deviceSupportsH264" :checked="entry.custom_h264 ?? true" @update:checked="(v) => { entry.custom_h264 = v; config.markDirty(); }">H264 streaming</n-checkbox>
-          <n-checkbox v-if="supportsCCommand" :checked="entry.aio_512_frame ?? true" @update:checked="(v) => { entry.aio_512_frame = v; config.markDirty(); }">512-byte HID frame</n-checkbox>
         </div>
       </div>
     </template>
+
+    <div v-if="supportsCCommand" class="checkboxes">
+      <n-checkbox :checked="entry.aio_512_frame ?? aio512Default" @update:checked="(v) => { entry.aio_512_frame = v; config.markDirty(); }">512-byte HID frame</n-checkbox>
+    </div>
 
     <!-- FPS (video/gif) / update interval (sensor) -->
     <div class="grid">

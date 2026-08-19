@@ -1,4 +1,5 @@
 use crate::aio::AioConfig;
+use crate::device_id::DeviceFamily;
 use crate::fan::{FanConfig, FanCurve};
 use crate::media::{DoublegaugeDescriptor, MediaType, SensorDescriptor, SensorSourceConfig};
 use crate::rgb::RgbAppConfig;
@@ -54,6 +55,12 @@ impl LcdConfig {
 
     pub fn aio_512_frame(&self) -> bool {
         self.aio_512_frame.unwrap_or(true)
+    }
+
+    /// HydroShift LCD firmware mishandles 512-byte HID frames (#137).
+    pub fn aio_512_frame_for(&self, family: DeviceFamily) -> bool {
+        self.aio_512_frame
+            .unwrap_or(!matches!(family, DeviceFamily::HydroShiftLcd))
     }
 
     pub fn custom_h264(&self) -> bool {
@@ -296,6 +303,44 @@ impl AppConfig {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let mut warnings = Vec::new();
+
+        // Collapse entries whose serials differ only by the "hid:" prefix,
+        // keeping the prefixed form when both exist. Canonicalizing bare
+        // serials happens in the daemon, where the device list is available.
+        let prefixed_keys: HashSet<String> = cfg
+            .lcds
+            .iter()
+            .filter_map(|d| d.serial.as_deref())
+            .filter_map(|s| s.strip_prefix("hid:"))
+            .map(str::to_string)
+            .collect();
+        let mut seen_serials: HashSet<String> = HashSet::new();
+        cfg.lcds.retain(|device| {
+            let Some(serial) = device.serial.clone() else {
+                return true;
+            };
+            let is_prefixed = serial.starts_with("hid:");
+            let bare = serial.strip_prefix("hid:").unwrap_or(&serial).to_string();
+            let duplicate = !seen_serials.insert(bare.clone());
+            let shadowed = !is_prefixed && prefixed_keys.contains(&bare);
+            if duplicate || shadowed {
+                let kept = if !is_prefixed && prefixed_keys.contains(&bare) {
+                    " (kept hid:-prefixed form)"
+                } else {
+                    ""
+                };
+                warnings.push(format!(
+                    "Removed duplicate LCD entry for serial '{bare}'{kept}"
+                ));
+                if shadowed {
+                    // Free the key so the prefixed entry can claim it.
+                    seen_serials.remove(&bare);
+                }
+                return false;
+            }
+            true
+        });
+
         let mut seen = HashSet::new();
         for device in &mut cfg.lcds {
             let identifier = if let Some(serial) = &device.serial {
@@ -398,4 +443,96 @@ pub type ConfigKey = String;
 
 pub fn config_identity(cfg: &LcdConfig) -> ConfigKey {
     to_string(cfg).unwrap_or_else(|_| cfg.device_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_from(json: &str) -> (AppConfig, Vec<String>) {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "lianli-shared-config-test-{}-{n}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, json).unwrap();
+        let result = AppConfig::load(&path);
+        let _ = std::fs::remove_file(&path);
+        result.unwrap()
+    }
+
+    fn lcd(serial: &str) -> String {
+        format!(r#"{{"serial": "{serial}", "type": "color", "rgb": [0, 0, 0]}}"#)
+    }
+
+    #[test]
+    fn bare_serial_left_untouched() {
+        let (cfg, _) = load_from(&format!(r#"{{"lcds": [{}]}}"#, lcd("00000055FA92")));
+        assert_eq!(cfg.lcds.len(), 1);
+        assert_eq!(cfg.lcds[0].serial.as_deref(), Some("00000055FA92"));
+    }
+
+    #[test]
+    fn hid_prefixed_duplicate_wins_over_bare() {
+        let (cfg, warnings) = load_from(&format!(
+            r#"{{"lcds": [{}, {}]}}"#,
+            lcd("00000055FA92"),
+            lcd("hid:00000055FA92")
+        ));
+        assert_eq!(cfg.lcds.len(), 1);
+        assert_eq!(cfg.lcds[0].serial.as_deref(), Some("hid:00000055FA92"));
+        assert!(warnings.iter().any(|w| w.contains("duplicate")));
+    }
+
+    #[test]
+    fn prefixed_first_keeps_bare_duplicate_dropped() {
+        let (cfg, _) = load_from(&format!(
+            r#"{{"lcds": [{}, {}]}}"#,
+            lcd("hid:00000055FA92"),
+            lcd("00000055FA92")
+        ));
+        assert_eq!(cfg.lcds.len(), 1);
+        assert_eq!(cfg.lcds[0].serial.as_deref(), Some("hid:00000055FA92"));
+    }
+
+    #[test]
+    fn prefixed_prefixed_duplicate_second_dropped() {
+        let (cfg, warnings) = load_from(&format!(
+            r#"{{"lcds": [{}, {}]}}"#,
+            lcd("hid:00000055FA92"),
+            lcd("hid:00000055FA92")
+        ));
+        assert_eq!(cfg.lcds.len(), 1);
+        assert_eq!(cfg.lcds[0].serial.as_deref(), Some("hid:00000055FA92"));
+        assert!(warnings.iter().any(|w| w.contains("duplicate")));
+    }
+
+    #[test]
+    fn distinct_bare_serials_both_kept() {
+        let (cfg, warnings) = load_from(&format!(
+            r#"{{"lcds": [{}, {}]}}"#,
+            lcd("00000055FA92"),
+            lcd("000000AA42BB")
+        ));
+        assert_eq!(cfg.lcds.len(), 2);
+        assert_eq!(cfg.lcds[0].serial.as_deref(), Some("00000055FA92"));
+        assert_eq!(cfg.lcds[1].serial.as_deref(), Some("000000AA42BB"));
+        assert!(!warnings.iter().any(|w| w.contains("duplicate")));
+    }
+
+    #[test]
+    fn wireless_and_path_serials_untouched() {
+        let (cfg, _) = load_from(&format!(
+            r#"{{"lcds": [{}, {}]}}"#,
+            lcd("wireless:AA:BB:CC:DD:EE:FF"),
+            lcd("3-8.2.1")
+        ));
+        assert_eq!(cfg.lcds.len(), 2);
+        assert_eq!(
+            cfg.lcds[0].serial.as_deref(),
+            Some("wireless:AA:BB:CC:DD:EE:FF")
+        );
+        assert_eq!(cfg.lcds[1].serial.as_deref(), Some("3-8.2.1"));
+    }
 }
