@@ -34,25 +34,24 @@ pub fn encode_h264(
     } else if (rot - 270.0).abs() < 1.0 {
         vf_parts.push("transpose=2".into());
     }
-    const FILE_OUTPUT_FPS: u32 = 30;
-    let sample_fps = (fps.round().max(1.0) as u32).min(FILE_OUTPUT_FPS);
-    vf_parts.push(format!("fps={sample_fps}"));
+    let out_fps = (fps.round().max(1.0) as u32).min(screen.max_fps.max(1));
+    vf_parts.push(format!("fps={out_fps}"));
     let vf = vf_parts.join(",");
 
     let (out_w, out_h) = target_dimensions(screen, orientation);
-    let bitrate = (out_w as u64 * out_h as u64 * FILE_OUTPUT_FPS as u64 / 4).max(1_000_000);
+    let bitrate = (out_w as u64 * out_h as u64 * out_fps as u64 / 4).max(1_000_000);
     let bitrate_str = format!("{bitrate}");
-    let fps_str = FILE_OUTPUT_FPS.to_string();
+    let fps_str = out_fps.to_string();
 
     let mut last_stderr: Option<String> = None;
     for kind in encoder_chain() {
         match run_encode(input, &vf, &fps_str, &bitrate_str, *kind, &output, is_image) {
             Ok(()) => {
                 info!(
-                    "LCD H.264 transcode: {out_w}x{out_h}@{FILE_OUTPUT_FPS}fps (sampled {sample_fps}) via {}",
+                    "LCD H.264 transcode: {out_w}x{out_h}@{out_fps}fps via {}",
                     kind.name()
                 );
-                return Ok((output, temp, FILE_OUTPUT_FPS as f32));
+                return Ok((output, temp, out_fps as f32));
             }
             Err(stderr) => {
                 debug!("LCD H.264 encoder {} unavailable: {stderr}", kind.name());

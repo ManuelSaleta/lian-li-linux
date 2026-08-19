@@ -77,6 +77,17 @@ pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
     None
 }
 
+fn pace_frame(next_deadline: &mut Instant, interval: Duration) {
+    let now = Instant::now();
+    if now < *next_deadline {
+        thread::sleep(*next_deadline - now);
+    }
+    *next_deadline += interval;
+    if *next_deadline < Instant::now() {
+        *next_deadline = Instant::now() + interval;
+    }
+}
+
 fn write_a_command_raw(dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
     let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
     if data.len() > max_payload {
@@ -156,6 +167,7 @@ pub struct HydroShiftLcdController {
     last_handshake: Arc<Mutex<Option<AioHandshake>>>,
     brightness: AtomicU8,
     rotation: AtomicU8,
+    video_fps: AtomicU8,
     initialized: AtomicBool,
     use_c_command: AtomicBool,
     firmware_string: OnceLock<String>,
@@ -176,6 +188,7 @@ impl HydroShiftLcdController {
             last_handshake: Arc::new(Mutex::new(None)),
             brightness: AtomicU8::new(50),
             rotation: AtomicU8::new(ScreenRotation::Rotate0 as u8),
+            video_fps: AtomicU8::new(ScreenInfo::AIO_LCD_480.max_fps as u8),
             initialized: AtomicBool::new(false),
             use_c_command: AtomicBool::new(false),
             firmware_string: OnceLock::new(),
@@ -321,7 +334,7 @@ impl HydroShiftLcdController {
         payload[0] = LcdControlMode::Application as u8;
         payload[1] = brightness;
         payload[2] = rotation;
-        payload[7] = 24;
+        payload[7] = self.video_fps.load(Ordering::Relaxed);
 
         self.send_b_command(CMD_LCD_CONTROL, &payload)?;
         debug!("LCD settings applied: brightness={brightness}, rotation={rotation}");
@@ -343,9 +356,14 @@ impl HydroShiftLcdController {
         stop: &AtomicBool,
         fps: f32,
     ) -> Result<()> {
-        let _ = fps;
+        let fps = fps
+            .round()
+            .clamp(1.0, ScreenInfo::AIO_LCD_480.max_fps as f32);
+        self.video_fps.store(fps as u8, Ordering::Relaxed);
+        let frame_interval = Duration::from_secs_f32(1.0 / fps);
         let mut read_buf = vec![0u8; 64 * 1024];
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
+        let mut next_deadline = Instant::now() + frame_interval;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -361,6 +379,7 @@ impl HydroShiftLcdController {
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if !au.is_empty() {
                     self.send_h264_frame(&au)?;
+                    pace_frame(&mut next_deadline, frame_interval);
                 }
             }
         }
@@ -824,7 +843,7 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
         payload[0] = LcdControlMode::LcdSetting as u8;
         payload[1] = b;
         payload[2] = self.rotation.load(Ordering::Relaxed);
-        payload[7] = 24;
+        payload[7] = self.video_fps.load(Ordering::Relaxed);
         self.send_b_command(CMD_LCD_CONTROL, &payload)
     }
 
@@ -835,7 +854,7 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
         payload[0] = LcdControlMode::LcdSetting as u8;
         payload[1] = self.brightness.load(Ordering::Relaxed);
         payload[2] = rotation as u8;
-        payload[7] = 24;
+        payload[7] = self.video_fps.load(Ordering::Relaxed);
         self.send_b_command(CMD_LCD_CONTROL, &payload)
     }
 
