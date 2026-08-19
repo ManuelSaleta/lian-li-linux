@@ -11,11 +11,13 @@ impl WirelessController {
     pub fn bind_device(&self, mac: &[u8; 6]) -> Result<()> {
         let master_mac = *self.master_mac.lock();
         let new_rx = self.get_rx_unused();
+        self.set_bind_intent(mac, true);
         self.converge_bind_state(mac, &master_mac, new_rx)?;
         self.save_rf_config()
     }
 
     pub fn unbind_device(&self, mac: &[u8; 6]) -> Result<()> {
+        self.set_bind_intent(mac, false);
         self.converge_bind_state(mac, &[0u8; 6], 0)?;
         self.save_rf_config()
     }
@@ -40,17 +42,17 @@ impl WirelessController {
             let _ = poll_and_discover(
                 rx,
                 &self.discovered_devices,
+                &self.device_health,
                 &self.mobo_pwm,
                 &self.fg_sync,
                 &self.master_mac,
             );
 
             let observed = self
-                .discovered_devices
+                .device_health
                 .lock()
-                .iter()
-                .find(|d| &d.mac == mac)
-                .map(|d| (d.master_mac, d.rx_type));
+                .get(mac)
+                .map(|h| (h.raw_master, h.raw_rx));
 
             let converged = match observed {
                 Some((m, r)) => &m == target_master_mac && r == target_rx,
@@ -79,11 +81,16 @@ impl WirelessController {
             .discovered_devices
             .lock()
             .iter()
-            .find(|d| &d.mac == mac)
+            .find(|d| d.mac == *mac)
             .cloned()
             .context("device not found in discovery")?;
 
         let master_ch = *self.master_channel.lock();
+        let slot = if target_rx == 0 {
+            0
+        } else {
+            self.next_slot_index(&device)
+        };
 
         let mut rf_data = vec![0u8; RF_DATA_SIZE];
         rf_data[0] = RF_SELECT;
@@ -92,7 +99,7 @@ impl WirelessController {
         rf_data[8..14].copy_from_slice(target_master_mac);
         rf_data[14] = target_rx;
         rf_data[15] = master_ch;
-        rf_data[16] = target_rx;
+        rf_data[16] = slot;
         rf_data[17..21].copy_from_slice(&device.current_pwm);
 
         self.tx_recover(|handle| {
@@ -105,24 +112,24 @@ impl WirelessController {
 
         let verb = if target_rx == 0 { "Unbind" } else { "Bind" };
         info!(
-            "{} sent to {} ({}) rx={} ch={}",
+            "{} sent to {} ({}) rx={} ch={} slot={}",
             verb,
             device.mac_str(),
             device.fan_type.display_name(),
             target_rx,
             master_ch,
+            slot,
         );
         Ok(())
     }
 
     /// Find an unused RX endpoint (1-14) for a new device binding.
     fn get_rx_unused(&self) -> u8 {
-        let devices = self.discovered_devices.lock();
-        let local_mac = *self.master_mac.lock();
+        let health = self.device_health.lock();
         for rx in 1..14u8 {
-            let in_use = devices
-                .iter()
-                .any(|d| d.master_mac == local_mac && d.rx_type == rx);
+            let in_use = health
+                .values()
+                .any(|h| h.bind_intent && !h.dead && h.raw_rx == rx);
             if !in_use {
                 return rx;
             }

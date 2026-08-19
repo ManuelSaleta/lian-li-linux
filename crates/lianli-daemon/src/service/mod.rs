@@ -7,6 +7,7 @@ use lianli_shared::systeminfo::SysSensor;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
@@ -86,7 +87,11 @@ pub struct ServiceManager {
     /// AIO LCD device IDs with pending deferred firmware reads, plus the
     /// devices whose reads previously failed and should be skipped.
     aio_lcd_firmware: AioLcdFirmwareTracker,
-    last_wireless_count: usize,
+    wireless_stable_count: usize,
+    wireless_pending_count: Option<usize>,
+    wireless_pending_streak: u32,
+    wireless_rebind_in_flight: Arc<AtomicBool>,
+    wireless_rebind_last: HashMap<[u8; 6], Instant>,
     last_poll_mono: Instant,
     last_poll_wall: std::time::SystemTime,
     restart_requested: bool,
@@ -116,7 +121,11 @@ impl ServiceManager {
             packet_builder: PacketBuilder::new(),
             registry: DeviceRegistry::new(),
             aio_lcd_firmware: AioLcdFirmwareTracker::new(),
-            last_wireless_count: 0,
+            wireless_stable_count: 0,
+            wireless_pending_count: None,
+            wireless_pending_streak: 0,
+            wireless_rebind_in_flight: Arc::new(AtomicBool::new(false)),
+            wireless_rebind_last: HashMap::new(),
             last_poll_mono: Instant::now(),
             last_poll_wall: std::time::SystemTime::now(),
             restart_requested: false,
@@ -187,22 +196,35 @@ impl ServiceManager {
         self.last_poll_mono = now_mono;
         self.last_poll_wall = now_wall;
 
-        // Check for late wireless device discovery
+        // Rebuild wireless-dependent controllers only after the bound-device
+        // count holds stable for 3 consecutive polls.
         let current_wireless = self.wireless.devices().len();
-        if current_wireless != self.last_wireless_count {
-            if current_wireless > self.last_wireless_count {
+        if current_wireless != self.wireless_stable_count {
+            match self.wireless_pending_count {
+                Some(c) if c == current_wireless => self.wireless_pending_streak += 1,
+                _ => {
+                    self.wireless_pending_count = Some(current_wireless);
+                    self.wireless_pending_streak = 1;
+                }
+            }
+            if self.wireless_pending_streak >= 3 {
                 info!(
                     "Wireless device count changed ({} -> {}), rebuilding RGB controller",
-                    self.last_wireless_count, current_wireless
+                    self.wireless_stable_count, current_wireless
                 );
-                std::thread::sleep(std::time::Duration::from_millis(500));
                 self.rebuild_rgb_controller();
                 self.ensure_aio_defaults();
-                self.restart_fan_control();
                 self.start_aio_control();
+                self.wireless_stable_count = current_wireless;
+                self.wireless_pending_count = None;
+                self.wireless_pending_streak = 0;
             }
-            self.last_wireless_count = current_wireless;
+        } else if self.wireless_pending_count.is_some() {
+            self.wireless_pending_count = None;
+            self.wireless_pending_streak = 0;
         }
+
+        self.run_wireless_rebind_supervisor();
 
         self.check_wired_hotplug();
         self.reconcile_wired_wireless_binding();
@@ -217,6 +239,40 @@ impl ServiceManager {
         if let Some(ref rgb) = self.controllers.rgb {
             rgb.lock().check_thermal_override();
         }
+    }
+
+    fn run_wireless_rebind_supervisor(&mut self) {
+        if self.wireless_rebind_in_flight.load(Ordering::Relaxed) {
+            return;
+        }
+        let configured = self.configured_wireless_device_ids();
+        let now = Instant::now();
+        let Some(mac) = self.wireless.rebind_candidates().into_iter().find(|m| {
+            let id = format!(
+                "wireless:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            );
+            configured.contains(&id)
+                && self
+                    .wireless_rebind_last
+                    .get(m)
+                    .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs(30))
+        }) else {
+            return;
+        };
+
+        info!("Auto-rebinding configured wireless device {:02x?}", mac);
+        self.wireless_rebind_last.insert(mac, now);
+        self.wireless_rebind_in_flight
+            .store(true, Ordering::Relaxed);
+        let wireless = self.wireless.clone();
+        let in_flight = Arc::clone(&self.wireless_rebind_in_flight);
+        thread::spawn(move || {
+            if let Err(e) = wireless.bind_device(&mac) {
+                warn!("Auto-rebind failed for {:02x?}: {e:#}", mac);
+            }
+            in_flight.store(false, Ordering::Relaxed);
+        });
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.
@@ -270,7 +326,7 @@ impl ServiceManager {
             self.socket_path.clone(),
         ));
         self.try_wireless();
-        self.last_wireless_count = self.wireless.devices().len();
+        self.wireless_stable_count = self.wireless.devices().len();
         if self.wireless.has_discovered_devices() {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }

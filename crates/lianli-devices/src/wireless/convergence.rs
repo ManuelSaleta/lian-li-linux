@@ -1,5 +1,5 @@
 use super::controller::WirelessController;
-use super::discovery::DiscoveredDevice;
+use super::discovery::{DeviceHealthMap, DiscoveredDevice, ACK_FRESHNESS};
 use super::{RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, USB_CMD_SEND_RF};
 use anyhow::{Context, Result};
 use lianli_transport::usb::{RusbBulk, USB_TIMEOUT};
@@ -124,7 +124,7 @@ impl WirelessController {
         tx: Arc<Mutex<RusbBulk>>,
         queue: PendingQueue,
         target_seqs: TargetSeqMap,
-        discovered: Arc<Mutex<Vec<DiscoveredDevice>>>,
+        health_map: DeviceHealthMap,
         stop: Arc<AtomicBool>,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
@@ -134,7 +134,7 @@ impl WirelessController {
                 while !stop.load(Ordering::SeqCst) {
                     let tick_start = Instant::now();
 
-                    drain_pending(&tx, &queue, &target_seqs, &discovered, &stop);
+                    drain_pending(&tx, &queue, &target_seqs, &health_map, &stop);
 
                     let elapsed = tick_start.elapsed();
                     if elapsed < TICK_INTERVAL {
@@ -151,7 +151,7 @@ fn drain_pending(
     tx: &Arc<Mutex<RusbBulk>>,
     queue: &PendingQueue,
     _target_seqs: &TargetSeqMap,
-    discovered: &Arc<Mutex<Vec<DiscoveredDevice>>>,
+    health_map: &DeviceHealthMap,
     _stop: &Arc<AtomicBool>,
 ) {
     let mut guard = queue.lock();
@@ -159,17 +159,17 @@ fn drain_pending(
         return;
     }
 
-    let devices = discovered.lock();
+    let health = health_map.lock();
     let now = Instant::now();
 
     let mut retain = VecDeque::with_capacity(guard.len());
     while let Some(mut cmd) = guard.pop_front() {
-        let acked = devices
-            .iter()
-            .find(|d| d.mac == cmd.mac)
-            .map(|d| match &cmd.ack {
-                AckSignal::Pwm(target) => pwm_acked(&d.current_pwm, target),
-                AckSignal::CmdSeq(target) => d.cmd_seq == *target,
+        let acked = health
+            .get(&cmd.mac)
+            .filter(|h| h.raw_seen.elapsed() <= ACK_FRESHNESS)
+            .map(|h| match &cmd.ack {
+                AckSignal::Pwm(target) => pwm_acked(&h.published.current_pwm, target),
+                AckSignal::CmdSeq(target) => h.published.cmd_seq == *target,
             })
             .unwrap_or(false);
 

@@ -684,28 +684,32 @@ impl ServiceManager {
         }
     }
 
-    fn auto_rebind_configured_wireless(&mut self) {
-        let Some(cfg) = self.config.as_ref() else {
-            return;
-        };
-
+    pub(super) fn configured_wireless_device_ids(&self) -> std::collections::HashSet<String> {
         let mut configured_ids = std::collections::HashSet::new();
 
-        if let Some(fans) = &cfg.fans {
-            for group in &fans.speeds {
-                if let Some(device_id) = &group.device_id {
-                    configured_ids.insert(device_id.clone());
+        if let Some(cfg) = self.config.as_ref() {
+            if let Some(fans) = &cfg.fans {
+                for group in &fans.speeds {
+                    if let Some(device_id) = &group.device_id {
+                        configured_ids.insert(device_id.clone());
+                    }
                 }
             }
-        }
 
-        if let Some(rgb) = &cfg.rgb {
-            for device in &rgb.devices {
-                configured_ids.insert(device.device_id.clone());
+            if let Some(rgb) = &cfg.rgb {
+                for device in &rgb.devices {
+                    configured_ids.insert(device.device_id.clone());
+                }
             }
+
+            configured_ids.extend(cfg.aio.keys().cloned());
         }
 
-        configured_ids.extend(cfg.aio.keys().cloned());
+        configured_ids
+    }
+
+    fn auto_rebind_configured_wireless(&mut self) {
+        let configured_ids = self.configured_wireless_device_ids();
 
         for dev in self.wireless.unbound_devices() {
             let device_id = format!("wireless:{}", dev.mac_str());

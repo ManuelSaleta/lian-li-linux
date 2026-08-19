@@ -252,6 +252,33 @@ impl RusbBulk {
         }
     }
 
+    /// Read chunks until silence (mirrors WinUsb `ReadAll`). Returns total bytes.
+    pub fn read_silence(
+        &self,
+        buf: &mut [u8],
+        first_timeout: Duration,
+        chunk_timeout: Duration,
+    ) -> usize {
+        let mut chunk = [0u8; 64];
+        let mut total = 0usize;
+        let mut timeout = first_timeout;
+        loop {
+            match self.read(&mut chunk, timeout) {
+                Ok(n) if n > 0 => {
+                    timeout = chunk_timeout;
+                    let n = n.min(buf.len() - total);
+                    buf[total..total + n].copy_from_slice(&chunk[..n]);
+                    total += n;
+                    if total == buf.len() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        total
+    }
+
     pub fn release(&self) {
         for &iface in self.claimed.iter().rev() {
             let _ = self.handle.release_interface(iface);

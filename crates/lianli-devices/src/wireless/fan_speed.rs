@@ -52,7 +52,7 @@ impl WirelessController {
 
         let slot_index = devices
             .iter()
-            .filter(|d| d.master_mac == master_mac && d.device_type != 0xFF)
+            .filter(|d| (d.bind_intent || d.master_mac == master_mac) && d.device_type != 0xFF)
             .position(|d| d.mac == *mac)
             .map(|i| (i + 1) as u8)
             .unwrap_or(1);

@@ -1,5 +1,7 @@
 use super::convergence::{PendingQueue, TargetSeqMap};
-use super::discovery::{poll_and_discover, DiscoveredDevice};
+use super::discovery::{
+    poll_and_discover, DeviceHealthMap, DiscoveredDevice, REBIND_FOREIGN_AFTER,
+};
 use super::transport::{open_any, with_transport_recovery};
 use super::{
     CMD_RESET, CMD_RX_LCD_MODE, CMD_RX_QUERY_34, CMD_RX_QUERY_37, CMD_VIDEO_START, RF_CHUNKS,
@@ -25,6 +27,8 @@ pub struct WirelessController {
     pub(super) master_mac: Arc<Mutex<[u8; 6]>>,
     pub(super) master_channel: Arc<Mutex<u8>>,
     pub(super) discovered_devices: Arc<Mutex<Vec<DiscoveredDevice>>>,
+    pub(super) device_health: DeviceHealthMap,
+    pub(super) clock_init_sent: Arc<AtomicBool>,
     /// Motherboard PWM duty cycle (0-255) extracted from RX GetDev response bytes [2:3].
     /// 0xFFFF means unavailable/not yet read.
     pub(super) mobo_pwm: Arc<AtomicU16>,
@@ -49,6 +53,8 @@ impl Clone for WirelessController {
             master_mac: Arc::clone(&self.master_mac),
             master_channel: Arc::clone(&self.master_channel),
             discovered_devices: Arc::clone(&self.discovered_devices),
+            device_health: Arc::clone(&self.device_health),
+            clock_init_sent: Arc::clone(&self.clock_init_sent),
             mobo_pwm: Arc::clone(&self.mobo_pwm),
             fg_sync: Arc::clone(&self.fg_sync),
             tx_failures: Arc::clone(&self.tx_failures),
@@ -73,6 +79,8 @@ impl WirelessController {
             master_mac: Arc::new(Mutex::new([0u8; 6])),
             master_channel: Arc::new(Mutex::new(8)),
             discovered_devices: Arc::new(Mutex::new(Vec::new())),
+            device_health: Arc::new(Mutex::new(Default::default())),
+            clock_init_sent: Arc::new(AtomicBool::new(false)),
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
             fg_sync: Arc::new(AtomicBool::new(false)),
             tx_failures: Arc::new(AtomicU32::new(0)),
@@ -203,9 +211,11 @@ impl WirelessController {
 
         self.video_mode_active.store(false, Ordering::Release);
         self.poll_stop.store(false, Ordering::SeqCst);
+        self.clock_init_sent.store(false, Ordering::Release);
 
         let stop_flag = self.poll_stop.clone();
         let discovered_devices = Arc::clone(&self.discovered_devices);
+        let device_health = Arc::clone(&self.device_health);
         let mobo_pwm = Arc::clone(&self.mobo_pwm);
         let fg_sync = Arc::clone(&self.fg_sync);
         let master_mac = Arc::clone(&self.master_mac);
@@ -220,9 +230,14 @@ impl WirelessController {
             let mut total_resets = 0u32;
             const MAX_RESETS: u32 = 3;
             while !stop_flag.load(Ordering::SeqCst) {
-                if let Err(err) =
-                    poll_and_discover(&rx, &discovered_devices, &mobo_pwm, &fg_sync, &master_mac)
-                {
+                if let Err(err) = poll_and_discover(
+                    &rx,
+                    &discovered_devices,
+                    &device_health,
+                    &mobo_pwm,
+                    &fg_sync,
+                    &master_mac,
+                ) {
                     consecutive_errors += 1;
                     consecutive_successes = 0;
                     info!("RX polling ({consecutive_errors}): {err:?}, continuing");
@@ -290,12 +305,12 @@ impl WirelessController {
             (self.pending_commands.clone(), self.target_cmd_seqs.clone())
         {
             let conv_stop = self.poll_stop.clone();
-            let discovered = Arc::clone(&self.discovered_devices);
+            let device_health = Arc::clone(&self.device_health);
             self.convergence_thread = Some(Self::spawn_convergence_loop(
                 Arc::clone(&tx),
                 queue,
                 target_seqs,
-                discovered,
+                device_health,
                 conv_stop,
             ));
         }
@@ -347,7 +362,14 @@ impl WirelessController {
         rf_data[0] = RF_SELECT;
         rf_data[1] = super::RF_CLOCK_SYNC;
         rf_data[8..14].copy_from_slice(&master_mac);
-        rf_data[14..234].copy_from_slice(payload);
+        let init = !self.clock_init_sent.load(Ordering::Acquire);
+        if init {
+            // vendor init frame: fixedData region carries the 0x14 "unset" sentinel
+            rf_data[14..64].fill(0x14);
+            rf_data[64..234].copy_from_slice(&payload[50..220]);
+        } else {
+            rf_data[14..234].copy_from_slice(payload);
+        }
 
         self.tx_recover(|handle| {
             for chunk_idx in 0..RF_CHUNKS as u8 {
@@ -368,6 +390,9 @@ impl WirelessController {
             }
             Ok(())
         })?;
+        if init {
+            self.clock_init_sent.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -466,26 +491,65 @@ impl WirelessController {
         self.discovered_devices.lock().len()
     }
 
-    /// Snapshot of devices bound to this PC's dongle.
+    /// Snapshot of devices considered ours: binding intent or dongle-reported
+    /// master match, restricted to live entries.
     pub fn devices(&self) -> Vec<DiscoveredDevice> {
         let local_mac = *self.master_mac.lock();
         self.discovered_devices
             .lock()
             .iter()
-            .filter(|d| d.master_mac == local_mac)
+            .filter(|d| d.bind_intent || d.master_mac == local_mac)
             .cloned()
             .collect()
     }
 
-    /// Snapshot of devices NOT bound to this dongle.
+    /// Snapshot of devices available for binding (observed foreign, no intent).
     pub fn unbound_devices(&self) -> Vec<DiscoveredDevice> {
         let local_mac = *self.master_mac.lock();
         self.discovered_devices
             .lock()
             .iter()
-            .filter(|d| d.master_mac != local_mac && d.device_type != 255)
+            .filter(|d| !d.bind_intent && d.master_mac != local_mac)
             .cloned()
             .collect()
+    }
+
+    /// MACs with binding intent whose debounced observed master has been
+    /// foreign for longer than [`REBIND_FOREIGN_AFTER`].
+    pub fn rebind_candidates(&self) -> Vec<[u8; 6]> {
+        let local_mac = *self.master_mac.lock();
+        self.device_health
+            .lock()
+            .iter()
+            .filter(|(_, h)| {
+                h.bind_intent
+                    && !h.dead
+                    && h.observed_master != local_mac
+                    && h.foreign_since
+                        .is_some_and(|t| t.elapsed() >= REBIND_FOREIGN_AFTER)
+            })
+            .map(|(mac, _)| *mac)
+            .collect()
+    }
+
+    pub(super) fn set_bind_intent(&self, mac: &[u8; 6], intent: bool) {
+        {
+            let mut health = self.device_health.lock();
+            if let Some(h) = health.get_mut(mac) {
+                h.bind_intent = intent;
+                if !intent {
+                    h.foreign_since = None;
+                }
+            }
+        }
+        if let Some(d) = self
+            .discovered_devices
+            .lock()
+            .iter_mut()
+            .find(|d| d.mac == *mac)
+        {
+            d.bind_intent = intent;
+        }
     }
 
     pub fn device_by_mac(&self, mac: &[u8; 6]) -> Option<DiscoveredDevice> {
@@ -543,7 +607,7 @@ impl WirelessController {
         let master_mac = *self.master_mac.lock();
         devices
             .iter()
-            .filter(|d| d.master_mac == master_mac && d.device_type != 0xFF)
+            .filter(|d| (d.bind_intent || d.master_mac == master_mac) && d.device_type != 0xFF)
             .position(|d| d.mac == device.mac)
             .map(|i| (i + 1) as u8)
             .unwrap_or(1)
