@@ -72,22 +72,27 @@ impl ServiceManager {
             return;
         };
         let wireless = Arc::new(self.wireless.clone());
-        let mut controller = AioController::new(wireless, cfg);
+        let wired = Arc::clone(&self.registry.fan_devices);
+        let mut controller = AioController::new(wireless, wired, cfg);
         controller.start();
         self.controllers.aio = Some(controller);
     }
 
     /// For each discovered AIO, ensure an AioConfig exists in the user's config.
     /// Migrates any legacy FanGroup targeting that device, then inserts defaults.
+    /// Wireless devices get a default config (all-off / device-managed); wired
+    /// AIOs only get legacy-group migration — no config means no PWM writes,
+    /// leaving the device's firmware in control until the user configures it.
     pub(super) fn ensure_aio_defaults(&mut self) {
-        let aio_device_ids: Vec<String> = self
-            .wireless
-            .devices()
-            .iter()
-            .filter(|d| d.is_aio())
-            .map(|d| format!("wireless:{}", d.mac_str()))
-            .collect();
-        if aio_device_ids.is_empty() {
+        let mut wired_aio_ids: Vec<String> = Vec::new();
+        // Wired AIOs: fan devices with pump control (HydroShift LCD family).
+        for info in &self.registry.fan_device_info {
+            if info.has_pump_control {
+                wired_aio_ids.push(info.device_id.clone());
+            }
+        }
+        let any_wireless_aio = self.wireless.devices().iter().any(|d| d.is_aio());
+        if wired_aio_ids.is_empty() && !any_wireless_aio {
             return;
         }
 
@@ -99,7 +104,19 @@ impl ServiceManager {
         };
 
         let mut changed = false;
-        for device_id in aio_device_ids {
+        // Wired: migrate legacy fan groups only — absence of config leaves
+        // the device firmware in control.
+        for device_id in &wired_aio_ids {
+            if cfg.migrate_aio_fangroup(device_id) {
+                info!("Migrated legacy fan group for AIO {device_id} into aio config");
+                changed = true;
+            }
+        }
+        for device in self.wireless.devices() {
+            if !device.is_aio() {
+                continue;
+            }
+            let device_id = format!("wireless:{}", device.mac_str());
             if cfg.migrate_aio_fangroup(&device_id) {
                 info!("Migrated legacy fan group for AIO {device_id} into aio config");
                 changed = true;
@@ -160,6 +177,9 @@ impl ServiceManager {
             self.registry.v2_hid_entries.clear();
             self.init_wired_devices();
             self.start_fan_control();
+            // AioController snapshots the wired device map at start; restart
+            // it so hotplug re-init is picked up.
+            self.start_aio_control();
             self.registry.last_wired_ids = current;
             return;
         }
@@ -185,6 +205,7 @@ impl ServiceManager {
         }
         self.init_wired_devices();
         self.start_fan_control();
+        self.start_aio_control();
     }
 
     pub(super) fn hid_backend(&self) -> HidBackend {

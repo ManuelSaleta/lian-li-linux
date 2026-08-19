@@ -40,6 +40,9 @@ pub enum FanSpeed {
     Curve(String),
 }
 
+/// Reserved curve name representing "device-managed / do not control".
+pub const OFF_KEY: &str = "off";
+
 /// Reserved curve name used to represent motherboard RPM sync mode.
 pub const MB_SYNC_KEY: &str = "__mb_sync__";
 
@@ -108,6 +111,12 @@ impl FanSpeed {
             }
             _ => None,
         }
+    }
+
+    /// Reserved speed meaning "leave this channel to the device's own
+    /// firmware" — no PWM writes are issued while set.
+    pub fn is_off(&self) -> bool {
+        matches!(self, FanSpeed::Curve(name) if name == OFF_KEY)
     }
 }
 
@@ -248,6 +257,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_off_matches_reserved_key_only() {
+        assert!(FanSpeed::Curve("off".into()).is_off());
+        assert!(!FanSpeed::Curve("Off".into()).is_off());
+        assert!(!FanSpeed::Curve("__mb_sync__".into()).is_off());
+        assert!(!FanSpeed::Constant(0).is_off());
+    }
+
+    #[test]
+    fn off_key_roundtrips_through_serde() {
+        let speed: FanSpeed = serde_json::from_str("\"off\"").unwrap();
+        assert!(speed.is_off());
+        assert_eq!(serde_json::to_string(&speed).unwrap(), "\"off\"");
+    }
 
     #[test]
     fn interpolate_curve_empty_returns_default() {

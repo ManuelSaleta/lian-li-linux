@@ -190,8 +190,8 @@ export const useConfigStore = defineStore("config", () => {
 
 function defaultAio() {
   return {
-    pump_target_rpm: 128 as const,
-    fan_speeds: [128, 128, 128, 128] as number[],
+    pump_target_rpm: "off" as const,
+    fan_speeds: ["off", "off", "off", "off"] as string[],
     theme_index: 0,
     brightness: 80,
     rotation: 0,

@@ -46,6 +46,40 @@ pub trait FanDevice: Send + Sync {
         anyhow::bail!("Pump speed control not supported by this device")
     }
 
+    /// Set pump speed with an explicit PWM source selector byte
+    /// (0 = device MCU, 1 = motherboard). Mirrors the vendor behavior where
+    /// motherboard-sync mode still carries the curve-derived PWM alongside
+    /// the source byte. Default: forward to `set_pump_speed`, ignoring the
+    /// source (protocols without a source selector).
+    fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
+        self.set_pump_speed(duty)?;
+        let _ = source;
+        Ok(())
+    }
+
+    /// Set pump speed from a fan-curve's 0-100% output. Implementations with
+    /// a pump RPM envelope translate percent → RPM inside the envelope →
+    /// RPM→PWM table (vendor-faithful chain); the default scales percent to
+    /// a duty and forwards to `set_pump_speed_source`.
+    fn set_pump_curve_percent(&self, source: u8, percent: f32) -> Result<()> {
+        let percent = percent.clamp(0.0, 100.0);
+        self.set_pump_speed_source(source, (percent * 2.55) as u8)
+    }
+
+    /// Last-known pump RPM for wired AIOs. Returns `None` for devices
+    /// without pump telemetry.
+    fn read_pump_rpm(&self) -> Option<u16> {
+        None
+    }
+
+    /// Whether the device has finished its initialization sequence and is
+    /// ready to accept PWM control writes. Devices with long settle times
+    /// (e.g. HydroShift LCD: 10s settle + firmware read + handshake + 2s
+    /// grace) override this to gate control loops.
+    fn is_ready_for_control(&self) -> bool {
+        true
+    }
+
     /// Poll coolant temperature from wired AIO devices (HydroShift LCD, Galahad2).
     /// Returns `None` if the device doesn't have a coolant sensor.
     /// Ref: PR #103 — exposes wired coolant telemetry to fan curves.
@@ -114,6 +148,18 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
         (**self).set_pump_speed(duty)
+    }
+    fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
+        (**self).set_pump_speed_source(source, duty)
+    }
+    fn set_pump_curve_percent(&self, source: u8, percent: f32) -> Result<()> {
+        (**self).set_pump_curve_percent(source, percent)
+    }
+    fn read_pump_rpm(&self) -> Option<u16> {
+        (**self).read_pump_rpm()
+    }
+    fn is_ready_for_control(&self) -> bool {
+        (**self).is_ready_for_control()
     }
     fn poll_coolant_temp(&self) -> Option<f32> {
         (**self).poll_coolant_temp()
@@ -185,7 +231,7 @@ pub trait AioDevice: FanDevice {
 
 impl<T: AioDevice> AioDevice for std::sync::Arc<T> {
     fn read_pump_rpm(&self) -> Result<u16> {
-        (**self).read_pump_rpm()
+        AioDevice::read_pump_rpm(&(**self))
     }
     fn read_coolant_temp(&self) -> Result<f32> {
         (**self).read_coolant_temp()

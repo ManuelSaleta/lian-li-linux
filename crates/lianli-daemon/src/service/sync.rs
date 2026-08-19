@@ -374,6 +374,16 @@ impl ServiceManager {
 
         // Read wired fan RPMs and split per port.
         for (base_id, dev) in self.registry.fan_devices.iter() {
+            // Coolant telemetry for wired AIOs (HydroShift LCD family),
+            // mirroring the wireless path: publish via IPC and register as a
+            // fan-curve sensor source.
+            if let Some(temp) = dev.poll_coolant_temp() {
+                ipc_state
+                    .telemetry
+                    .coolant_temps
+                    .insert(base_id.clone(), temp);
+                lianli_shared::sensors::write_coolant_temp(base_id, temp);
+            }
             if let Ok(all_rpms) = dev.read_fan_rpm() {
                 let ports = dev.fan_port_info();
                 let per_fan = dev.per_fan_control();
@@ -381,8 +391,15 @@ impl ServiceManager {
                 for &(port, count) in &ports {
                     let port_rpms = if per_fan {
                         let end = (offset + count as usize).min(all_rpms.len());
-                        let v = all_rpms[offset..end].to_vec();
+                        let mut v = all_rpms[offset..end].to_vec();
                         offset = end;
+                        // AIO pump RPM rides in the last telemetry slot
+                        // (GUI reads rpms[fan_count]).
+                        if count > 0 {
+                            if let Some(pump) = dev.read_pump_rpm() {
+                                v.push(pump);
+                            }
+                        }
                         v
                     } else {
                         all_rpms

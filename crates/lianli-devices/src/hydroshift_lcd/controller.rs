@@ -169,6 +169,7 @@ pub struct HydroShiftLcdController {
     rotation: AtomicU8,
     video_fps: AtomicU8,
     initialized: AtomicBool,
+    control_ready: AtomicBool,
     use_c_command: AtomicBool,
     firmware_string: OnceLock<String>,
     firmware_version: OnceLock<(u32, u32)>,
@@ -190,6 +191,7 @@ impl HydroShiftLcdController {
             rotation: AtomicU8::new(ScreenRotation::Rotate0 as u8),
             video_fps: AtomicU8::new(ScreenInfo::AIO_LCD_480.max_fps as u8),
             initialized: AtomicBool::new(false),
+            control_ready: AtomicBool::new(false),
             use_c_command: AtomicBool::new(false),
             firmware_string: OnceLock::new(),
             firmware_version: OnceLock::new(),
@@ -251,6 +253,8 @@ impl HydroShiftLcdController {
         }
 
         *self.last_recovery_attempt.lock() = Some(Instant::now());
+        self.control_ready.store(true, Ordering::SeqCst);
+        info!("{name} initialized — PWM control enabled");
         Ok(())
     }
 
@@ -768,28 +772,53 @@ impl FanDevice for HydroShiftLcdController {
             .lock()
             .as_ref()
             .filter(|hs| {
-                hs.temp_valid
-                // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
-                && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
+                // Vendor parity: L-Connect 3 reads TemperatureInteger while
+                // ignoring TemperatureIsValid entirely — some firmwares report
+                // a plausible coolant value with the flag clear. Trust the
+                // integer whenever it is populated.
+                hs.coolant_temp > 0.0
+                    // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
+                    && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
             })
             .map(|hs| hs.coolant_temp)
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
-        let mut pwm = duty_to_percent(duty);
+        self.set_pump_pwm_bytes(0x00, duty, "set_pump_speed")
+    }
+
+    /// Vendor parity for motherboard-sync mode: L-Connect 3 keeps sending the
+    /// curve-derived PWM byte alongside source=1 every second (unlike GA2
+    /// Trinity which sends 0). The device presumably ignores the PWM byte in
+    /// MB mode, but we replicate the byte sequence faithfully.
+    fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
+        self.set_pump_pwm_bytes(source.min(1), duty, "set_pump_speed_source")
+    }
+
+    /// Vendor-faithful chain: curve percent → RPM inside the variant
+    /// envelope → RPM→PWM table → `[source, pwm]`. Mirrors L-Connect 3's
+    /// `pumpSpeedRPMConfig.CalculateSpeed` followed by
+    /// `pumpRPMtoPWMConfig.CalculateSpeed`.
+    fn set_pump_curve_percent(&self, source: u8, percent: f32) -> Result<()> {
         let envelope = self.variant.pump_envelope();
-        let min_pwm = envelope.min_pwm();
-        if pwm < min_pwm {
-            debug!("Pump PWM {pwm}% clamped to variant floor {min_pwm}%");
-            pwm = min_pwm;
-        }
-        self.write_a_command(CMD_SET_PUMP_PWM, &[0x00, pwm])?;
+        let percent = percent.clamp(0.0, 100.0);
+        let span = (envelope.max_rpm - envelope.min_rpm) as f32;
+        let rpm = envelope.min_rpm as f32 + (percent / 100.0) * span;
+        let pwm = envelope.rpm_to_pwm(rpm as u16);
+        self.write_a_command(CMD_SET_PUMP_PWM, &[source.min(1), pwm])?;
         debug!(
-            "Set pump PWM to {pwm}% (variant={}, max_rpm={})",
-            self.variant.name(),
-            envelope.max_rpm
+            "Set pump curve {percent:.0}% → {rpm:.0} RPM → {pwm}% PWM (variant={})",
+            self.variant.name()
         );
         Ok(())
+    }
+
+    fn read_pump_rpm(&self) -> Option<u16> {
+        self.last_handshake.lock().as_ref().map(|hs| hs.pump_rpm)
+    }
+
+    fn is_ready_for_control(&self) -> bool {
+        self.control_ready.load(Ordering::Relaxed)
     }
 
     fn set_mb_rpm_sync(&self, _port: u8, sync: bool) -> Result<()> {
@@ -798,6 +827,25 @@ impl FanDevice for HydroShiftLcdController {
         let pwm = envelope.min_pwm();
         self.write_a_command(CMD_SET_PUMP_PWM, &[source, pwm])?;
         debug!("Set pump MB sync={sync} (variant={})", self.variant.name());
+        Ok(())
+    }
+}
+
+impl HydroShiftLcdController {
+    fn set_pump_pwm_bytes(&self, source: u8, duty: u8, label: &str) -> Result<()> {
+        let mut pwm = duty_to_percent(duty);
+        let envelope = self.variant.pump_envelope();
+        let min_pwm = envelope.min_pwm();
+        if pwm < min_pwm {
+            debug!("Pump PWM {pwm}% clamped to variant floor {min_pwm}%");
+            pwm = min_pwm;
+        }
+        self.write_a_command(CMD_SET_PUMP_PWM, &[source, pwm])?;
+        debug!(
+            "Set pump PWM to {pwm}% source={source} via {label} (variant={}, max_rpm={})",
+            self.variant.name(),
+            envelope.max_rpm
+        );
         Ok(())
     }
 }
@@ -813,9 +861,13 @@ impl AioDevice for HydroShiftLcdController {
     }
 
     fn read_coolant_temp(&self) -> Result<f32> {
-        match &*self.last_handshake.lock() {
-            Some(hs) if hs.temp_valid => Ok(hs.coolant_temp),
-            Some(_) => bail!("Coolant temperature sensor reports invalid"),
+        match self.poll_coolant_temp() {
+            Some(temp) => Ok(temp),
+            // Distinguish "sensor reports invalid" from "no data yet" for
+            // callers that care, matching the pre-relaxation error surface.
+            None if self.last_handshake.lock().is_some() => {
+                bail!("Coolant temperature not populated")
+            }
             None => bail!("No handshake data available"),
         }
     }

@@ -199,15 +199,15 @@ fn default_loop_interval() -> u8 {
 }
 
 fn default_pump_speed() -> FanSpeed {
-    FanSpeed::Constant(128)
+    FanSpeed::Curve(crate::fan::OFF_KEY.to_string())
 }
 
 fn default_fan_speeds() -> [FanSpeed; 4] {
     [
-        FanSpeed::Constant(128),
-        FanSpeed::Constant(128),
-        FanSpeed::Constant(128),
-        FanSpeed::Constant(128),
+        FanSpeed::Curve(crate::fan::OFF_KEY.to_string()),
+        FanSpeed::Curve(crate::fan::OFF_KEY.to_string()),
+        FanSpeed::Curve(crate::fan::OFF_KEY.to_string()),
+        FanSpeed::Curve(crate::fan::OFF_KEY.to_string()),
     ]
 }
 
@@ -311,5 +311,31 @@ mod tests {
             cfg.cpu_load_source,
             Some(SensorSourceConfig::CpuUsage)
         ));
+    }
+
+    #[test]
+    fn defaults_are_device_managed() {
+        let cfg: AioConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.pump_target_rpm.is_off());
+        assert!(cfg.fan_speeds.iter().all(|s| s.is_off()));
+    }
+
+    #[test]
+    fn pump_curve_percent_chain_matches_vendor_table() {
+        // Wired pump chain: curve % → RPM in envelope → RPM→PWM table.
+        let env = PumpEnvelope::HYDROSHIFT_LCD;
+        let rpm = |pct: f32| env.min_rpm as f32 + (pct / 100.0) * (env.max_rpm - env.min_rpm) as f32;
+        assert_eq!(env.rpm_to_pwm(rpm(0.0) as u16), 50);
+        assert_eq!(env.rpm_to_pwm(rpm(100.0) as u16), 100);
+        // Midpoint → 3000 RPM → 70% per vendor pumpRPMtoPWMConfigLookup.
+        assert_eq!(env.rpm_to_pwm(rpm(50.0) as u16), 70);
+
+        let rgb = PumpEnvelope::HYDROSHIFT_LCD_RGB;
+        let rpm = |pct: f32| {
+            rgb.min_rpm as f32 + (pct / 100.0) * (rgb.max_rpm - rgb.min_rpm) as f32
+        };
+        assert_eq!(rgb.rpm_to_pwm(rpm(0.0) as u16), 1);
+        assert_eq!(rgb.rpm_to_pwm(rpm(50.0) as u16), 50);
+        assert_eq!(rgb.rpm_to_pwm(rpm(100.0) as u16), 100);
     }
 }

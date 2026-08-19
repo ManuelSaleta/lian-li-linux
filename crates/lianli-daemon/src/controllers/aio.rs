@@ -1,3 +1,4 @@
+use lianli_devices::traits::FanDevice;
 use lianli_devices::wireless::{
     pump_rpm_to_timer, DiscoveredDevice, WirelessController, WirelessFanType, AIO_PARAM_LEN,
 };
@@ -20,6 +21,7 @@ const TICK: Duration = Duration::from_secs(1);
 
 pub struct AioController {
     wireless: Arc<WirelessController>,
+    wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
     state: Arc<Mutex<State>>,
     stop_flag: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -30,10 +32,34 @@ struct State {
     needs_reinit: bool,
 }
 
+/// A resolved per-channel speed target.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedSpeed {
+    /// Raw PWM duty (0-255), for protocols driven by duty.
+    duty: u8,
+    /// Curve output in percent (0-100), for protocols driven by an RPM
+    /// envelope (wired AIO pumps).
+    percent: f32,
+}
+
+impl ResolvedSpeed {
+    fn constant(duty: u8) -> Self {
+        Self {
+            duty,
+            percent: (duty as f32 / 255.0) * 100.0,
+        }
+    }
+}
+
 impl AioController {
-    pub fn new(wireless: Arc<WirelessController>, config: AppConfig) -> Self {
+    pub fn new(
+        wireless: Arc<WirelessController>,
+        wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
+        config: AppConfig,
+    ) -> Self {
         Self {
             wireless,
+            wired,
             state: Arc::new(Mutex::new(State {
                 config,
                 needs_reinit: false,
@@ -54,9 +80,10 @@ impl AioController {
             return;
         }
         let wireless = Arc::clone(&self.wireless);
+        let wired = Arc::clone(&self.wired);
         let state = Arc::clone(&self.state);
         let stop = Arc::clone(&self.stop_flag);
-        self.thread = Some(thread::spawn(move || run(wireless, state, stop)));
+        self.thread = Some(thread::spawn(move || run(wireless, wired, state, stop)));
     }
 
     pub fn stop(mut self) {
@@ -76,10 +103,18 @@ impl Drop for AioController {
     }
 }
 
-fn run(wireless: Arc<WirelessController>, state: Arc<Mutex<State>>, stop_flag: Arc<AtomicBool>) {
+fn run(
+    wireless: Arc<WirelessController>,
+    wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
+    state: Arc<Mutex<State>>,
+    stop_flag: Arc<AtomicBool>,
+) {
     let all_sensors = enumerate_sensors();
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
     let mut switched: HashSet<[u8; 6]> = HashSet::new();
+    // Last-sent speeds for wireless slots that resolve to "no target"
+    // (off / missing curve / sensor failure): hold instead of dropping to 0.
+    let mut wireless_hold: HashMap<[u8; 6], [u8; 4]> = HashMap::new();
 
     while !stop_flag.load(Ordering::Relaxed) {
         let cfg = {
@@ -96,72 +131,250 @@ fn run(wireless: Arc<WirelessController>, state: Arc<Mutex<State>>, stop_flag: A
             .map(|c| (c.name.clone(), c.clone()))
             .collect();
         let devices: Vec<DiscoveredDevice> = wireless.devices();
+        let aio_macs: HashSet<[u8; 6]> = devices.iter().map(|d| d.mac).collect();
 
-        for device in &devices {
-            if !device.is_aio() {
-                continue;
-            }
-            let device_id = format!("wireless:{}", device.mac_str());
-            let Some(aio_cfg) = cfg.aio.get(&device_id) else {
-                continue;
-            };
-
-            if !switched.contains(&device.mac) {
-                match wireless.switch_to_wireless_theme(&device.mac) {
-                    Ok(()) => {
-                        switched.insert(device.mac);
-                        info!("AIO {}: wireless theme mode engaged", device.mac_str());
-                    }
-                    Err(e) => {
-                        warn!(
-                            "AIO {}: switch_to_wireless_theme failed: {e:#}",
-                            device.mac_str()
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            let param = build_aio_param(aio_cfg, device, &curves, &mut sensor_cache, &all_sensors);
-            if let Err(e) = wireless.set_aio_params(&device.mac, &param) {
-                warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
-            }
-
-            let mut fan_pwm = [0u8; 4];
-            for (i, slot) in aio_cfg.fan_speeds.iter().enumerate() {
-                if (i as u8) >= device.fan_count {
-                    continue;
-                }
-                fan_pwm[i] = match slot {
-                    FanSpeed::Constant(b) => *b,
-                    FanSpeed::Curve(name) => match curves.get(name) {
-                        Some(curve) => {
-                            let source = curve.effective_source();
-                            let pct =
-                                match resolve_and_read(&source, &mut sensor_cache, &all_sensors) {
-                                    Some(temp) => {
-                                        interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0)
-                                    }
-                                    None => 0.0,
-                                };
-                            (pct * 2.55) as u8
-                        }
-                        None => 0,
-                    },
-                };
-            }
-            if let Err(e) = wireless.set_fan_speeds_by_mac(&device.mac, &fan_pwm) {
-                warn!("AIO {}: set_fan_speeds failed: {e:#}", device.mac_str());
-            }
-        }
+        control_wireless(
+            &wireless,
+            &devices,
+            &cfg,
+            &curves,
+            &mut switched,
+            &mut wireless_hold,
+            &mut sensor_cache,
+            &all_sensors,
+        );
+        control_wired(
+            &wired,
+            &aio_macs,
+            &cfg,
+            &curves,
+            &mut sensor_cache,
+            &all_sensors,
+        );
 
         let live_macs: HashSet<[u8; 6]> = devices.iter().map(|d| d.mac).collect();
         switched.retain(|m| live_macs.contains(m));
+        wireless_hold.retain(|m, _| live_macs.contains(m));
 
         thread::sleep(TICK);
     }
 
     debug!("AioController stopped");
+}
+
+fn control_wireless(
+    wireless: &WirelessController,
+    devices: &[DiscoveredDevice],
+    cfg: &AppConfig,
+    curves: &HashMap<String, FanCurve>,
+    switched: &mut HashSet<[u8; 6]>,
+    wireless_hold: &mut HashMap<[u8; 6], [u8; 4]>,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) {
+    for device in devices {
+        if !device.is_aio() {
+            continue;
+        }
+        let device_id = format!("wireless:{}", device.mac_str());
+        let Some(aio_cfg) = cfg.aio.get(&device_id) else {
+            continue;
+        };
+
+        if !switched.contains(&device.mac) {
+            match wireless.switch_to_wireless_theme(&device.mac) {
+                Ok(()) => {
+                    switched.insert(device.mac);
+                    info!("AIO {}: wireless theme mode engaged", device.mac_str());
+                }
+                Err(e) => {
+                    warn!(
+                        "AIO {}: switch_to_wireless_theme failed: {e:#}",
+                        device.mac_str()
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let param = build_aio_param(
+            aio_cfg,
+            device,
+            curves,
+            sensor_cache,
+            all_sensors,
+            wireless_hold,
+        );
+        if let Err(e) = wireless.set_aio_params(&device.mac, &param) {
+            warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
+        }
+
+        let hold = wireless_hold.entry(device.mac).or_insert([128, 128, 128, 128]);
+        let mut fan_pwm = *hold;
+        let mut any_target = false;
+        for (i, slot) in aio_cfg.fan_speeds.iter().enumerate() {
+            if (i as u8) >= device.fan_count {
+                continue;
+            }
+            // Unresolvable slots (off / missing curve / sensor failure) hold
+            // their last commanded duty instead of dropping to 0.
+            if let Some(speed) = resolve_speed(slot, curves, sensor_cache, all_sensors) {
+                fan_pwm[i] = speed.duty;
+                any_target = true;
+            }
+        }
+        *hold = fan_pwm;
+        // All slots device-managed → withhold the RF write entirely.
+        if any_target {
+            if let Err(e) = wireless.set_fan_speeds_by_mac(&device.mac, &fan_pwm) {
+                warn!("AIO {}: set_fan_speeds failed: {e:#}", device.mac_str());
+            }
+        }
+    }
+}
+
+fn control_wired(
+    wired: &HashMap<String, Box<dyn FanDevice>>,
+    aio_macs: &HashSet<[u8; 6]>,
+    cfg: &AppConfig,
+    curves: &HashMap<String, FanCurve>,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) {
+    for (base_id, dev) in wired.iter() {
+        if !dev.has_pump_control() {
+            continue;
+        }
+        // Wired hubs bridged to a wireless AIO are driven over RF instead.
+        if dev
+            .wireless_link_mac()
+            .is_some_and(|m| aio_macs.contains(&m))
+        {
+            continue;
+        }
+        // Gate on device init (HydroShift: 10s settle + fw + handshake + 2s).
+        if !dev.is_ready_for_control() {
+            continue;
+        }
+        let Some(aio_cfg) = cfg.aio.get(base_id) else {
+            // No config → device-managed, no writes.
+            continue;
+        };
+
+        apply_wired_fans(base_id, dev.as_ref(), aio_cfg, curves, sensor_cache, all_sensors);
+        apply_wired_pump(base_id, dev.as_ref(), aio_cfg, curves, sensor_cache, all_sensors);
+    }
+}
+
+fn apply_wired_fans(
+    base_id: &str,
+    dev: &dyn FanDevice,
+    aio_cfg: &AioConfig,
+    curves: &HashMap<String, FanCurve>,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) {
+    let mut duties = [0u8; 4];
+    let mut any = false;
+    for (i, slot) in aio_cfg.fan_speeds.iter().enumerate() {
+        if let Some(speed) = resolve_speed(slot, curves, sensor_cache, all_sensors) {
+            duties[i] = speed.duty;
+            any = true;
+        }
+    }
+    if !any {
+        return;
+    }
+    // First configured slot drives the single PWM channel
+    // (SetFanPWM [0, pwm] — no per-fan addressing in this family).
+    if let Err(e) = dev.set_fan_speeds(&duties) {
+        warn!("AIO {base_id}: set_fan_speeds failed: {e:#}");
+    }
+}
+
+fn apply_wired_pump(
+    base_id: &str,
+    dev: &dyn FanDevice,
+    aio_cfg: &AioConfig,
+    curves: &HashMap<String, FanCurve>,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) {
+    let pump = &aio_cfg.pump_target_rpm;
+    if pump.is_off() {
+        return;
+    }
+    if pump.is_mb_sync() {
+        // Vendor parity: L-Connect keeps sending the curve-derived PWM byte
+        // alongside source=1 every second in motherboard-sync mode.
+        let percent = match pump {
+            FanSpeed::Curve(name) => curves
+                .get(name)
+                .and_then(|c| read_curve_percent(c, sensor_cache, all_sensors)),
+            _ => None,
+        };
+        // Unresolvable MB-sync source: fall back to the device floor, which
+        // set_pump_speed_source clamps anyway.
+        let duty = percent.map(|p| (p * 2.55) as u8).unwrap_or(0);
+        if let Err(e) = dev.set_pump_speed_source(1, duty) {
+            warn!("AIO {base_id}: set_pump_speed_source failed: {e:#}");
+        }
+        return;
+    }
+    match pump {
+        FanSpeed::Constant(b) => {
+            if let Err(e) = dev.set_pump_speed(*b) {
+                warn!("AIO {base_id}: set_pump_speed failed: {e:#}");
+            }
+        }
+        FanSpeed::Curve(_) => {
+            if let Some(speed) = resolve_speed(pump, curves, sensor_cache, all_sensors) {
+                // Vendor-faithful chain: curve % → RPM in variant envelope →
+                // RPM→PWM table → write. Implemented driver-side where the
+                // envelope lives.
+                if let Err(e) = dev.set_pump_curve_percent(0, speed.percent) {
+                    warn!("AIO {base_id}: set_pump_curve_percent failed: {e:#}");
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a [`FanSpeed`] to a concrete target.
+///
+/// Returns `None` (meaning: do not write) for the reserved "off" key,
+/// MB-sync entries (handled separately for pumps, unsupported for fans),
+/// missing curves, and unreadable sensors.
+fn resolve_speed(
+    speed: &FanSpeed,
+    curves: &HashMap<String, FanCurve>,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) -> Option<ResolvedSpeed> {
+    if speed.is_off() || speed.is_mb_sync() {
+        return None;
+    }
+    match speed {
+        FanSpeed::Constant(b) => Some(ResolvedSpeed::constant(*b)),
+        FanSpeed::Curve(name) => {
+            let curve = curves.get(name)?;
+            let percent = read_curve_percent(curve, sensor_cache, all_sensors)?;
+            Some(ResolvedSpeed {
+                duty: (percent * 2.55) as u8,
+                percent,
+            })
+        }
+    }
+}
+
+fn read_curve_percent(
+    curve: &FanCurve,
+    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    all_sensors: &[SensorInfo],
+) -> Option<f32> {
+    let source = curve.effective_source();
+    let temp = resolve_and_read(&source, sensor_cache, all_sensors)?;
+    Some(interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0))
 }
 
 fn build_aio_param(
@@ -170,6 +383,7 @@ fn build_aio_param(
     curves: &HashMap<String, FanCurve>,
     sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
     all_sensors: &[SensorInfo],
+    wireless_hold: &mut HashMap<[u8; 6], [u8; 4]>,
 ) -> [u8; AIO_PARAM_LEN] {
     let mut p = [0u8; AIO_PARAM_LEN];
 
@@ -195,13 +409,19 @@ fn build_aio_param(
     p[26] = 1;
     p[27] = cfg.theme_index.min(12);
 
-    let rpm = resolve_pump_rpm(
-        &cfg.pump_target_rpm,
-        device.fan_type,
-        curves,
-        sensor_cache,
-        all_sensors,
-    );
+    // Pump target. Unresolvable/off → hold the last commanded duty for the
+    // timer translation rather than forcing a mid-RPM default.
+    let hold_duty = wireless_hold
+        .get(&device.mac)
+        .map(|h| h[3])
+        .unwrap_or(128);
+    let rpm = match resolve_pump_rpm(&cfg.pump_target_rpm, device.fan_type, curves, sensor_cache, all_sensors) {
+        Some(rpm) => rpm,
+        None => {
+            let pct = (hold_duty as f32 / 255.0) * 100.0;
+            rpm_from_percent(pct, device.fan_type).unwrap_or(0)
+        }
+    };
     let timer = pump_rpm_to_timer(rpm, device.fan_type).unwrap_or(0);
     p[28] = (timer >> 8) as u8;
     p[29] = (timer & 0xFF) as u8;
@@ -249,31 +469,34 @@ fn resolve_and_read(
     }
 }
 
+/// RPM within the variant's envelope for a 0-100% curve output.
+fn rpm_from_percent(percent: f32, variant: WirelessFanType) -> Option<u32> {
+    let (min_rpm, max_rpm) = variant.pump_rpm_range()?;
+    let span = (max_rpm - min_rpm) as f32;
+    Some((min_rpm as f32 + (percent / 100.0) * span).round() as u32)
+}
+
 fn resolve_pump_rpm(
     speed: &FanSpeed,
     variant: WirelessFanType,
     curves: &HashMap<String, FanCurve>,
     sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
     all_sensors: &[SensorInfo],
-) -> u32 {
-    let Some((min_rpm, max_rpm)) = variant.pump_rpm_range() else {
-        return 0;
-    };
+) -> Option<u32> {
+    let (min_rpm, max_rpm) = variant.pump_rpm_range()?;
     let pct = match speed {
         FanSpeed::Constant(b) => (*b as f32 / 255.0) * 100.0,
-        FanSpeed::Curve(name) => match curves.get(name) {
-            Some(curve) => {
-                let source = curve.effective_source();
-                match resolve_and_read(&source, sensor_cache, all_sensors) {
-                    Some(temp) => interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0),
-                    None => 50.0,
-                }
+        FanSpeed::Curve(name) => {
+            let curve = curves.get(name)?;
+            let source = curve.effective_source();
+            match resolve_and_read(&source, sensor_cache, all_sensors) {
+                Some(temp) => interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0),
+                None => return None,
             }
-            None => 50.0,
-        },
+        }
     };
     let span = (max_rpm - min_rpm) as f32;
-    (min_rpm as f32 + (pct / 100.0) * span).round() as u32
+    Some((min_rpm as f32 + (pct / 100.0) * span).round() as u32)
 }
 
 fn write_argb(dst: &mut [u8], rgba: [u8; 4]) {
@@ -293,6 +516,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_speed_off_returns_none() {
+        let (mut cache, sensors) = fresh_cache();
+        let curves = HashMap::new();
+        assert!(resolve_speed(&FanSpeed::Curve("off".into()), &curves, &mut cache, &sensors).is_none());
+        assert!(resolve_speed(
+            &FanSpeed::Curve("__mb_sync__".into()),
+            &curves,
+            &mut cache,
+            &sensors
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_speed_constant() {
+        let (mut cache, sensors) = fresh_cache();
+        let curves = HashMap::new();
+        let s = resolve_speed(&FanSpeed::Constant(128), &curves, &mut cache, &sensors).unwrap();
+        assert_eq!(s.duty, 128);
+        // 128/255 ≈ 50.2%
+        assert!((s.percent - 50.2).abs() < 0.05, "got {}", s.percent);
+    }
+
+    #[test]
+    fn resolve_speed_missing_curve_returns_none() {
+        let (mut cache, sensors) = fresh_cache();
+        let curves = HashMap::new();
+        assert!(resolve_speed(&FanSpeed::Curve("nope".into()), &curves, &mut cache, &sensors).is_none());
+    }
+
+    #[test]
+    fn resolve_speed_curve_unreadable_sensor_returns_none() {
+        let (mut cache, sensors) = fresh_cache();
+        let curves: HashMap<String, FanCurve> = [(
+            "c".into(),
+            FanCurve {
+                name: "c".into(),
+                temp_source: None,
+                temp_command: "exit 1".into(),
+                curve: vec![(30.0, 30.0), (60.0, 70.0)],
+            },
+        )]
+        .into_iter()
+        .collect();
+        assert!(resolve_speed(&FanSpeed::Curve("c".into()), &curves, &mut cache, &sensors).is_none());
+    }
+
+    #[test]
     fn resolve_pump_rpm_constant_maps_linearly() {
         let (mut cache, sensors) = fresh_cache();
         let curves = HashMap::new();
@@ -302,7 +573,8 @@ mod tests {
             &curves,
             &mut cache,
             &sensors,
-        );
+        )
+        .unwrap();
         assert_eq!(rpm, 1600);
         let rpm = resolve_pump_rpm(
             &FanSpeed::Constant(255),
@@ -310,7 +582,8 @@ mod tests {
             &curves,
             &mut cache,
             &sensors,
-        );
+        )
+        .unwrap();
         assert_eq!(rpm, 2500);
         let rpm = resolve_pump_rpm(
             &FanSpeed::Constant(128),
@@ -318,7 +591,8 @@ mod tests {
             &curves,
             &mut cache,
             &sensors,
-        );
+        )
+        .unwrap();
         assert!((2048..=2054).contains(&rpm), "got {rpm}");
     }
 
@@ -332,22 +606,37 @@ mod tests {
             &curves,
             &mut cache,
             &sensors,
-        );
+        )
+        .unwrap();
         assert_eq!(rpm, 3200);
     }
 
     #[test]
-    fn resolve_pump_rpm_non_aio_returns_zero() {
+    fn resolve_pump_rpm_non_aio_returns_none() {
         let (mut cache, sensors) = fresh_cache();
         let curves = HashMap::new();
-        let rpm = resolve_pump_rpm(
+        assert!(resolve_pump_rpm(
             &FanSpeed::Constant(128),
             WirelessFanType::Slv3Led,
             &curves,
             &mut cache,
             &sensors,
-        );
-        assert_eq!(rpm, 0);
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_pump_rpm_off_returns_none() {
+        let (mut cache, sensors) = fresh_cache();
+        let curves = HashMap::new();
+        assert!(resolve_pump_rpm(
+            &FanSpeed::Curve("off".into()),
+            WirelessFanType::WaterBlock,
+            &curves,
+            &mut cache,
+            &sensors,
+        )
+        .is_none());
     }
 
     #[test]
