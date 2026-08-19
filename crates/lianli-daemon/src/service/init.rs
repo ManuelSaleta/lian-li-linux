@@ -80,9 +80,6 @@ impl ServiceManager {
     /// For each discovered AIO, ensure an AioConfig exists in the user's config.
     /// Migrates any legacy FanGroup targeting that device, then inserts defaults.
     pub(super) fn ensure_aio_defaults(&mut self) {
-        let Some(cfg) = self.config.as_mut() else {
-            return;
-        };
         let aio_device_ids: Vec<String> = self
             .wireless
             .devices()
@@ -93,6 +90,13 @@ impl ServiceManager {
         if aio_device_ids.is_empty() {
             return;
         }
+
+        // Keep the lock held across the write, IPC handlers update
+        // state.config concurrently.
+        let mut ipc_state = self.ipc.state.lock();
+        let Some(mut cfg) = ipc_state.config.clone().or_else(|| self.config.clone()) else {
+            return;
+        };
 
         let mut changed = false;
         for device_id in aio_device_ids {
@@ -111,12 +115,14 @@ impl ServiceManager {
         }
 
         if changed {
-            let snapshot = cfg.clone();
-            if let Err(e) = persistence::write_config(&self.config_path, &snapshot) {
+            if let Err(e) = persistence::write_config(&self.config_path, &cfg) {
                 warn!("Failed to persist AIO config additions: {e}");
             } else {
-                self.ipc.state.lock().config = Some(snapshot);
+                self.config = Some(cfg.clone());
+                ipc_state.config = Some(cfg);
             }
+        } else {
+            self.config = Some(cfg);
         }
     }
 
@@ -512,17 +518,18 @@ impl ServiceManager {
         }
 
         if let Some(serial) = serial {
-            if let Some(cfg) = self.config.as_mut() {
+            let mut ipc_state = self.ipc.state.lock();
+            if let Some(mut cfg) = ipc_state.config.clone().or_else(|| self.config.clone()) {
                 cfg.ene6k77
                     .entry(serial)
                     .or_default()
                     .fan_quantities
                     .insert(port, quantity);
-                let snapshot = cfg.clone();
-                if let Err(e) = persistence::write_config(&self.config_path, &snapshot) {
+                if let Err(e) = persistence::write_config(&self.config_path, &cfg) {
                     warn!("Failed to persist ENE 6K77 fan quantity: {e}");
                 } else {
-                    self.ipc.state.lock().config = Some(snapshot);
+                    self.config = Some(cfg.clone());
+                    ipc_state.config = Some(cfg);
                 }
             }
         }
@@ -590,14 +597,15 @@ impl ServiceManager {
             None
         };
         if let Some(ref rgb) = self.controllers.rgb {
+            // The state lock must be taken before the controller lock, the
+            // IPC handlers use that order and the reverse can deadlock.
+            let ipc_state = self.ipc.state.lock();
             let mut ctrl = rgb.lock();
             ctrl.set_wireless(wireless);
             ctrl.refresh_wireless_devices();
-            if let Some(ref cfg) = self.config {
-                if let Some(ref rgb_cfg) = cfg.rgb {
-                    let presets = self.ipc.state.lock().rgb_presets.clone();
-                    ctrl.apply_config(rgb_cfg, &presets);
-                }
+            if let Some(rgb_cfg) = ipc_state.config.as_ref().and_then(|c| c.rgb.clone()) {
+                let presets = ipc_state.rgb_presets.clone();
+                ctrl.apply_config(&rgb_cfg, &presets);
             }
         }
     }
@@ -609,10 +617,13 @@ impl ServiceManager {
 
     /// Apply RGB config from the current AppConfig to the RGB controller.
     pub(super) fn apply_rgb_config(&self) {
-        if let (Some(ref rgb), Some(ref cfg)) = (&self.controllers.rgb, &self.config) {
-            if let Some(ref rgb_cfg) = cfg.rgb {
-                let presets = self.ipc.state.lock().rgb_presets.clone();
-                rgb.lock().apply_config(rgb_cfg, &presets);
+        // Read from the IPC-side config, self.config only catches up on
+        // load_config and can lag behind a just-applied preset.
+        if let Some(ref rgb) = self.controllers.rgb {
+            let ipc_state = self.ipc.state.lock();
+            if let Some(rgb_cfg) = ipc_state.config.as_ref().and_then(|c| c.rgb.clone()) {
+                let presets = ipc_state.rgb_presets.clone();
+                rgb.lock().apply_config(&rgb_cfg, &presets);
             }
         }
     }
