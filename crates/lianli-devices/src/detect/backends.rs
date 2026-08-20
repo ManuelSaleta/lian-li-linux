@@ -135,7 +135,7 @@ fn open_hidraw_device(
     bus: u8,
     port_numbers: &[u8],
     usage_page: Option<u16>,
-) -> Result<hidapi::HidDevice> {
+) -> Result<(hidapi::HidDevice, Option<std::ffi::OsString>)> {
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
 
     let candidates: Vec<_> = api
@@ -155,8 +155,13 @@ fn open_hidraw_device(
             .device_list()
             .find(|info| info.vendor_id() == vid && info.product_id() == pid)
             .ok_or_else(|| anyhow::anyhow!("hidraw device {vid:04x}:{pid:04x} not found"))?;
+        let path: std::ffi::OsString = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(info.path().to_bytes()).to_os_string()
+        };
         return info
             .open_device(&api)
+            .map(|d| (d, Some(path)))
             .map_err(|e| anyhow::anyhow!("hidraw open {vid:04x}:{pid:04x}: {e}"));
     }
 
@@ -167,8 +172,13 @@ fn open_hidraw_device(
                 .find(|info| info.path() == expected.as_c_str())
             {
                 debug!("Opening hidraw by topology match for {vid:04x}:{pid:04x}");
+                let path: std::ffi::OsString = {
+                    use std::os::unix::ffi::OsStrExt;
+                    std::ffi::OsStr::from_bytes(info.path().to_bytes()).to_os_string()
+                };
                 return info
                     .open_device(&api)
+                    .map(|d| (d, Some(path)))
                     .map_err(|e| anyhow::anyhow!("hidraw open by topology: {e}"));
             }
         }
@@ -178,8 +188,13 @@ fn open_hidraw_device(
         "Opening first hidraw candidate for {vid:04x}:{pid:04x} ({} match(es))",
         candidates.len()
     );
+    let path: std::ffi::OsString = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(candidates[0].path().to_bytes()).to_os_string()
+    };
     candidates[0]
         .open_device(&api)
+        .map(|d| (d, Some(path)))
         .map_err(|e| anyhow::anyhow!("hidraw open: {e}"))
 }
 
@@ -194,8 +209,10 @@ pub fn open_shared_hid(
 ) -> Result<SharedHid> {
     match backend {
         HidBackend::Hidraw => {
-            let dev = open_hidraw_device(vid, pid, bus, port_numbers, usage_page)?;
-            Ok(Arc::new(Mutex::new(Box::new(HidrawTransport::new(dev)))))
+            let (dev, path) = open_hidraw_device(vid, pid, bus, port_numbers, usage_page)?;
+            Ok(Arc::new(Mutex::new(Box::new(HidrawTransport::new(
+                dev, path,
+            )))))
         }
         HidBackend::Rusb => {
             let pn = port_numbers.to_vec();
@@ -223,8 +240,8 @@ pub fn open_hid_transient(
 ) -> Result<Box<dyn HidTransport>> {
     match backend {
         HidBackend::Hidraw => {
-            let dev = open_hidraw_device(vid, pid, bus, port_numbers, usage_page)?;
-            Ok(Box::new(HidrawTransport::new(dev)))
+            let (dev, path) = open_hidraw_device(vid, pid, bus, port_numbers, usage_page)?;
+            Ok(Box::new(HidrawTransport::new(dev, path)))
         }
         HidBackend::Rusb => {
             let transport = RusbHid::open_by_usage(device.clone(), usage_page)?;

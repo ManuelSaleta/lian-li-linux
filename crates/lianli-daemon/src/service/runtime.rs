@@ -23,6 +23,68 @@ use tracing::{debug, info, warn};
 
 pub(super) type SharedHidLcd = Arc<Mutex<Box<dyn LcdDevice>>>;
 
+// lock per access unit only, never for the whole stream
+fn spawn_hid_h264_stream(
+    lcd: SharedHidLcd,
+    mut reader: Box<dyn std::io::Read + Send>,
+    stop: Arc<AtomicBool>,
+    fps: f32,
+) -> JoinHandle<()> {
+    use lianli_devices::hydroshift_lcd::{find_au_split, pace_frame};
+    use std::io::Read;
+    use std::time::Instant;
+
+    thread::spawn(move || {
+        let fps = {
+            let mut guard = lcd.lock();
+            guard.set_stream_fps(fps)
+        };
+        let frame_interval = Duration::from_secs_f32(1.0 / fps);
+        let mut read_buf = vec![0u8; 64 * 1024];
+        let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
+        let mut next_deadline = Instant::now() + frame_interval;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let n = match reader.read(&mut read_buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!("HID h264 stream read error: {e:#}");
+                    break;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            accum.extend_from_slice(&read_buf[..n]);
+            while let Some(split) = find_au_split(&accum) {
+                let au: Vec<u8> = accum.drain(..split).collect();
+                if au.is_empty() {
+                    continue;
+                }
+                let result = {
+                    let mut guard = lcd.lock();
+                    guard.send_h264_frame(&au)
+                };
+                if let Err(e) = result {
+                    warn!("HID h264 stream send error: {e:#}");
+                    return;
+                }
+                pace_frame(&mut next_deadline, frame_interval);
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+        }
+        if !accum.is_empty() {
+            if let Err(e) = lcd.lock().send_h264_frame(&accum) {
+                debug!("HID h264 flush: {e:#}");
+            }
+        }
+    })
+}
+
 pub(super) enum LcdBackend {
     Slv3(Slv3LcdDevice),
     WinUsb(ThreadedWinUsbSender),
@@ -87,14 +149,7 @@ impl LcdBackend {
     ) -> anyhow::Result<Option<JoinHandle<()>>> {
         match self {
             Self::HidLcd(lcd) => {
-                let lcd = Arc::clone(lcd);
-                let mut stdout = stdout;
-                let handle = thread::spawn(move || {
-                    let mut guard = lcd.lock();
-                    if let Err(e) = guard.stream_h264_reader(&mut stdout, &stop, fps) {
-                        warn!("HID h264 stream error: {e:#}");
-                    }
-                });
+                let handle = spawn_hid_h264_stream(Arc::clone(lcd), Box::new(stdout), stop, fps);
                 Ok(Some(handle))
             }
             Self::WinUsb(sender) => {
@@ -136,14 +191,7 @@ impl StreamRestarter {
     ) -> anyhow::Result<Option<JoinHandle<()>>> {
         match self {
             Self::HidLcd(lcd) => {
-                let lcd = Arc::clone(lcd);
-                let mut stdout = stdout;
-                let handle = thread::spawn(move || {
-                    let mut guard = lcd.lock();
-                    if let Err(e) = guard.stream_h264_reader(&mut stdout, &stop, fps) {
-                        warn!("HID h264 stream restart error: {e:#}");
-                    }
-                });
+                let handle = spawn_hid_h264_stream(Arc::clone(lcd), Box::new(stdout), stop, fps);
                 Ok(Some(handle))
             }
             Self::WinUsb(tx, h264_stop) => {
@@ -363,7 +411,10 @@ impl ActiveTarget {
                             if stop.load(Ordering::Relaxed) {
                                 break;
                             }
-                            match lcd.lock().check_and_recover_lcd() {
+                            let Some(mut guard) = lcd.try_lock_for(Duration::from_secs(2)) else {
+                                continue;
+                            };
+                            match guard.check_and_recover_lcd() {
                                 Ok(RecoveryAction::Recovered) => {
                                     if let Some(tx) = &recovery_tx {
                                         tx.send(DaemonEvent::RecreateMedia {
@@ -482,8 +533,19 @@ impl ActiveTarget {
 
     pub(super) fn stop(&mut self) {
         self.recovery_stop.store(true, Ordering::Relaxed);
+        // dropping media sets the renderer stop flags, which unblock stop()
+        self.media = Box::new(NoopFrameSource);
         if let Some(t) = self.recovery_thread.take() {
-            let _ = t.join();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !t.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if !t.is_finished() {
+                warn!(
+                    "LCD[{}] recovery thread did not stop in 5s — detaching it",
+                    self.index
+                );
+            }
         }
     }
 }
@@ -524,6 +586,9 @@ trait FrameSource: Send {
         false
     }
 }
+
+struct NoopFrameSource;
+impl FrameSource for NoopFrameSource {}
 
 // ─── JPEG sources ──────────────────────────────────────────────────────
 
@@ -774,7 +839,10 @@ fn stream_h264_file_to_hid(
     fps: f32,
     stop: Arc<AtomicBool>,
 ) {
-    use std::io::{Seek, SeekFrom};
+    use lianli_devices::hydroshift_lcd::{find_au_split, pace_frame};
+    use std::io::{Read, Seek, SeekFrom};
+    use std::time::Instant;
+
     let mut file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -782,16 +850,53 @@ fn stream_h264_file_to_hid(
             return;
         }
     };
-    loop {
+    let frame_interval = {
+        let mut guard = lcd.lock();
+        Duration::from_secs_f32(1.0 / guard.set_stream_fps(fps))
+    };
+    let mut read_buf = vec![0u8; 64 * 1024];
+    let mut next_deadline = Instant::now() + frame_interval;
+    'outer: loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let mut guard = lcd.lock();
-        if let Err(e) = guard.stream_h264_reader(&mut file, &stop, fps) {
-            warn!("HID h264 stream error: {e:#}");
-            break;
+        let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break 'outer;
+            }
+            let n = match file.read(&mut read_buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!("HID h264 file read error: {e:#}");
+                    break 'outer;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            accum.extend_from_slice(&read_buf[..n]);
+            while let Some(split) = find_au_split(&accum) {
+                let au: Vec<u8> = accum.drain(..split).collect();
+                if au.is_empty() {
+                    continue;
+                }
+                let result = {
+                    let mut guard = lcd.lock();
+                    guard.send_h264_frame(&au)
+                };
+                if let Err(e) = result {
+                    warn!("HID h264 stream send error: {e:#}");
+                    break 'outer;
+                }
+                pace_frame(&mut next_deadline, frame_interval);
+            }
         }
-        drop(guard);
+        if !accum.is_empty() {
+            if let Err(e) = lcd.lock().send_h264_frame(&accum) {
+                debug!("HID h264 flush: {e:#}");
+            }
+        }
         if !looping || stop.load(Ordering::Relaxed) {
             break;
         }

@@ -158,36 +158,70 @@ impl ServiceManager {
             .collect()
     }
 
+    fn wired_topology_set(&self) -> std::collections::HashSet<String> {
+        use lianli_shared::device_id::DeviceFamily;
+        fn is_wired_controller(family: DeviceFamily) -> bool {
+            lianli_shared::device_id::uses_hid(family)
+                || matches!(family, DeviceFamily::UniversalScreenLighting)
+        }
+        enumerate_devices()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter(|det| is_wired_controller(det.family))
+            .map(|det| format!("{}:{}", det.bus, det.topology_key()))
+            .collect()
+    }
+
     pub(super) fn check_wired_hotplug(&mut self) {
-        let current = self.enumerate_wired_controller_ids();
-        if current != self.registry.last_wired_ids {
-            let added = current.difference(&self.registry.last_wired_ids).count();
-            let removed = self.registry.last_wired_ids.difference(&current).count();
+        let current_ids = self.enumerate_wired_controller_ids();
+        let current_topos = self.wired_topology_set();
+        if current_topos != self.registry.last_wired_topos {
+            let added = current_topos
+                .difference(&self.registry.last_wired_topos)
+                .count();
+            let removed = self
+                .registry
+                .last_wired_topos
+                .difference(&current_topos)
+                .count();
+            let now = std::time::Instant::now();
+            const MIN_REINIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            if let Some(last) = self.registry.last_reinit {
+                if now.duration_since(last) < MIN_REINIT_INTERVAL {
+                    debug!("Wired topology changed (+{added} -{removed}) but re-init rate-limited");
+                    return;
+                }
+            }
+            self.registry.last_reinit = Some(now);
             info!("Wired device topology changed (+{added} -{removed}): re-initializing");
 
+            // stop controllers first, they hold Arcs into fan_devices
             if let Some(controller) = self.controllers.fan.take() {
+                controller.stop();
+            }
+            if let Some(controller) = self.controllers.aio.take() {
                 controller.stop();
             }
             self.registry
                 .hid_backends
-                .retain(|k, _| current.contains(k));
+                .retain(|k, _| current_ids.contains(k));
             self.registry
                 .aio_lcd_devices
-                .retain(|k, _| current.contains(k));
+                .retain(|k, _| current_ids.contains(k));
             self.registry.v2_hid_entries.clear();
             self.init_wired_devices();
             self.start_fan_control();
-            // AioController snapshots the wired device map at start; restart
-            // it so hotplug re-init is picked up.
             self.start_aio_control();
-            self.registry.last_wired_ids = current;
+            self.registry.last_wired_ids = current_ids;
+            self.registry.last_wired_topos = current_topos;
             return;
         }
 
         let pending: HashSet<String> = self
             .registry
             .failed_open_ids
-            .intersection(&current)
+            .intersection(&current_ids)
             .cloned()
             .collect();
         if pending.is_empty() || self.registry.init_retry_count >= MAX_INIT_RETRIES {
@@ -201,6 +235,9 @@ impl ServiceManager {
             MAX_INIT_RETRIES
         );
         if let Some(controller) = self.controllers.fan.take() {
+            controller.stop();
+        }
+        if let Some(controller) = self.controllers.aio.take() {
             controller.stop();
         }
         self.init_wired_devices();
@@ -248,8 +285,9 @@ impl ServiceManager {
             match Arc::try_unwrap(std::mem::take(&mut self.registry.fan_devices)) {
                 Ok(map) => map,
                 Err(arc) => {
+                    warn!("fan_devices map still shared — deferring wired re-init");
                     self.registry.fan_devices = arc;
-                    HashMap::new()
+                    return;
                 }
             };
         let mut wired_rgb: HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>> =
@@ -393,6 +431,7 @@ impl ServiceManager {
         self.registry.fan_devices = Arc::clone(&arc);
         self.init_rgb_controller_from(wired_rgb);
         self.registry.last_wired_ids = self.enumerate_wired_controller_ids();
+        self.registry.last_wired_topos = self.wired_topology_set();
 
         if failed_ids.is_empty() {
             if self.registry.init_retry_count > 0 {

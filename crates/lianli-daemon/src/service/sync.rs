@@ -189,8 +189,7 @@ impl ServiceManager {
 
     /// Update IPC telemetry and device list.
     pub(super) fn sync_ipc_telemetry(&self) {
-        let mut ipc_state = self.ipc.state.lock();
-        ipc_state.telemetry.streaming_active = !self.targets.lock().is_empty();
+        let streaming_active = !self.targets.lock().is_empty();
 
         // OpenRGB server status
         let (enabled, _) = self
@@ -199,16 +198,24 @@ impl ServiceManager {
             .and_then(|c| c.rgb.as_ref())
             .map(|rgb| (rgb.openrgb_server, rgb.openrgb_port))
             .unwrap_or((false, 6743));
-        let orgb_state = self.openrgb.state.lock();
-        ipc_state.telemetry.openrgb_status = lianli_shared::ipc::OpenRgbServerStatus {
-            enabled,
-            running: orgb_state.running,
-            port: orgb_state.port,
-            error: orgb_state.error.clone(),
+        let openrgb_status = {
+            let orgb_state = self.openrgb.state.lock();
+            lianli_shared::ipc::OpenRgbServerStatus {
+                enabled,
+                running: orgb_state.running,
+                port: orgb_state.port,
+                error: orgb_state.error.clone(),
+            }
         };
 
         // Build device list from wireless discovery
         let mut devices = Vec::new();
+
+        let mut fan_rpms: std::collections::HashMap<String, Vec<u16>> =
+            std::collections::HashMap::new();
+        let mut coolant_temps: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+
         for dev in self.wireless.devices() {
             use lianli_devices::wireless::WirelessFanType;
             use lianli_shared::device_id::DeviceFamily;
@@ -283,13 +290,10 @@ impl ServiceManager {
             if is_aio {
                 rpms.push(dev.fan_rpms[3]); // pump RPM
             }
-            ipc_state.telemetry.fan_rpms.insert(device_id.clone(), rpms);
+            fan_rpms.insert(device_id.clone(), rpms);
 
             if let Some(temp) = dev.coolant_temp_c {
-                ipc_state
-                    .telemetry
-                    .coolant_temps
-                    .insert(device_id.clone(), temp as f32);
+                coolant_temps.insert(device_id.clone(), temp as f32);
                 lianli_shared::sensors::write_coolant_temp(&device_id, temp as f32);
             }
         }
@@ -378,10 +382,7 @@ impl ServiceManager {
             // mirroring the wireless path: publish via IPC and register as a
             // fan-curve sensor source.
             if let Some(temp) = dev.poll_coolant_temp() {
-                ipc_state
-                    .telemetry
-                    .coolant_temps
-                    .insert(base_id.clone(), temp);
+                coolant_temps.insert(base_id.clone(), temp);
                 lianli_shared::sensors::write_coolant_temp(base_id, temp);
             }
             if let Ok(all_rpms) = dev.read_fan_rpm() {
@@ -412,7 +413,7 @@ impl ServiceManager {
                     } else {
                         base_id.clone()
                     };
-                    ipc_state.telemetry.fan_rpms.insert(device_id, port_rpms);
+                    fan_rpms.insert(device_id, port_rpms);
                 }
             }
         }
@@ -437,7 +438,14 @@ impl ServiceManager {
                 .cloned(),
         );
 
-        ipc_state.devices = devices;
+        {
+            let mut ipc_state = self.ipc.state.lock();
+            ipc_state.telemetry.streaming_active = streaming_active;
+            ipc_state.telemetry.openrgb_status = openrgb_status;
+            ipc_state.telemetry.fan_rpms = fan_rpms;
+            ipc_state.telemetry.coolant_temps = coolant_temps;
+            ipc_state.devices = devices;
+        }
     }
 }
 

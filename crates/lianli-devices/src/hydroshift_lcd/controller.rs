@@ -28,17 +28,10 @@ fn remap_fan_pwm_rgb(pwm: u8) -> u8 {
     (12 + scaled as u8).min(95)
 }
 
-/// Used by `stream_h264_reader` to split the pipe byte stream into complete
-/// access units (AUs).
-///
-/// Since Rust reads from a continuous pipe, we must detect AU boundaries
-/// ourselves.
-///
-/// Boundary policy: if AUD NALs (type 9) are present, they
-/// alone delimit AUs. Otherwise, primary coded picture NALs (types 1 and 5)
-/// are the boundary markers. This is determined lazily from the first
-/// boundary-eligible NAL encountered.
-pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
+/// Split an H.264 byte stream into complete access units.
+/// AUD NALs (type 9) delimit AUs when present, otherwise slice NALs
+/// (types 1 and 5) do.
+pub fn find_au_split(data: &[u8]) -> Option<usize> {
     let mut split_on_aud: Option<bool> = None;
     let mut found_first = false;
     let mut i = 0;
@@ -77,7 +70,7 @@ pub(crate) fn find_au_split(data: &[u8]) -> Option<usize> {
     None
 }
 
-fn pace_frame(next_deadline: &mut Instant, interval: Duration) {
+pub fn pace_frame(next_deadline: &mut Instant, interval: Duration) {
     let now = Instant::now();
     if now < *next_deadline {
         thread::sleep(*next_deadline - now);
@@ -932,6 +925,18 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
 
     fn try_read_firmware(&mut self) -> Result<()> {
         HydroShiftLcdController::try_read_firmware(self)
+    }
+
+    fn set_stream_fps(&mut self, fps: f32) -> f32 {
+        let fps = fps
+            .round()
+            .clamp(1.0, ScreenInfo::AIO_LCD_480.max_fps as f32);
+        self.video_fps.store(fps as u8, Ordering::Relaxed);
+        fps
+    }
+
+    fn send_h264_frame(&mut self, frame: &[u8]) -> Result<()> {
+        HydroShiftLcdController::send_h264_frame(self, frame)
     }
 
     fn stream_h264_reader(

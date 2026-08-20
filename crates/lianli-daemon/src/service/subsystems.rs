@@ -165,6 +165,8 @@ pub struct DeviceRegistry {
     pub usb_backends: HashMap<String, lianli_devices::registry::SharedUsb>,
     /// Hot-plug detection: device IDs seen at the last topology scan.
     pub last_wired_ids: HashSet<String>,
+    pub last_wired_topos: HashSet<String>,
+    pub last_reinit: Option<std::time::Instant>,
     pub failed_open_ids: HashSet<String>,
     pub init_retry_count: u32,
     /// Cached USB device list from `enumerate_devices()` — refreshed every
@@ -184,6 +186,8 @@ impl DeviceRegistry {
             hid_backends: HashMap::new(),
             usb_backends: HashMap::new(),
             last_wired_ids: HashSet::new(),
+            last_wired_topos: HashSet::new(),
+            last_reinit: None,
             failed_open_ids: HashSet::new(),
             init_retry_count: 0,
             cached_usb_devices: Vec::new(),

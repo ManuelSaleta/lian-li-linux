@@ -2643,6 +2643,7 @@ version = "0.8.6"
 dependencies = [
  "anyhow",
  "hidapi",
+ "libc",
  "rusb",
  "thiserror 2.0.20",
  "tracing",
