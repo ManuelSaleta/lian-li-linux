@@ -162,10 +162,9 @@ function setPwm(slot: number, v: number) {
             :min="0"
             :max="255"
             :step="1"
-            suffix="%"
-            @update:model-value="(v: number) => setPwm(slot - 1, Math.round((v / 255) * 255))"
+            :format="(v: number) => `${Math.round((v / 255) * 100)}%`"
+            @update:model-value="(v: number) => setPwm(slot - 1, Math.round(v))"
           />
-          <span class="pwm-pct">{{ Math.round((pwmOf(slot - 1) / 255) * 100) }}%</span>
         </div>
       </div>
     </div>
@@ -220,11 +219,6 @@ function setPwm(slot: number, v: number) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-}
-.pwm-pct {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  text-align: right;
 }
 .pwm-source-row {
   display: flex;

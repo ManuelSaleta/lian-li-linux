@@ -10,6 +10,7 @@ const props = withDefaults(
     label?: string;
     suffix?: string;
     disabled?: boolean;
+    format?: (v: number) => string;
   }>(),
   { min: 0, max: 100, step: 1 },
 );
@@ -18,6 +19,7 @@ const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const display = computed(() => {
   const v = props.modelValue;
+  if (props.format) return props.format(v);
   return props.suffix ? `${v}${props.suffix}` : String(v);
 });
 

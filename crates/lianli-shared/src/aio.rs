@@ -324,16 +324,16 @@ mod tests {
     fn pump_curve_percent_chain_matches_vendor_table() {
         // Wired pump chain: curve % → RPM in envelope → RPM→PWM table.
         let env = PumpEnvelope::HYDROSHIFT_LCD;
-        let rpm = |pct: f32| env.min_rpm as f32 + (pct / 100.0) * (env.max_rpm - env.min_rpm) as f32;
+        let rpm =
+            |pct: f32| env.min_rpm as f32 + (pct / 100.0) * (env.max_rpm - env.min_rpm) as f32;
         assert_eq!(env.rpm_to_pwm(rpm(0.0) as u16), 50);
         assert_eq!(env.rpm_to_pwm(rpm(100.0) as u16), 100);
         // Midpoint → 3000 RPM → 70% per vendor pumpRPMtoPWMConfigLookup.
         assert_eq!(env.rpm_to_pwm(rpm(50.0) as u16), 70);
 
         let rgb = PumpEnvelope::HYDROSHIFT_LCD_RGB;
-        let rpm = |pct: f32| {
-            rgb.min_rpm as f32 + (pct / 100.0) * (rgb.max_rpm - rgb.min_rpm) as f32
-        };
+        let rpm =
+            |pct: f32| rgb.min_rpm as f32 + (pct / 100.0) * (rgb.max_rpm - rgb.min_rpm) as f32;
         assert_eq!(rgb.rpm_to_pwm(rpm(0.0) as u16), 1);
         assert_eq!(rgb.rpm_to_pwm(rpm(50.0) as u16), 50);
         assert_eq!(rgb.rpm_to_pwm(rpm(100.0) as u16), 100);

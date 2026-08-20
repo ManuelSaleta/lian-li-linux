@@ -209,7 +209,9 @@ fn control_wireless(
             warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
         }
 
-        let hold = wireless_hold.entry(device.mac).or_insert([128, 128, 128, 128]);
+        let hold = wireless_hold
+            .entry(device.mac)
+            .or_insert([128, 128, 128, 128]);
         let mut fan_pwm = *hold;
         let mut any_target = false;
         for (i, slot) in aio_cfg.fan_speeds.iter().enumerate() {
@@ -261,8 +263,22 @@ fn control_wired(
             continue;
         };
 
-        apply_wired_fans(base_id, dev.as_ref(), aio_cfg, curves, sensor_cache, all_sensors);
-        apply_wired_pump(base_id, dev.as_ref(), aio_cfg, curves, sensor_cache, all_sensors);
+        apply_wired_fans(
+            base_id,
+            dev.as_ref(),
+            aio_cfg,
+            curves,
+            sensor_cache,
+            all_sensors,
+        );
+        apply_wired_pump(
+            base_id,
+            dev.as_ref(),
+            aio_cfg,
+            curves,
+            sensor_cache,
+            all_sensors,
+        );
     }
 }
 
@@ -411,11 +427,14 @@ fn build_aio_param(
 
     // Pump target. Unresolvable/off → hold the last commanded duty for the
     // timer translation rather than forcing a mid-RPM default.
-    let hold_duty = wireless_hold
-        .get(&device.mac)
-        .map(|h| h[3])
-        .unwrap_or(128);
-    let rpm = match resolve_pump_rpm(&cfg.pump_target_rpm, device.fan_type, curves, sensor_cache, all_sensors) {
+    let hold_duty = wireless_hold.get(&device.mac).map(|h| h[3]).unwrap_or(128);
+    let rpm = match resolve_pump_rpm(
+        &cfg.pump_target_rpm,
+        device.fan_type,
+        curves,
+        sensor_cache,
+        all_sensors,
+    ) {
         Some(rpm) => rpm,
         None => {
             let pct = (hold_duty as f32 / 255.0) * 100.0;
@@ -519,7 +538,13 @@ mod tests {
     fn resolve_speed_off_returns_none() {
         let (mut cache, sensors) = fresh_cache();
         let curves = HashMap::new();
-        assert!(resolve_speed(&FanSpeed::Curve("off".into()), &curves, &mut cache, &sensors).is_none());
+        assert!(resolve_speed(
+            &FanSpeed::Curve("off".into()),
+            &curves,
+            &mut cache,
+            &sensors
+        )
+        .is_none());
         assert!(resolve_speed(
             &FanSpeed::Curve("__mb_sync__".into()),
             &curves,
@@ -543,7 +568,13 @@ mod tests {
     fn resolve_speed_missing_curve_returns_none() {
         let (mut cache, sensors) = fresh_cache();
         let curves = HashMap::new();
-        assert!(resolve_speed(&FanSpeed::Curve("nope".into()), &curves, &mut cache, &sensors).is_none());
+        assert!(resolve_speed(
+            &FanSpeed::Curve("nope".into()),
+            &curves,
+            &mut cache,
+            &sensors
+        )
+        .is_none());
     }
 
     #[test]
@@ -560,7 +591,9 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        assert!(resolve_speed(&FanSpeed::Curve("c".into()), &curves, &mut cache, &sensors).is_none());
+        assert!(
+            resolve_speed(&FanSpeed::Curve("c".into()), &curves, &mut cache, &sensors).is_none()
+        );
     }
 
     #[test]

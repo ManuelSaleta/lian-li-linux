@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useDialog } from "naive-ui";
 import { Plus, Trash2 } from "lucide-vue-next";
 import type { SensorDescriptor, SensorRange } from "@/types";
@@ -13,6 +13,23 @@ const dialog = useDialog();
 const { load: loadFonts, fontOptions } = useFonts();
 
 onMounted(() => void loadFonts());
+
+const localLabel = ref(props.sensor.label);
+const localUnit = ref(props.sensor.unit);
+watch(
+  () => [props.sensor.label, props.sensor.unit] as const,
+  ([label, unit]) => {
+    if (label !== localLabel.value) localLabel.value = label;
+    if (unit !== localUnit.value) localUnit.value = unit;
+  },
+);
+
+function commitLabel() {
+  if (localLabel.value !== props.sensor.label) patch({ label: localLabel.value });
+}
+function commitUnit() {
+  if (localUnit.value !== props.sensor.unit) patch({ unit: localUnit.value });
+}
 
 function patch(p: Partial<SensorDescriptor>) {
   Object.assign(props.sensor, p);
@@ -51,11 +68,11 @@ function removeRange(i: number) {
     <div class="grid">
       <div class="field">
         <label class="muted">Label</label>
-        <n-input :value="sensor.label" @blur="patch({ label: ($event.target as HTMLInputElement).value })" size="small" />
+        <n-input v-model:value="localLabel" @blur="commitLabel" size="small" />
       </div>
       <div class="field">
         <label class="muted">Unit</label>
-        <n-input :value="sensor.unit" @blur="patch({ unit: ($event.target as HTMLInputElement).value })" size="small" />
+        <n-input v-model:value="localUnit" @blur="commitUnit" size="small" />
       </div>
       <div class="field">
         <label class="muted">Decimal places</label>
