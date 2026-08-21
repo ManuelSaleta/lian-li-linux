@@ -962,8 +962,7 @@ fn stream_h264_file_to_hid(
             break;
         }
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
-        let mut aus_sent = 0usize;
-        let mut clean_eof = false;
+        let mut sent_any = false;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break 'outer;
@@ -976,7 +975,6 @@ fn stream_h264_file_to_hid(
                 }
             };
             if n == 0 {
-                clean_eof = true;
                 break;
             }
             accum.extend_from_slice(&read_buf[..n]);
@@ -1003,22 +1001,24 @@ fn stream_h264_file_to_hid(
                     warn!("HID h264 stream send error: {e:#}");
                     break 'outer;
                 }
-                aus_sent += 1;
+                sent_any = true;
                 pace_frame(&mut next_deadline, frame_interval);
             }
         }
-        // residual flush only on clean EOF, paced like a regular AU
-        if clean_eof && !stop.load(Ordering::Relaxed) && !accum.is_empty() {
+        // reached only via the EOF break (every other exit is break 'outer),
+        // residual flush is paced like a regular AU
+        if !stop.load(Ordering::Relaxed) && !accum.is_empty() {
             pace_frame(&mut next_deadline, frame_interval);
-            if let Err(e) = lcd.lock().send_h264_frame(&accum) {
-                debug!("HID h264 flush: {e:#}");
+            match lcd.lock().send_h264_frame(&accum) {
+                Ok(()) => sent_any = true,
+                Err(e) => debug!("HID h264 flush: {e:#}"),
             }
         }
         if !looping || stop.load(Ordering::Relaxed) {
             break;
         }
         // an empty or boundary-less file would otherwise loop forever
-        if aus_sent == 0 {
+        if !sent_any {
             warn!("HID h264 file produced no complete access units, stopping");
             break;
         }
