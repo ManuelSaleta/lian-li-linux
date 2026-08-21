@@ -765,10 +765,6 @@ impl FanDevice for HydroShiftLcdController {
             .lock()
             .as_ref()
             .filter(|hs| {
-                // Vendor parity: L-Connect 3 reads TemperatureInteger while
-                // ignoring TemperatureIsValid entirely — some firmwares report
-                // a plausible coolant value with the flag clear. Trust the
-                // integer whenever it is populated.
                 hs.coolant_temp > 0.0
                     // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
                     && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)

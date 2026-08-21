@@ -79,7 +79,7 @@ fn write_fd_timed(
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
-            Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => {
+            Some(libc::EAGAIN) => {
                 let Some(remain) = deadline.checked_duration_since(std::time::Instant::now())
                 else {
                     return Err(TransportError::Write(format!(

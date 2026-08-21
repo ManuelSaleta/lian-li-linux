@@ -13,7 +13,14 @@ pub fn enumerate_devices() -> Result<Vec<DetectedDevice>> {
     for device in usb_devices.iter() {
         let desc = match device.device_descriptor() {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                warn!(
+                    "USB device at bus {} addr {}: descriptor read failed ({e}), skipping",
+                    device.bus_number(),
+                    device.address()
+                );
+                continue;
+            }
         };
 
         let vid = desc.vendor_id();
