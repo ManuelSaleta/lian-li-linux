@@ -46,6 +46,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::FrameFinished => "FrameFinished",
         DaemonEvent::RecreateMedia { .. } => "RecreateMedia",
         DaemonEvent::ResyncWirelessRgb => "ResyncWirelessRgb",
+        DaemonEvent::LcdInitComplete { .. } => "LcdInitComplete",
         DaemonEvent::SystemResumed => "SystemResumed",
         DaemonEvent::RebootWirelessLcd { .. } => "RebootWirelessLcd",
         DaemonEvent::DisableLc217Wifi { .. } => "DisableLc217Wifi",
@@ -89,18 +90,46 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     USBCheck,
     DevicePoll,
-    DisplaySwitch { device_id: String }, // LCD→Desktop. Handled by main event loop.
-    DisplaySwitchToLcd { device_id: String, pid: u16 }, // Desktop→LCD. Handled by main event loop.
-    Bind { mac_address: String }, // MAC address pending wireless device bind. Handled by main event loop.
-    Unbind { mac_address: String }, // MAC address pending wireless device unbind. Handled by main event loop.
-    SetEne6k77FanQuantity { device_id: String, quantity: u8 },
+    DisplaySwitch {
+        device_id: String,
+    }, // LCD→Desktop. Handled by main event loop.
+    DisplaySwitchToLcd {
+        device_id: String,
+        pid: u16,
+    }, // Desktop→LCD. Handled by main event loop.
+    Bind {
+        mac_address: String,
+    }, // MAC address pending wireless device bind. Handled by main event loop.
+    Unbind {
+        mac_address: String,
+    }, // MAC address pending wireless device unbind. Handled by main event loop.
+    SetEne6k77FanQuantity {
+        device_id: String,
+        quantity: u8,
+    },
     FrameFinished,
-    RecreateMedia { target_index: usize },
+    RecreateMedia {
+        target_index: usize,
+        device_id: String,
+    },
     ResyncWirelessRgb,
+    /// Background LCD init finished; the target is rebuilt so the recovery
+    /// thread starts with firmware state now known.
+    LcdInitComplete {
+        device_id: String,
+    },
     SystemResumed,
-    RebootWirelessLcd { mac: [u8; 6] },
-    DisableLc217Wifi { mac: [u8; 6], disable: bool },
-    SetLcdBrightness { device_id: String, brightness: u8 },
+    RebootWirelessLcd {
+        mac: [u8; 6],
+    },
+    DisableLc217Wifi {
+        mac: [u8; 6],
+        disable: bool,
+    },
+    SetLcdBrightness {
+        device_id: String,
+        brightness: u8,
+    },
     BindAll,
     UnbindAll,
     Shutdown, // SIGINT/SIGTERM received, exit the event loop cleanly
@@ -405,22 +434,25 @@ impl ServiceManager {
                                 target.consecutive_errors += 1;
                                 if target.consecutive_errors >= 3 {
                                     warn!("LCD[{id}] USB error (3/3): {err}");
-                                    to_recreate.push(id);
+                                    to_recreate.push((id, target.device_identity.clone()));
                                 }
                             }
                             Err(runtime::SendError::Other(err)) => {
                                 warn!("LCD[{id}] media error: {err}");
-                                to_recreate.push(id);
+                                to_recreate.push((id, target.device_identity.clone()));
                             }
                         }
                     }
-                    for id in &to_recreate {
-                        targets.remove(id);
+                    for &(id, _) in &to_recreate {
+                        targets.remove(&id);
                     }
                 }
-                for id in to_recreate {
+                for (id, device_id) in to_recreate {
                     stream_main_tx
-                        .send(DaemonEvent::RecreateMedia { target_index: id })
+                        .send(DaemonEvent::RecreateMedia {
+                            target_index: id,
+                            device_id,
+                        })
                         .ok();
                 }
                 thread::sleep(Duration::from_millis(1));
@@ -589,8 +621,20 @@ impl ServiceManager {
                         }
                     }
                 }
-                DaemonEvent::RecreateMedia { target_index } => {
-                    if let Some(asset) = self.media_assets.get(&target_index).cloned() {
+                DaemonEvent::RecreateMedia {
+                    target_index,
+                    device_id,
+                } => {
+                    // ignore stale events from a detached recovery thread
+                    // whose target slot has since been reused
+                    let matches_current = self
+                        .targets
+                        .lock()
+                        .get(&target_index)
+                        .is_some_and(|t| t.device_identity == device_id);
+                    if !matches_current {
+                        debug!("Ignoring stale RecreateMedia for LCD[{device_id}]");
+                    } else if let Some(asset) = self.media_assets.get(&target_index).cloned() {
                         if let Some(target) = self.targets.lock().get_mut(&target_index) {
                             info!(
                                 "[devices] LCD[{}] recreating media after recovery",
@@ -598,6 +642,21 @@ impl ServiceManager {
                             );
                             target.swap_media(asset, target.custom_h264, self.tx.clone());
                         }
+                    }
+                }
+                DaemonEvent::LcdInitComplete { device_id } => {
+                    // rebuild the target so the recovery thread is created
+                    // with firmware state now recorded
+                    let mut targets = self.targets.lock();
+                    if let Some((idx, _)) = targets
+                        .iter()
+                        .find(|(_, t)| t.device_identity == device_id)
+                        .map(|(i, t)| (*i, t.device_identity.clone()))
+                    {
+                        let (_, mut target) = targets.remove_entry(&idx).unwrap();
+                        target.stop();
+                        drop(targets);
+                        info!("[devices] LCD[{device_id}] init complete, rebuilding target");
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {

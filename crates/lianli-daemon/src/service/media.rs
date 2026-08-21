@@ -383,6 +383,7 @@ impl ServiceManager {
                                 let hid_init = std::sync::Arc::clone(hid);
                                 let enable_512 = device_cfg.aio_512_frame_for(candidate.family);
                                 let device_id = candidate.device_id.clone();
+                                let init_tx = self.tx.clone();
                                 std::thread::Builder::new()
                                     .name(format!("lcd-init-{device_id}"))
                                     .spawn(move || {
@@ -391,6 +392,11 @@ impl ServiceManager {
                                             warn!("AIO LCD init failed for {device_id}: {e:#}");
                                         }
                                         guard.set_use_c_command(enable_512);
+                                        drop(guard);
+                                        if let Some(tx) = init_tx {
+                                            tx.send(DaemonEvent::LcdInitComplete { device_id })
+                                                .ok();
+                                        }
                                     })
                                     .ok();
                                 self.aio_lcd_firmware

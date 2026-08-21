@@ -143,39 +143,35 @@ impl ServiceManager {
         }
     }
 
-    pub(super) fn enumerate_wired_controller_ids(&self) -> std::collections::HashSet<String> {
+    /// One enumeration snapshot with the derived id and topology sets.
+    /// Callers must treat `Err` as "poll skipped", never as "no devices".
+    fn snapshot_wired(&self) -> Result<(HashSet<String>, HashSet<String>), anyhow::Error> {
         use lianli_shared::device_id::DeviceFamily;
         fn is_wired_controller(family: DeviceFamily) -> bool {
             lianli_shared::device_id::uses_hid(family)
                 || matches!(family, DeviceFamily::UniversalScreenLighting)
         }
-        enumerate_devices()
-            .ok()
-            .into_iter()
-            .flatten()
+        let usb_devs = enumerate_devices()?;
+        let mut ids = HashSet::new();
+        let mut topos = HashSet::new();
+        for det in usb_devs
+            .iter()
             .filter(|det| is_wired_controller(det.family))
-            .map(|det| Self::rusb_device_id(&det))
-            .collect()
-    }
-
-    fn wired_topology_set(&self) -> std::collections::HashSet<String> {
-        use lianli_shared::device_id::DeviceFamily;
-        fn is_wired_controller(family: DeviceFamily) -> bool {
-            lianli_shared::device_id::uses_hid(family)
-                || matches!(family, DeviceFamily::UniversalScreenLighting)
+        {
+            ids.insert(Self::rusb_device_id(det));
+            topos.insert(format!("{}:{}", det.bus, det.topology_key()));
         }
-        enumerate_devices()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter(|det| is_wired_controller(det.family))
-            .map(|det| format!("{}:{}", det.bus, det.topology_key()))
-            .collect()
+        Ok((ids, topos))
     }
 
     pub(super) fn check_wired_hotplug(&mut self) {
-        let current_ids = self.enumerate_wired_controller_ids();
-        let current_topos = self.wired_topology_set();
+        let (current_ids, current_topos) = match self.snapshot_wired() {
+            Ok(sets) => sets,
+            Err(e) => {
+                warn!("Wired enumeration failed, skipping hotplug poll: {e}");
+                return;
+            }
+        };
         if current_topos != self.registry.last_wired_topos {
             let added = current_topos
                 .difference(&self.registry.last_wired_topos)
@@ -207,14 +203,15 @@ impl ServiceManager {
                 .hid_backends
                 .retain(|k, _| current_ids.contains(k));
             self.registry
+                .usb_backends
+                .retain(|k, _| current_ids.contains(k));
+            self.registry
                 .aio_lcd_devices
                 .retain(|k, _| current_ids.contains(k));
             self.registry.v2_hid_entries.clear();
             self.init_wired_devices();
             self.start_fan_control();
             self.start_aio_control();
-            self.registry.last_wired_ids = current_ids;
-            self.registry.last_wired_topos = current_topos;
             return;
         }
 
@@ -272,7 +269,11 @@ impl ServiceManager {
     /// with a timeout so that one unresponsive controller cannot block the
     /// rest of the daemon. Devices that time out are skipped and will be
     /// retried by the hotplug poller.
-    pub(super) fn init_wired_devices(&mut self) {
+    ///
+    /// Returns `false` when the rebuild was deferred or enumeration failed,
+    /// in which case the topology baseline is left untouched so a later
+    /// poll retries.
+    pub(super) fn init_wired_devices(&mut self) -> bool {
         let already_opened: HashSet<String> = self
             .registry
             .hid_backends
@@ -287,7 +288,7 @@ impl ServiceManager {
                 Err(arc) => {
                     warn!("fan_devices map still shared — deferring wired re-init");
                     self.registry.fan_devices = arc;
-                    return;
+                    return false;
                 }
             };
         let mut wired_rgb: HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>> =
@@ -299,7 +300,7 @@ impl ServiceManager {
                 warn!("Failed to enumerate USB devices: {err}");
                 self.registry.fan_devices = Arc::new(fan_devices);
                 self.init_rgb_controller_from(wired_rgb);
-                return;
+                return false;
             }
         };
 
@@ -430,8 +431,13 @@ impl ServiceManager {
         let arc = Arc::new(fan_devices);
         self.registry.fan_devices = Arc::clone(&arc);
         self.init_rgb_controller_from(wired_rgb);
-        self.registry.last_wired_ids = self.enumerate_wired_controller_ids();
-        self.registry.last_wired_topos = self.wired_topology_set();
+        match self.snapshot_wired() {
+            Ok((ids, topos)) => {
+                self.registry.last_wired_ids = ids;
+                self.registry.last_wired_topos = topos;
+            }
+            Err(e) => warn!("Post-init enumeration failed, keeping previous baseline: {e}"),
+        }
 
         if failed_ids.is_empty() {
             if self.registry.init_retry_count > 0 {
@@ -448,6 +454,7 @@ impl ServiceManager {
             );
         }
         self.registry.failed_open_ids = failed_ids;
+        true
     }
 
     /// Dispatch an [`registry::OpenedDevice`] into the fan / RGB / AIO

@@ -24,6 +24,10 @@ use tracing::{debug, info, warn};
 pub(super) type SharedHidLcd = Arc<Mutex<Box<dyn LcdDevice>>>;
 
 // lock per access unit only, never for the whole stream
+// no sane access unit comes close; malformed streams without a second
+// boundary would otherwise grow `accum` without limit
+const MAX_AU_BYTES: usize = 4 * 1024 * 1024;
+
 fn spawn_hid_h264_stream(
     lcd: SharedHidLcd,
     mut reader: Box<dyn std::io::Read + Send>,
@@ -58,6 +62,13 @@ fn spawn_hid_h264_stream(
                 break;
             }
             accum.extend_from_slice(&read_buf[..n]);
+            if accum.len() > MAX_AU_BYTES {
+                warn!(
+                    "HID h264 stream: no AU boundary within {} bytes, aborting",
+                    MAX_AU_BYTES
+                );
+                return;
+            }
             while let Some(split) = find_au_split(&accum) {
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if au.is_empty() {
@@ -398,12 +409,18 @@ impl ActiveTarget {
         let recovery_stop = Arc::new(AtomicBool::new(false));
         let recovery_thread = match &lcd {
             LcdBackend::HidLcd(d) => {
-                if !d.lock().supports_c_command() {
+                // bounded: the init worker holds this mutex across the 10s
+                // settle on some paths
+                let supports = d
+                    .try_lock_for(Duration::from_millis(200))
+                    .is_some_and(|guard| guard.supports_c_command());
+                if !supports {
                     None
                 } else {
                     let lcd = Arc::clone(d);
                     let stop = Arc::clone(&recovery_stop);
                     let recovery_tx = tx.clone();
+                    let device_id = device_identity.clone();
                     Some(thread::spawn(move || {
                         use lianli_devices::traits::RecoveryAction;
                         while !stop.load(Ordering::Relaxed) {
@@ -417,10 +434,13 @@ impl ActiveTarget {
                             match guard.check_and_recover_lcd() {
                                 Ok(RecoveryAction::Recovered) => {
                                     if let Some(tx) = &recovery_tx {
-                                        tx.send(DaemonEvent::RecreateMedia {
-                                            target_index: index,
-                                        })
-                                        .ok();
+                                        if !stop.load(Ordering::Relaxed) {
+                                            tx.send(DaemonEvent::RecreateMedia {
+                                                target_index: index,
+                                                device_id: device_id.clone(),
+                                            })
+                                            .ok();
+                                        }
                                     }
                                 }
                                 Ok(RecoveryAction::NoChange) => {}
@@ -876,6 +896,13 @@ fn stream_h264_file_to_hid(
                 break;
             }
             accum.extend_from_slice(&read_buf[..n]);
+            if accum.len() > MAX_AU_BYTES {
+                warn!(
+                    "HID h264 file: no AU boundary within {} bytes, aborting",
+                    MAX_AU_BYTES
+                );
+                break 'outer;
+            }
             while let Some(split) = find_au_split(&accum) {
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if au.is_empty() {
