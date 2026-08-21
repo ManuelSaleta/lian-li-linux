@@ -335,7 +335,7 @@ pub(super) struct AsyncCustomH264Renderer {
     stop_flag: Arc<AtomicBool>,
     _encoder: Arc<Mutex<LiveH264Encoder>>,
     _thread: Option<JoinHandle<()>>,
-    _stream_thread: Option<JoinHandle<()>>,
+    _stream_thread: Option<(JoinHandle<()>, Arc<AtomicBool>)>,
 }
 
 impl AsyncCustomH264Renderer {
@@ -356,6 +356,7 @@ impl AsyncCustomH264Renderer {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
+        let stream_halt = stream_thread.as_ref().map(|(_, halt)| Arc::clone(halt));
         let stop_clone = Arc::clone(&stop_flag);
         let encoder = Arc::new(Mutex::new(encoder));
         let encoder_clone = Arc::clone(&encoder);
@@ -363,7 +364,7 @@ impl AsyncCustomH264Renderer {
             Duration::from_secs_f32(1.0 / fps.max(1.0)).max(Duration::from_millis(16));
 
         let restarter = lcd
-            .stream_restarter()
+            .stream_restarter(stream_halt)
             .ok_or_else(|| anyhow::anyhow!("h264 streaming not supported on this backend"))?;
         let screen_clone = *screen;
 
@@ -438,7 +439,7 @@ pub(super) struct AsyncSensorH264Renderer {
     stop_flag: Arc<AtomicBool>,
     _encoder: Arc<Mutex<LiveH264Encoder>>,
     _thread: Option<JoinHandle<()>>,
-    _stream_thread: Option<JoinHandle<()>>,
+    _stream_thread: Option<(JoinHandle<()>, Arc<AtomicBool>)>,
 }
 
 impl AsyncSensorH264Renderer {
@@ -464,6 +465,7 @@ impl AsyncSensorH264Renderer {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
+        let stream_halt = stream_thread.as_ref().map(|(_, halt)| Arc::clone(halt));
         let stop_clone = Arc::clone(&stop_flag);
         let encoder = Arc::new(Mutex::new(encoder));
         let encoder_clone = Arc::clone(&encoder);
@@ -475,7 +477,7 @@ impl AsyncSensorH264Renderer {
         }
 
         let restarter = lcd
-            .stream_restarter()
+            .stream_restarter(stream_halt)
             .ok_or_else(|| anyhow::anyhow!("h264 streaming not supported on this backend"))?;
         let screen_clone = *screen;
 
