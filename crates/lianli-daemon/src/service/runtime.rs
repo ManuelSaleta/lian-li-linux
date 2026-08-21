@@ -946,6 +946,9 @@ fn stream_h264_file_to_hid(
                 break 'outer;
             }
             while let Some(split) = find_au_split(&accum) {
+                if stop.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if au.is_empty() {
                     continue;
