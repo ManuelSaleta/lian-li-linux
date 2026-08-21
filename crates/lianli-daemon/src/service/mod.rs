@@ -645,18 +645,16 @@ impl ServiceManager {
                     }
                 }
                 DaemonEvent::LcdInitComplete { device_id } => {
-                    // rebuild the target so the recovery thread is created
-                    // with firmware state now recorded
+                    // firmware state is now recorded by the init worker;
+                    // start the recovery thread if the target was created
+                    // before init finished. Idempotent, no teardown.
+                    let tx = self.tx.clone();
                     let mut targets = self.targets.lock();
-                    if let Some((idx, _)) = targets
-                        .iter()
+                    if let Some((_, target)) = targets
+                        .iter_mut()
                         .find(|(_, t)| t.device_identity == device_id)
-                        .map(|(i, t)| (*i, t.device_identity.clone()))
                     {
-                        let (_, mut target) = targets.remove_entry(&idx).unwrap();
-                        target.stop();
-                        drop(targets);
-                        info!("[devices] LCD[{device_id}] init complete, rebuilding target");
+                        target.maybe_start_recovery(tx);
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {

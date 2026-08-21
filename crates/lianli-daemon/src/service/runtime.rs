@@ -394,6 +394,44 @@ pub(crate) struct ActiveTarget {
     recovery_thread: Option<JoinHandle<()>>,
 }
 
+fn spawn_recovery_thread(
+    lcd: SharedHidLcd,
+    stop: Arc<AtomicBool>,
+    index: usize,
+    device_id: String,
+    tx: Option<Sender<DaemonEvent>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        use lianli_devices::traits::RecoveryAction;
+        while !stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(2));
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Some(mut guard) = lcd.try_lock_for(Duration::from_secs(2)) else {
+                continue;
+            };
+            match guard.check_and_recover_lcd() {
+                Ok(RecoveryAction::Recovered) => {
+                    if let Some(tx) = &tx {
+                        if !stop.load(Ordering::Relaxed) {
+                            tx.send(DaemonEvent::RecreateMedia {
+                                target_index: index,
+                                device_id: device_id.clone(),
+                            })
+                            .ok();
+                        }
+                    }
+                }
+                Ok(RecoveryAction::NoChange) => {}
+                Err(e) => {
+                    debug!("LCD[{index}] health check error: {e:#}");
+                }
+            }
+        }
+    })
+}
+
 impl ActiveTarget {
     pub(super) fn new(
         index: usize,
@@ -414,42 +452,16 @@ impl ActiveTarget {
                 let supports = d
                     .try_lock_for(Duration::from_millis(200))
                     .is_some_and(|guard| guard.supports_c_command());
-                if !supports {
-                    None
+                if supports {
+                    Some(spawn_recovery_thread(
+                        Arc::clone(d),
+                        Arc::clone(&recovery_stop),
+                        index,
+                        device_identity.clone(),
+                        tx.clone(),
+                    ))
                 } else {
-                    let lcd = Arc::clone(d);
-                    let stop = Arc::clone(&recovery_stop);
-                    let recovery_tx = tx.clone();
-                    let device_id = device_identity.clone();
-                    Some(thread::spawn(move || {
-                        use lianli_devices::traits::RecoveryAction;
-                        while !stop.load(Ordering::Relaxed) {
-                            thread::sleep(Duration::from_secs(2));
-                            if stop.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            let Some(mut guard) = lcd.try_lock_for(Duration::from_secs(2)) else {
-                                continue;
-                            };
-                            match guard.check_and_recover_lcd() {
-                                Ok(RecoveryAction::Recovered) => {
-                                    if let Some(tx) = &recovery_tx {
-                                        if !stop.load(Ordering::Relaxed) {
-                                            tx.send(DaemonEvent::RecreateMedia {
-                                                target_index: index,
-                                                device_id: device_id.clone(),
-                                            })
-                                            .ok();
-                                        }
-                                    }
-                                }
-                                Ok(RecoveryAction::NoChange) => {}
-                                Err(e) => {
-                                    debug!("LCD[{index}] health check error: {e:#}");
-                                }
-                            }
-                        }
-                    }))
+                    None
                 }
             }
             _ => None,
@@ -468,6 +480,36 @@ impl ActiveTarget {
             recovery_stop,
             recovery_thread,
         }
+    }
+
+    /// Start the recovery thread if it is missing and the device now
+    /// reports c-command support. Called from `new` (firmware may already
+    /// be known) and after `LcdInitComplete` (firmware recorded by the
+    /// init worker after the target was created).
+    pub(super) fn maybe_start_recovery(&mut self, tx: Option<Sender<DaemonEvent>>) {
+        if self.recovery_thread.is_some() {
+            return;
+        }
+        let LcdBackend::HidLcd(d) = &self.lcd else {
+            return;
+        };
+        let supports = d
+            .try_lock_for(Duration::from_millis(200))
+            .is_some_and(|guard| guard.supports_c_command());
+        if !supports {
+            return;
+        }
+        info!(
+            "[devices] LCD[{}] starting recovery thread after init",
+            self.device_identity
+        );
+        self.recovery_thread = Some(spawn_recovery_thread(
+            Arc::clone(d),
+            Arc::clone(&self.recovery_stop),
+            self.index,
+            self.device_identity.clone(),
+            tx,
+        ));
     }
 
     pub(super) fn matches(&self, identity: &str, key: &ConfigKey) -> bool {
