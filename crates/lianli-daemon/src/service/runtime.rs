@@ -99,6 +99,7 @@ fn spawn_hid_h264_stream(
             }
         }
         if clean_eof && !halted() && !accum.is_empty() {
+            pace_frame(&mut next_deadline, frame_interval);
             if let Err(e) = lcd.lock().send_h264_frame(&accum) {
                 debug!("HID h264 flush: {e:#}");
             }
@@ -168,11 +169,12 @@ impl LcdBackend {
         stdout: ChildStdout,
         stop: Arc<AtomicBool>,
         fps: f32,
-    ) -> anyhow::Result<Option<(JoinHandle<()>, Arc<AtomicBool>)>> {
+    ) -> anyhow::Result<Option<HidStreamWorker>> {
         match self {
             Self::HidLcd(lcd) => {
-                let spawned = spawn_hid_h264_stream(Arc::clone(lcd), Box::new(stdout), stop, fps);
-                Ok(Some(spawned))
+                let (handle, halt) =
+                    spawn_hid_h264_stream(Arc::clone(lcd), Box::new(stdout), stop, fps);
+                Ok(Some(HidStreamWorker { handle, halt }))
             }
             Self::WinUsb(sender) => {
                 sender.stream_h264_reader(stdout, fps)?;
@@ -182,18 +184,16 @@ impl LcdBackend {
         }
     }
 
-    /// Create a restart-capable handle that can be moved into a render thread
-    /// to start a new h264 stream after encoder failure. `initial_halt` is
-    /// the halt flag of the worker started by `start_h264_stream`, so the
-    /// first restart can stop it.
+    /// Restart-capable handle for render threads; takes the initial worker
+    /// so the first restart can stop it.
     pub(super) fn stream_restarter(
         &self,
-        initial_halt: Option<Arc<AtomicBool>>,
+        initial: Option<HidStreamWorker>,
     ) -> Option<StreamRestarter> {
         match self {
             Self::HidLcd(lcd) => Some(StreamRestarter::HidLcd(
                 Arc::clone(lcd),
-                Mutex::new(initial_halt),
+                Mutex::new(initial),
             )),
             Self::WinUsb(sender) => Some(StreamRestarter::WinUsb(
                 sender.tx.clone(),
@@ -204,37 +204,56 @@ impl LcdBackend {
     }
 }
 
+pub(super) struct HidStreamWorker {
+    handle: JoinHandle<()>,
+    halt: Arc<AtomicBool>,
+}
+
+impl HidStreamWorker {
+    /// The worker may be parked reading an encoder stdout that only EOFs
+    /// once the caller replaces the encoder, so join is bounded.
+    fn stop(&self, timeout: Duration) {
+        self.halt.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + timeout;
+        while !self.handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        if !self.handle.is_finished() {
+            debug!("h264 stream worker did not stop within {timeout:?}, detaching");
+        }
+    }
+}
+
 /// Cloneable handle for restarting an h264 stream from inside a render thread.
 pub(super) enum StreamRestarter {
-    HidLcd(SharedHidLcd, Mutex<Option<Arc<AtomicBool>>>),
+    HidLcd(SharedHidLcd, Mutex<Option<HidStreamWorker>>),
     WinUsb(std::sync::mpsc::SyncSender<LcdThreadMsg>, Arc<AtomicBool>),
 }
 
 impl StreamRestarter {
-    /// Start a new h264 stream reading from the given stdout. The old stream
-    /// (if any) is signalled to stop first.
+    /// Start a new h264 stream reading from the given stdout. The old
+    /// stream is halted and joined (bounded) first.
     pub(super) fn start_stream(
         &self,
         stdout: ChildStdout,
         stop: Arc<AtomicBool>,
         fps: f32,
-    ) -> anyhow::Result<Option<JoinHandle<()>>> {
+    ) -> anyhow::Result<()> {
         match self {
             Self::HidLcd(lcd, current) => {
                 let mut current = current.lock();
                 if let Some(old) = current.take() {
-                    old.store(true, Ordering::Relaxed);
+                    old.stop(Duration::from_secs(1));
                 }
                 let (handle, halt) =
                     spawn_hid_h264_stream(Arc::clone(lcd), Box::new(stdout), stop, fps);
-                *current = Some(halt);
-                Ok(Some(handle))
+                *current = Some(HidStreamWorker { handle, halt });
+                Ok(())
             }
             Self::WinUsb(tx, h264_stop) => {
                 h264_stop.store(true, Ordering::Relaxed);
                 tx.send(LcdThreadMsg::StreamH264Reader(stdout, fps))
-                    .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))?;
-                Ok(None)
+                    .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))
             }
         }
     }
@@ -957,6 +976,10 @@ fn stream_h264_file_to_hid(
     };
     let mut read_buf = vec![0u8; 64 * 1024];
     let mut next_deadline = Instant::now() + frame_interval;
+    // a single-AU file never yields a split boundary, its only frame rides
+    // the EOF flush, allow it exactly one looping pass
+    let mut first_pass = true;
+    let mut saw_boundary = false;
     'outer: loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -1001,6 +1024,7 @@ fn stream_h264_file_to_hid(
                     warn!("HID h264 stream send error: {e:#}");
                     break 'outer;
                 }
+                saw_boundary = true;
                 sent_any = true;
                 pace_frame(&mut next_deadline, frame_interval);
             }
@@ -1017,11 +1041,13 @@ fn stream_h264_file_to_hid(
         if !looping || stop.load(Ordering::Relaxed) {
             break;
         }
-        // an empty or boundary-less file would otherwise loop forever
-        if !sent_any {
+        // only loop when real AU boundaries were found: a boundary-less
+        // file's flush would otherwise re-send identical data forever
+        if !sent_any || (first_pass && !saw_boundary) {
             warn!("HID h264 file produced no complete access units, stopping");
             break;
         }
+        first_pass = false;
         if let Err(e) = file.seek(SeekFrom::Start(0)) {
             warn!("HID h264 file seek failed: {e:#}");
             break;
