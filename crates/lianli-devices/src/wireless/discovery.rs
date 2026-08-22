@@ -1,6 +1,6 @@
 use super::transport::with_transport_recovery;
 use super::{WirelessFanType, RX_IDS, USB_CMD_SEND_RF};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use lianli_transport::usb::{RusbBulk, USB_TIMEOUT};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -324,14 +324,15 @@ pub(super) fn poll_and_discover(
         Duration::from_millis(10),
     );
 
-    if len >= 4 && response[0] != USB_CMD_SEND_RF {
-        bail!(
-            "GetDev: unexpected response 0x{:02x}, will retry",
+    if len < 4 || response[0] != USB_CMD_SEND_RF {
+        debug!(
+            "GetDev: no usable response (len={len}, echo=0x{:02x}), retrying next poll",
             response[0]
         );
+        return Ok(());
     }
 
-    if len >= 4 && response[0] == USB_CMD_SEND_RF {
+    {
         let device_count = (response[1] as usize).min(12);
 
         let indicator = response[2];
