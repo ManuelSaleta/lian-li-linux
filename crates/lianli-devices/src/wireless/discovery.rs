@@ -133,9 +133,9 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
     let channel = data[12];
     let rx_type = data[13];
 
-    if mac == [0u8; 6] || channel == 0 || !(1..=14).contains(&rx_type) {
+    if mac == [0u8; 6] {
         debug!(
-            "  Device record {list_index}: invalid mac/ch/rx ({:02x?}, ch={channel}, rx={rx_type})",
+            "  Device record {list_index}: invalid mac ({:02x?}, ch={channel}, rx={rx_type})",
             mac
         );
         return None;
@@ -591,16 +591,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_degraded_records() {
+    fn parse_rejects_only_zero_mac() {
         let mut buf = [0u8; 42];
         buf[41] = 0x1C;
         assert!(parse_device_record(&buf, 0).is_none());
         buf[0..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
-        assert!(parse_device_record(&buf, 0).is_none());
+        assert!(parse_device_record(&buf, 0).is_some());
         buf[12] = 8;
-        assert!(parse_device_record(&buf, 0).is_none());
+        assert!(parse_device_record(&buf, 0).is_some());
         buf[13] = 15;
-        assert!(parse_device_record(&buf, 0).is_none());
+        assert!(parse_device_record(&buf, 0).is_some());
         buf[13] = 1;
         assert!(parse_device_record(&buf, 0).is_some());
     }
