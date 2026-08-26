@@ -109,9 +109,8 @@ The daemon runs as either a per-user or system systemd service (see [Service mod
 
 ### Arch Linux (AUR)
 
-**The AUR is currently down due to recent wave of malware attacks**. Follow the steps to install from PKGBUILD instead.
 ```bash
-yay -S lianli-linux-git # AUR currently down, do not use. Follow below.
+yay -S lianli-linux-git
 ```
 
 You can also build from the PKGBUILD in case AUR is inaccessible:
