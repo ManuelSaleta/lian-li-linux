@@ -1,6 +1,6 @@
 use super::convergence::{PendingQueue, TargetSeqMap};
 use super::discovery::{
-    poll_and_discover, DeviceHealthMap, DiscoveredDevice, REBIND_FOREIGN_AFTER,
+    poll_and_discover, DeviceHealthMap, DiscoveredDevice, MasterEntryMap, REBIND_FOREIGN_AFTER,
 };
 use super::transport::{open_any, with_transport_recovery};
 use super::{
@@ -28,6 +28,7 @@ pub struct WirelessController {
     pub(super) master_channel: Arc<Mutex<u8>>,
     pub(super) discovered_devices: Arc<Mutex<Vec<DiscoveredDevice>>>,
     pub(super) device_health: DeviceHealthMap,
+    pub(super) master_entries: MasterEntryMap,
     pub(super) clock_init_sent: Arc<AtomicBool>,
     /// Motherboard PWM duty cycle (0-255) extracted from RX GetDev response bytes [2:3].
     /// 0xFFFF means unavailable/not yet read.
@@ -54,6 +55,7 @@ impl Clone for WirelessController {
             master_channel: Arc::clone(&self.master_channel),
             discovered_devices: Arc::clone(&self.discovered_devices),
             device_health: Arc::clone(&self.device_health),
+            master_entries: Arc::clone(&self.master_entries),
             clock_init_sent: Arc::clone(&self.clock_init_sent),
             mobo_pwm: Arc::clone(&self.mobo_pwm),
             fg_sync: Arc::clone(&self.fg_sync),
@@ -80,6 +82,7 @@ impl WirelessController {
             master_channel: Arc::new(Mutex::new(8)),
             discovered_devices: Arc::new(Mutex::new(Vec::new())),
             device_health: Arc::new(Mutex::new(Default::default())),
+            master_entries: Arc::new(Mutex::new(Default::default())),
             clock_init_sent: Arc::new(AtomicBool::new(false)),
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
             fg_sync: Arc::new(AtomicBool::new(false)),
@@ -216,6 +219,7 @@ impl WirelessController {
         let stop_flag = self.poll_stop.clone();
         let discovered_devices = Arc::clone(&self.discovered_devices);
         let device_health = Arc::clone(&self.device_health);
+        let master_entries = Arc::clone(&self.master_entries);
         let mobo_pwm = Arc::clone(&self.mobo_pwm);
         let fg_sync = Arc::clone(&self.fg_sync);
         let master_mac = Arc::clone(&self.master_mac);
@@ -234,6 +238,7 @@ impl WirelessController {
                     &rx,
                     &discovered_devices,
                     &device_health,
+                    &master_entries,
                     &mobo_pwm,
                     &fg_sync,
                     &master_mac,
@@ -514,19 +519,24 @@ impl WirelessController {
             .collect()
     }
 
-    /// MACs with binding intent whose debounced observed master has been
-    /// foreign for longer than [`REBIND_FOREIGN_AFTER`].
+    /// MACs eligible for automatic recovery: live masterless devices that
+    /// were not explicitly unbound by the user. Bound devices that drifted
+    /// away must have been masterless for [`REBIND_FOREIGN_AFTER`] first.
+    /// Devices owned by another controller are never candidates.
     pub fn rebind_candidates(&self) -> Vec<[u8; 6]> {
-        let local_mac = *self.master_mac.lock();
         self.device_health
             .lock()
             .iter()
             .filter(|(_, h)| {
-                h.bind_intent
-                    && !h.dead
-                    && h.observed_master != local_mac
-                    && h.foreign_since
+                if h.dead || h.man_unbind || h.observed_master != [0u8; 6] {
+                    return false;
+                }
+                if h.bind_intent {
+                    h.foreign_since
                         .is_some_and(|t| t.elapsed() >= REBIND_FOREIGN_AFTER)
+                } else {
+                    true
+                }
             })
             .map(|(mac, _)| *mac)
             .collect()
@@ -537,7 +547,10 @@ impl WirelessController {
             let mut health = self.device_health.lock();
             if let Some(h) = health.get_mut(mac) {
                 h.bind_intent = intent;
-                if !intent {
+                if intent {
+                    h.man_unbind = false;
+                } else {
+                    h.man_unbind = true;
                     h.foreign_since = None;
                 }
             }
@@ -550,6 +563,22 @@ impl WirelessController {
         {
             d.bind_intent = intent;
         }
+    }
+
+    /// True when the given master MAC belongs to another dongle that is
+    /// currently live on our channel.
+    pub fn foreign_master_online(&self, master: &[u8; 6]) -> bool {
+        let local = *self.master_mac.lock();
+        if *master == [0u8; 6] || *master == local {
+            return false;
+        }
+        self.master_entries.lock().contains_key(master)
+    }
+
+    /// MAC of the master a device currently reports, straight from the last
+    /// GetDev sighting.
+    pub(super) fn observed_master_of(&self, mac: &[u8; 6]) -> Option<[u8; 6]> {
+        self.device_health.lock().get(mac).map(|h| h.raw_master)
     }
 
     pub fn device_by_mac(&self, mac: &[u8; 6]) -> Option<DiscoveredDevice> {
@@ -648,5 +677,113 @@ impl Default for WirelessController {
 impl Drop for WirelessController {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wireless::discovery::{DeviceHealth, DiscoveredDevice};
+    use crate::wireless::WirelessFanType;
+    use std::collections::BTreeMap;
+
+    fn entry(master: [u8; 6]) -> DeviceHealth {
+        let rec = DiscoveredDevice {
+            mac: [1, 2, 3, 4, 5, 6],
+            master_mac: master,
+            channel: 8,
+            rx_type: 1,
+            device_type: 0,
+            fan_count: 3,
+            is_inf_right_attach: false,
+            fan_types: [0; 4],
+            fan_rpms: [0; 4],
+            current_pwm: [0; 4],
+            cmd_seq: 0,
+            fan_type: WirelessFanType::Slv3Led,
+            list_index: 0,
+            coolant_temp_c: None,
+            effect_index: [0; 4],
+            is_sync_mb_light: false,
+            is_pwm_line_on: false,
+            bind_intent: false,
+        };
+        let mut h = DeviceHealth::new(rec);
+        h.observed_master = master;
+        h.raw_master = master;
+        h
+    }
+
+    fn controller_with_health(entries: Vec<([u8; 6], DeviceHealth)>) -> WirelessController {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = [9u8; 6];
+        let mut health: BTreeMap<[u8; 6], DeviceHealth> = BTreeMap::new();
+        for (mac, h) in entries {
+            health.insert(mac, h);
+        }
+        *c.device_health.lock() = health;
+        c
+    }
+
+    fn mac() -> [u8; 6] {
+        [1, 2, 3, 4, 5, 6]
+    }
+
+    #[test]
+    fn masterless_intent_needs_timer() {
+        let mut h = entry([0u8; 6]);
+        h.bind_intent = true;
+        h.foreign_since = Some(std::time::Instant::now());
+        let c = controller_with_health(vec![(mac(), h)]);
+        assert!(c.rebind_candidates().is_empty());
+
+        let mut h = entry([0u8; 6]);
+        h.bind_intent = true;
+        h.foreign_since = Some(
+            std::time::Instant::now()
+                .checked_sub(REBIND_FOREIGN_AFTER + Duration::from_secs(1))
+                .unwrap(),
+        );
+        let c = controller_with_health(vec![(mac(), h)]);
+        assert_eq!(c.rebind_candidates(), vec![mac()]);
+    }
+
+    #[test]
+    fn masterless_without_intent_is_candidate() {
+        let c = controller_with_health(vec![(mac(), entry([0u8; 6]))]);
+        assert_eq!(c.rebind_candidates(), vec![mac()]);
+    }
+
+    #[test]
+    fn foreign_owned_and_manual_unbind_are_not_candidates() {
+        let mut foreign = entry([7u8; 6]);
+        foreign.foreign_since = Some(
+            std::time::Instant::now()
+                .checked_sub(REBIND_FOREIGN_AFTER + Duration::from_secs(1))
+                .unwrap(),
+        );
+
+        let mut unbound = entry([0u8; 6]);
+        unbound.man_unbind = true;
+
+        let mut dead = entry([0u8; 6]);
+        dead.dead = true;
+
+        let healthy = entry([9u8; 6]);
+
+        let c = controller_with_health(vec![
+            ([1, 2, 3, 4, 5, 6], foreign),
+            ([2, 2, 3, 4, 5, 6], unbound),
+            ([3, 2, 3, 4, 5, 6], dead),
+            ([4, 2, 3, 4, 5, 6], healthy),
+        ]);
+        assert!(c.rebind_candidates().is_empty());
+    }
+
+    #[test]
+    fn observed_master_of_reads_raw_master() {
+        let c = controller_with_health(vec![(mac(), entry([7u8; 6]))]);
+        assert_eq!(c.observed_master_of(&mac()), Some([7u8; 6]));
+        assert_eq!(c.observed_master_of(&[9, 9, 9, 9, 9, 9]), None);
     }
 }

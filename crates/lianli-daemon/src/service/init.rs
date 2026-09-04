@@ -1,4 +1,3 @@
-use super::parse_mac_str;
 use super::{DaemonEvent, ServiceManager};
 use crate::controllers::aio::AioController;
 use crate::controllers::fan::FanController;
@@ -798,21 +797,16 @@ impl ServiceManager {
         let configured_ids = self.configured_wireless_device_ids();
 
         for dev in self.wireless.unbound_devices() {
+            if dev.master_mac != [0u8; 6] {
+                continue;
+            }
             let device_id = format!("wireless:{}", dev.mac_str());
             if !configured_ids.contains(&device_id) {
                 continue;
             }
 
-            let Some(mac_str) = device_id.strip_prefix("wireless:") else {
-                continue;
-            };
-            let Some(mac) = parse_mac_str(mac_str) else {
-                warn!("Invalid configured wireless MAC: {mac_str}");
-                continue;
-            };
-
             info!("Auto-rebinding configured wireless device {device_id}");
-            if let Err(err) = self.wireless.bind_device(&mac) {
+            if let Err(err) = self.wireless.bind_device(&dev.mac) {
                 warn!("Auto-rebind failed for {device_id}: {err}");
             }
         }

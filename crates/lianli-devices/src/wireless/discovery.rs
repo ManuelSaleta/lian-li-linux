@@ -220,10 +220,50 @@ const DEBOUNCE_SIGHTINGS: u32 = 3;
 pub(super) const ACK_FRESHNESS: Duration = Duration::from_secs(3);
 pub(super) const REBIND_FOREIGN_AFTER: Duration = Duration::from_secs(10);
 
+/// A master dongle heard on the current channel, reported by GetDev as a
+/// device record with device_type 0xFF. Foreign masters stay online only
+/// while freshly sighted, which guards bind and unbind against touching
+/// devices another live controller owns.
+pub(super) struct MasterEntry {
+    pub last_seen: Instant,
+}
+
+pub(super) type MasterEntryMap = Arc<Mutex<BTreeMap<[u8; 6], MasterEntry>>>;
+
+pub(super) fn parse_master_record(data: &[u8]) -> Option<([u8; 6], u8)> {
+    if data.len() < 42 || data[41] != 0x1C || data[18] != 0xFF {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(&data[0..6]);
+    if mac == [0u8; 6] {
+        return None;
+    }
+    Some((mac, data[12]))
+}
+
+pub(super) fn merge_master_sightings(found: &[([u8; 6], u8)], masters: &MasterEntryMap) {
+    let now = Instant::now();
+    let mut masters = masters.lock();
+    for (mac, channel) in found {
+        if !masters.contains_key(mac) {
+            info!(
+                "foreign master dongle {:02x?} online on channel {channel}",
+                mac
+            );
+        }
+        masters.insert(*mac, MasterEntry { last_seen: now });
+    }
+    masters.retain(|_, m| now.duration_since(m.last_seen) <= LIVENESS_TIMEOUT);
+}
+
 pub(super) struct DeviceHealth {
     pub published: DiscoveredDevice,
     pub last_seen: Instant,
     pub bind_intent: bool,
+    /// Sticky flag set by an explicit unbind. Suppresses auto claiming and
+    /// rebinds until the user binds the device again.
+    pub man_unbind: bool,
     pub dead: bool,
     pub raw_master: [u8; 6],
     pub raw_rx: u8,
@@ -235,12 +275,13 @@ pub(super) struct DeviceHealth {
 }
 
 impl DeviceHealth {
-    fn new(rec: DiscoveredDevice) -> Self {
+    pub(super) fn new(rec: DiscoveredDevice) -> Self {
         Self {
             observed_master: rec.master_mac,
             published: rec,
             last_seen: Instant::now(),
             bind_intent: false,
+            man_unbind: false,
             dead: false,
             raw_master: [0u8; 6],
             raw_rx: 0,
@@ -281,6 +322,7 @@ pub(super) fn poll_and_discover(
     rx: &Arc<Mutex<RusbBulk>>,
     discovered_devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
     health_map: &DeviceHealthMap,
+    master_entries: &MasterEntryMap,
     mobo_pwm: &Arc<AtomicU16>,
     fg_sync: &Arc<AtomicBool>,
     master_mac: &Arc<Mutex<[u8; 6]>>,
@@ -354,6 +396,7 @@ pub(super) fn poll_and_discover(
 
         if device_count > 0 {
             let mut found = Vec::new();
+            let mut found_masters = Vec::new();
             let mut offset = 4;
 
             for idx in 0..device_count {
@@ -362,7 +405,11 @@ pub(super) fn poll_and_discover(
                     break;
                 }
 
-                if let Some(device) = parse_device_record(&response[offset..offset + 42], idx as u8)
+                if let Some((mac, channel)) = parse_master_record(&response[offset..offset + 42]) {
+                    debug!("  [{}] master dongle {:02x?} ch={channel}", idx, mac);
+                    found_masters.push((mac, channel));
+                } else if let Some(device) =
+                    parse_device_record(&response[offset..offset + 42], idx as u8)
                 {
                     debug!(
                         "  [{}] {} type=0x{:02x} fans={} RPM=[{},{},{},{}] PWM=[{},{},{},{}]",
@@ -386,6 +433,7 @@ pub(super) fn poll_and_discover(
             }
 
             merge_sightings(&found, health_map, discovered_devices, master_mac);
+            merge_master_sightings(&found_masters, master_entries);
         }
     }
 
@@ -408,8 +456,10 @@ fn merge_sightings(
             .or_insert_with(|| DeviceHealth::new(rec.clone()));
         if h.dead {
             let intent = h.bind_intent;
+            let man_unbind = h.man_unbind;
             *h = DeviceHealth::new(rec.clone());
             h.bind_intent = intent;
+            h.man_unbind = man_unbind;
         }
         let intent = h.bind_intent;
         h.last_seen = now;
@@ -453,6 +503,15 @@ fn merge_sightings(
             h.published.channel = ch;
             h.published.rx_type = rx;
         }
+
+        if !h.bind_intent && !h.man_unbind && rec.master_mac == local {
+            h.bind_intent = true;
+            h.published.bind_intent = true;
+            info!(
+                "{} reports this dongle as master, claiming binding intent",
+                rec.mac_str()
+            );
+        }
     }
 
     rebuild_published_vec(&health, discovered_devices, &local);
@@ -473,7 +532,7 @@ fn sweep(
         }
     }
     let before = health.len();
-    health.retain(|_, h| !h.dead || h.bind_intent);
+    health.retain(|_, h| !h.dead || h.bind_intent || h.man_unbind);
     changed |= health.len() != before;
     if changed {
         let local = *master_mac.lock();
@@ -607,28 +666,94 @@ mod tests {
     }
 
     #[test]
+    fn parse_master_record_validates() {
+        let mut buf = [0u8; 42];
+        buf[41] = 0x1C;
+        buf[18] = 0xFF;
+        assert!(parse_master_record(&buf).is_none());
+        buf[0..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        buf[12] = 8;
+        assert_eq!(parse_master_record(&buf), Some(([1, 2, 3, 4, 5, 6], 8)));
+        buf[18] = 0x00;
+        assert!(parse_master_record(&buf).is_none());
+        buf[18] = 0xFF;
+        buf[41] = 0x00;
+        assert!(parse_master_record(&buf).is_none());
+    }
+
+    #[test]
+    fn master_sightings_track_liveness() {
+        let masters: MasterEntryMap = Arc::new(Mutex::new(Default::default()));
+        let mac = [9u8; 6];
+
+        merge_master_sightings(&[(mac, 8)], &masters);
+        assert!(masters.lock().contains_key(&mac));
+
+        let stale = Instant::now()
+            .checked_sub(LIVENESS_TIMEOUT + Duration::from_secs(1))
+            .expect("uptime too short for test");
+        masters.lock().get_mut(&mac).unwrap().last_seen = stale;
+        merge_master_sightings(&[], &masters);
+        assert!(!masters.lock().contains_key(&mac));
+    }
+
+    #[test]
     fn master_flip_debounced_without_intent() {
         let (health, devices, master) = setup();
         let mac = [1, 2, 3, 4, 5, 6];
-        let local = *master.lock();
-        let foreign = [7u8; 6];
+        let foreign_a = [6u8; 6];
+        let foreign_b = [7u8; 6];
 
         for _ in 0..3 {
-            merge_sightings(&[rec(mac, local)], &health, &devices, &master);
+            merge_sightings(&[rec(mac, foreign_a)], &health, &devices, &master);
         }
-        assert_eq!(health.lock().get(&mac).unwrap().published.master_mac, local);
-
-        for _ in 0..2 {
-            merge_sightings(&[rec(mac, foreign)], &health, &devices, &master);
-        }
-        assert_eq!(health.lock().get(&mac).unwrap().published.master_mac, local);
-
-        merge_sightings(&[rec(mac, foreign)], &health, &devices, &master);
         assert_eq!(
             health.lock().get(&mac).unwrap().published.master_mac,
-            foreign
+            foreign_a
+        );
+
+        for _ in 0..2 {
+            merge_sightings(&[rec(mac, foreign_b)], &health, &devices, &master);
+        }
+        assert_eq!(
+            health.lock().get(&mac).unwrap().published.master_mac,
+            foreign_a
+        );
+
+        merge_sightings(&[rec(mac, foreign_b)], &health, &devices, &master);
+        assert_eq!(
+            health.lock().get(&mac).unwrap().published.master_mac,
+            foreign_b
         );
         assert_eq!(devices.lock().len(), 1);
+    }
+
+    #[test]
+    fn local_master_sighting_claims_intent() {
+        let (health, devices, master) = setup();
+        let mac = [1, 2, 3, 4, 5, 6];
+        let local = *master.lock();
+
+        merge_sightings(&[rec(mac, local)], &health, &devices, &master);
+        let guard = health.lock();
+        let h = guard.get(&mac).unwrap();
+        assert!(h.bind_intent);
+        assert!(h.published.bind_intent);
+        assert!(!h.man_unbind);
+    }
+
+    #[test]
+    fn claim_skipped_for_manually_unbound() {
+        let (health, devices, master) = setup();
+        let mac = [1, 2, 3, 4, 5, 6];
+        let local = *master.lock();
+
+        merge_sightings(&[rec(mac, local)], &health, &devices, &master);
+        health.lock().get_mut(&mac).unwrap().man_unbind = true;
+        health.lock().get_mut(&mac).unwrap().bind_intent = false;
+
+        merge_sightings(&[rec(mac, local)], &health, &devices, &master);
+        assert!(!health.lock().get(&mac).unwrap().bind_intent);
     }
 
     #[test]
@@ -683,13 +808,14 @@ mod tests {
         let mac_a = [1, 2, 3, 4, 5, 6];
         let mac_b = [2, 2, 3, 4, 5, 6];
         let local = *master.lock();
+        let foreign = [7u8; 6];
 
-        for mac in [mac_a, mac_b] {
-            for _ in 0..3 {
-                merge_sightings(&[rec(mac, local)], &health, &devices, &master);
-            }
+        for _ in 0..3 {
+            merge_sightings(&[rec(mac_a, foreign)], &health, &devices, &master);
         }
-        health.lock().get_mut(&mac_b).unwrap().bind_intent = true;
+        for _ in 0..3 {
+            merge_sightings(&[rec(mac_b, local)], &health, &devices, &master);
+        }
 
         let stale = Instant::now()
             .checked_sub(LIVENESS_TIMEOUT + Duration::from_secs(1))
@@ -706,6 +832,32 @@ mod tests {
         assert!(b.dead);
         assert!(b.bind_intent);
         assert!(devices.lock().is_empty());
+    }
+
+    #[test]
+    fn sweep_keeps_manually_unbound() {
+        let (health, devices, master) = setup();
+        let mac = [1, 2, 3, 4, 5, 6];
+        let foreign = [7u8; 6];
+
+        for _ in 0..3 {
+            merge_sightings(&[rec(mac, foreign)], &health, &devices, &master);
+        }
+        {
+            let mut h = health.lock();
+            let entry = h.get_mut(&mac).unwrap();
+            entry.man_unbind = true;
+        }
+
+        let stale = Instant::now()
+            .checked_sub(LIVENESS_TIMEOUT + Duration::from_secs(1))
+            .expect("uptime too short for test");
+        for h in health.lock().values_mut() {
+            h.last_seen = stale;
+        }
+
+        sweep(&health, &devices, &master);
+        assert!(health.lock().get(&mac).is_some());
     }
 
     #[test]

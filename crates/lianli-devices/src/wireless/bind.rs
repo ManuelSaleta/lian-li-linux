@@ -1,6 +1,8 @@
 use super::controller::WirelessController;
 use super::discovery::poll_and_discover;
-use super::{RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, USB_CMD_SEND_RF};
+use super::{
+    WirelessFanType, RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, USB_CMD_SEND_RF,
+};
 use anyhow::{bail, Context, Result};
 use lianli_transport::usb::USB_TIMEOUT;
 use std::thread;
@@ -9,6 +11,7 @@ use tracing::info;
 
 impl WirelessController {
     pub fn bind_device(&self, mac: &[u8; 6]) -> Result<()> {
+        self.check_bind_allowed(mac)?;
         let master_mac = *self.master_mac.lock();
         let new_rx = self.get_rx_unused();
         self.set_bind_intent(mac, true);
@@ -17,9 +20,89 @@ impl WirelessController {
     }
 
     pub fn unbind_device(&self, mac: &[u8; 6]) -> Result<()> {
+        self.check_unbind_allowed(mac)?;
         self.set_bind_intent(mac, false);
         self.converge_bind_state(mac, &[0u8; 6], 0)?;
         self.save_rf_config()
+    }
+
+    fn check_bind_allowed(&self, mac: &[u8; 6]) -> Result<()> {
+        let (raw_master, dead, fan_type) = {
+            let health = self.device_health.lock();
+            let Some(h) = health.get(mac) else {
+                return Ok(());
+            };
+            (h.raw_master, h.dead, h.published.fan_type)
+        };
+
+        if dead {
+            bail!("device is offline");
+        }
+
+        let local = *self.master_mac.lock();
+        if raw_master != [0u8; 6] && raw_master != local && self.foreign_master_online(&raw_master)
+        {
+            bail!(
+                "device {:02x?} is bound to another controller that is currently online",
+                mac
+            );
+        }
+
+        let bound: Vec<WirelessFanType> = {
+            let health = self.device_health.lock();
+            health
+                .iter()
+                .filter(|(m, h)| **m != *mac && h.bind_intent && !h.dead)
+                .map(|(_, h)| h.published.fan_type)
+                .collect()
+        };
+
+        if bound.len() >= 10 {
+            bail!("at most 10 wireless devices can be bound");
+        }
+        match fan_type {
+            WirelessFanType::Strimer(_)
+                if bound
+                    .iter()
+                    .filter(|t| matches!(t, WirelessFanType::Strimer(_)))
+                    .count()
+                    >= 3 =>
+            {
+                bail!("at most 3 strimer devices can be bound");
+            }
+            WirelessFanType::WaterBlock
+                if bound
+                    .iter()
+                    .any(|t| matches!(t, WirelessFanType::WaterBlock)) =>
+            {
+                bail!("only one HydroShift II LCD-C can be bound");
+            }
+            WirelessFanType::WaterBlock2
+                if bound
+                    .iter()
+                    .any(|t| matches!(t, WirelessFanType::WaterBlock2)) =>
+            {
+                bail!("only one HydroShift II LCD-S can be bound");
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn check_unbind_allowed(&self, mac: &[u8; 6]) -> Result<()> {
+        let Some(raw_master) = self.observed_master_of(mac) else {
+            return Ok(());
+        };
+        let local = *self.master_mac.lock();
+        if raw_master != [0u8; 6] && raw_master != local && self.foreign_master_online(&raw_master)
+        {
+            bail!(
+                "device {:02x?} belongs to another controller that is currently online",
+                mac
+            );
+        }
+        Ok(())
     }
 
     fn converge_bind_state(
@@ -43,6 +126,7 @@ impl WirelessController {
                 rx,
                 &self.discovered_devices,
                 &self.device_health,
+                &self.master_entries,
                 &self.mobo_pwm,
                 &self.fg_sync,
                 &self.master_mac,
@@ -168,5 +252,132 @@ impl WirelessController {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::discovery::{DeviceHealth, MasterEntry};
+    use super::*;
+
+    fn controller_with(local: [u8; 6], foreign_online: bool) -> WirelessController {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = local;
+        if foreign_online {
+            let mut masters = c.master_entries.lock();
+            masters.insert(
+                [7u8; 6],
+                MasterEntry {
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+        c
+    }
+
+    fn seed_device(c: &WirelessController, mac: &[u8; 6], master: [u8; 6], intent: bool) {
+        let rec = super::super::discovery::DiscoveredDevice {
+            mac: *mac,
+            master_mac: master,
+            channel: 8,
+            rx_type: 1,
+            device_type: 0,
+            fan_count: 3,
+            is_inf_right_attach: false,
+            fan_types: [0; 4],
+            fan_rpms: [0; 4],
+            current_pwm: [0; 4],
+            cmd_seq: 0,
+            fan_type: WirelessFanType::Slv3Led,
+            list_index: 0,
+            coolant_temp_c: None,
+            effect_index: [0; 4],
+            is_sync_mb_light: false,
+            is_pwm_line_on: false,
+            bind_intent: false,
+        };
+        let mut health = c.device_health.lock();
+        let mut h = DeviceHealth::new(rec);
+        h.raw_master = master;
+        h.bind_intent = intent;
+        health.insert(*mac, h);
+    }
+
+    #[test]
+    fn bind_refused_while_foreign_master_online() {
+        let c = controller_with([9u8; 6], true);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [7u8; 6], false);
+        assert!(c.check_bind_allowed(&[1, 2, 3, 4, 5, 6]).is_err());
+    }
+
+    #[test]
+    fn bind_allowed_when_foreign_master_offline() {
+        let c = controller_with([9u8; 6], false);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [7u8; 6], false);
+        assert!(c.check_bind_allowed(&[1, 2, 3, 4, 5, 6]).is_ok());
+    }
+
+    #[test]
+    fn bind_allowed_for_own_and_masterless_devices() {
+        let c = controller_with([9u8; 6], true);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [9u8; 6], false);
+        seed_device(&c, &[2, 2, 3, 4, 5, 6], [0u8; 6], false);
+        assert!(c.check_bind_allowed(&[1, 2, 3, 4, 5, 6]).is_ok());
+        assert!(c.check_bind_allowed(&[2, 2, 3, 4, 5, 6]).is_ok());
+    }
+
+    #[test]
+    fn bind_refused_for_dead_device() {
+        let c = controller_with([9u8; 6], false);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [0u8; 6], false);
+        c.device_health
+            .lock()
+            .get_mut(&[1, 2, 3, 4, 5, 6])
+            .unwrap()
+            .dead = true;
+        assert!(c.check_bind_allowed(&[1, 2, 3, 4, 5, 6]).is_err());
+    }
+
+    #[test]
+    fn bind_caps_enforced() {
+        let c = controller_with([9u8; 6], false);
+        for i in 0..10u8 {
+            seed_device(&c, &[i, 2, 3, 4, 5, 6], [0u8; 6], true);
+        }
+        seed_device(&c, &[50, 2, 3, 4, 5, 6], [0u8; 6], false);
+        assert!(c.check_bind_allowed(&[50, 2, 3, 4, 5, 6]).is_err());
+
+        let c = controller_with([9u8; 6], false);
+        for i in 0..3u8 {
+            seed_device(&c, &[i, 2, 3, 4, 5, 6], [0u8; 6], true);
+            c.device_health
+                .lock()
+                .get_mut(&[i, 2, 3, 4, 5, 6])
+                .unwrap()
+                .published
+                .fan_type = WirelessFanType::Strimer(1);
+        }
+        seed_device(&c, &[50, 2, 3, 4, 5, 6], [0u8; 6], false);
+        c.device_health
+            .lock()
+            .get_mut(&[50, 2, 3, 4, 5, 6])
+            .unwrap()
+            .published
+            .fan_type = WirelessFanType::Strimer(1);
+        assert!(c.check_bind_allowed(&[50, 2, 3, 4, 5, 6]).is_err());
+    }
+
+    #[test]
+    fn unbind_refused_while_foreign_master_online() {
+        let c = controller_with([9u8; 6], true);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [7u8; 6], false);
+        assert!(c.check_unbind_allowed(&[1, 2, 3, 4, 5, 6]).is_err());
+    }
+
+    #[test]
+    fn unbind_allowed_for_own_devices() {
+        let c = controller_with([9u8; 6], true);
+        seed_device(&c, &[1, 2, 3, 4, 5, 6], [9u8; 6], true);
+        assert!(c.check_unbind_allowed(&[1, 2, 3, 4, 5, 6]).is_ok());
     }
 }
