@@ -589,9 +589,10 @@ impl WirelessController {
 
     /// Channel our dongle should occupy given the masters visible via
     /// GetDev. Masters sort by MAC and take channels 8, 12, 16 ... so two
-    /// controllers in radio range never share one. A dongle on its own is
-    /// never moved: with no other master visible there is nothing to de
-    /// conflict with, whatever channel the pair already runs on.
+    /// controllers in radio range never share one. Our own dongle also
+    /// appears as a master record, so a move is only warranted when at
+    /// least one FOREIGN master is live. A lone dongle stays on whatever
+    /// channel the pair runs on.
     pub fn arbitration_target(&self) -> Option<u8> {
         let current = *self.master_channel.lock();
         if !current.is_multiple_of(2) {
@@ -601,28 +602,28 @@ impl WirelessController {
         if ours == [0u8; 6] {
             return None;
         }
-        let mut macs: Vec<[u8; 6]> = self.master_entries.lock().keys().copied().collect();
+        let mut macs: Vec<[u8; 6]> = {
+            let masters = self.master_entries.lock();
+            masters.keys().copied().filter(|m| *m != ours).collect()
+        };
         if macs.is_empty() {
             return None;
         }
-        if !macs.contains(&ours) {
-            macs.push(ours);
-        }
+        let others: Vec<([u8; 6], u8)> = {
+            let masters = self.master_entries.lock();
+            macs.iter()
+                .filter_map(|m| masters.get(m).map(|e| (*m, e.channel)))
+                .collect()
+        };
+        macs.push(ours);
         macs.sort_unstable();
         let idx = macs.iter().position(|m| *m == ours)?;
         let target = (8 + idx * 4) as u8;
         if target > 38 || target == current {
             return None;
         }
-        let others: Vec<([u8; 6], u8)> = {
-            let masters = self.master_entries.lock();
-            macs.iter()
-                .filter(|m| **m != ours)
-                .filter_map(|m| masters.get(m).map(|e| (*m, e.channel)))
-                .collect()
-        };
         info!(
-            "{:?} master dongles in range {:02x?}, moving to channel {target}",
+            "{:?} foreign master dongles in range {:02x?}, moving to channel {target}",
             others.len(),
             others
         );
@@ -910,6 +911,17 @@ mod tests {
         let c = WirelessController::new();
         *c.master_mac.lock() = [9u8; 6];
         *c.master_channel.lock() = 2;
+        assert_eq!(c.arbitration_target(), None);
+
+        // Our dongle self reports as a master record. That alone must not
+        // count as a conflict.
+        c.master_entries.lock().insert(
+            [9u8; 6],
+            crate::wireless::discovery::MasterEntry {
+                channel: 2,
+                last_seen: std::time::Instant::now(),
+            },
+        );
         assert_eq!(c.arbitration_target(), None);
     }
 

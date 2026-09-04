@@ -288,6 +288,10 @@ impl ServiceManager {
                 self.rebuild_rgb_controller();
                 self.ensure_aio_defaults();
                 self.start_aio_control();
+                // The fan controller caches its wireless handle at startup.
+                // Without this restart it never sees late discovered
+                // wireless devices and every group errors out.
+                self.restart_fan_control();
                 self.wireless_stable_count = current_wireless;
                 self.wireless_pending_count = None;
                 self.wireless_pending_streak = 0;
