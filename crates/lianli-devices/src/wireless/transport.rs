@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lianli_transport::usb::RusbBulk;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Try to open a USB device matching any of the given VID:PID pairs.
 pub(super) fn open_any(ids: &[(u16, u16)]) -> Result<RusbBulk> {
@@ -50,6 +50,13 @@ where
     match first {
         Ok(r) => Ok(r),
         Err(e) => {
+            // Failures are expected once shutdown starts, since new
+            // transfers are refused. Do not warn or attempt a reopen, the
+            // caller is about to be joined anyway.
+            if lianli_transport::usb::shutting_down() {
+                debug!("{name} transport op failed ({e}) while shutting down, not reopening");
+                return Err(e).context("shutting down");
+            }
             warn!("{name} transport op failed ({e}); attempting reopen");
             reopen_transport(arc, ids, name).context("reopen after stale handle")?;
             info!("{name} transport reopened, retrying");

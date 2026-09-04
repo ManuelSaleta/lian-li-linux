@@ -66,6 +66,15 @@ impl Drop for WatchdogClearGuard {
     }
 }
 
+/// How long graceful shutdown gets before the process is forced down.
+/// Must exceed the longest blocking USB call, or the device is left mid-transfer.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+
+/// Set once ServiceManager::shutdown() returns, so the signal-handler watchdog
+/// stands down instead of forcing an exit over a shutdown that already worked.
+pub(crate) static SHUTDOWN_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Parse a colon-separated MAC address string (e.g. `"01:23:45:67:89:AB"`)
 /// into a 6-byte array. Returns `None` on malformed input.
 fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
@@ -289,6 +298,18 @@ impl ServiceManager {
         self.check_wired_hotplug();
         self.reconcile_wired_wireless_binding();
         self.refresh_targets();
+
+        // Retry starting LCD recovery threads that were skipped because the
+        // LCD mutex was busy at creation or init completion. The zero wait
+        // keeps this cheap for targets that have nothing to do.
+        {
+            let tx = self.tx.clone();
+            let mut targets = self.targets.lock();
+            for target in targets.values_mut() {
+                target.maybe_start_recovery(tx.clone(), Duration::ZERO);
+            }
+        }
+
         self.process_pending_lcd_firmware();
         self.check_thermal_alert();
         self.sync_ipc_telemetry();
@@ -467,11 +488,47 @@ impl ServiceManager {
             if let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM]) {
                 if let Some(sig) = signals.forever().next() {
                     info!("received signal {sig}, shutting down");
+                    // Raise this first: worker threads sitting in multi-second
+                    // USB retry loops poll it and bail out, so shutdown()'s
+                    // join() can actually return instead of stalling until the
+                    // grace period forces a mid-transfer exit.
+                    lianli_transport::usb::SHUTTING_DOWN
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = shutdown_tx.send(DaemonEvent::Shutdown);
                     // Force exit if graceful shutdown stalls (e.g. blocking USB
                     // call in a worker thread).
-                    thread::sleep(Duration::from_secs(5));
-                    warn!("shutdown exceeded 5s grace period, forcing exit");
+                    //
+                    // FIX: 5s was not enough and the process died with a bulk
+                    // transfer still in flight, which leaves the HydroShift II
+                    // MCU waiting for the rest of a transaction it never gets.
+                    // It then stops servicing its USB stack entirely — no
+                    // descriptors, no bulk — and only a power cycle brings it
+                    // back; a libusb reset does not. Worst case here is the
+                    // interface-claim retry loop (20 x 250ms) plus a 2s read
+                    // timeout, so 5s expired right in the middle of it. Give
+                    // graceful shutdown room to actually finish.
+                    // Only force the process down if graceful shutdown has not
+                    // finished by then; otherwise this watchdog would race the
+                    // re-exec path in main() and kill a daemon that is already
+                    // on its way out cleanly.
+                    let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+                    while std::time::Instant::now() < deadline {
+                        if SHUTDOWN_DONE.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    // The final sleep can end just after the deadline even
+                    // when shutdown finished during it, so check the flag
+                    // once more before forcing the process down.
+                    if SHUTDOWN_DONE.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    warn!(
+                        "shutdown exceeded {}s grace period, forcing exit — \
+                         a USB transfer may be left in flight",
+                        SHUTDOWN_GRACE.as_secs()
+                    );
                     std::process::exit(0);
                 }
             }
@@ -648,13 +705,21 @@ impl ServiceManager {
                     // firmware state is now recorded by the init worker;
                     // start the recovery thread if the target was created
                     // before init finished. Idempotent, no teardown.
+                    // Answers from the device are definitive now, and any
+                    // brightness deferred while the init worker held the
+                    // LCD can be applied.
                     let tx = self.tx.clone();
                     let mut targets = self.targets.lock();
                     if let Some((_, target)) = targets
                         .iter_mut()
                         .find(|(_, t)| t.device_identity == device_id)
                     {
-                        target.maybe_start_recovery(tx);
+                        target.mark_init_complete();
+                        target.maybe_start_recovery(tx, Duration::from_millis(200));
+                        target.flush_pending_brightness(
+                            Some(&self.wireless),
+                            &mut self.packet_builder,
+                        );
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {
@@ -714,6 +779,7 @@ impl ServiceManager {
         }
 
         self.shutdown();
+        SHUTDOWN_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(self.restart_requested)
     }
 }

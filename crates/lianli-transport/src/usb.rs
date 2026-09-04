@@ -27,6 +27,18 @@ pub const LCD_READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 ///
 /// Auto-detects endpoint transfer types (bulk vs interrupt) from the USB
 /// descriptor so the correct libusb call is used.
+
+/// Set once the daemon starts shutting down. Long retry loops in this module
+/// poll it so a worker thread never sits inside a multi-second USB retry while
+/// `shutdown()` is blocked joining it — that stall is what forced the process
+/// to exit with a transfer still in flight, which hangs the device MCU.
+pub static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once shutdown has begun; long loops must bail out promptly.
+pub fn shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct RusbBulk {
     handle: DeviceHandle<GlobalContext>,
     ep_out: u8,
@@ -110,9 +122,20 @@ impl RusbBulk {
                 self.claimed.push(0);
             }
             Err(rusb::Error::Busy) => {
+                // A busy interface is expected once shutdown starts, since
+                // handles are still held while their owners are being
+                // joined. Do not warn or sit through the retry loop.
+                if shutting_down() {
+                    debug!("{name} interface 0 busy while shutting down, not retrying");
+                    return Err(rusb::Error::Busy.into());
+                }
                 warn!("{name} interface 0 busy, retrying...");
                 let mut claimed = false;
                 for attempt in 1..=20u32 {
+                    if shutting_down() {
+                        debug!("{name}: aborting interface claim, shutting down");
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(250));
                     if let Ok(true) = self.handle.kernel_driver_active(0) {
                         let _ = self.handle.detach_kernel_driver(0);
@@ -161,6 +184,15 @@ impl RusbBulk {
     }
 
     pub fn write(&self, data: &[u8], timeout: Duration) -> Result<usize, TransportError> {
+        // FIX: refuse to start new transfers once shutdown begins. The main
+        // loop was blocking inside device_poll()'s USB reads (2s timeout each)
+        // and never reached the Shutdown event, so shutdown() never ran and the
+        // process was forced down mid-transfer — which hangs the device MCU.
+        // Refusing *new* transfers is safe: in-flight ones still drain within
+        // their own timeout, so handlers unwind quickly and cleanly.
+        if shutting_down() {
+            return Err(TransportError::Usb(rusb::Error::Interrupted));
+        }
         let n = if self.ep_out_interrupt {
             self.handle.write_interrupt(self.ep_out, data, timeout)?
         } else {
@@ -185,6 +217,15 @@ impl RusbBulk {
     /// where the previous transfer left off. Each sub-transfer uses the same
     /// timeout, so the total worst-case is `timeout * number_of_chunks`.
     pub fn write_full(&self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
+        // FIX: refuse to start new transfers once shutdown begins. The main
+        // loop was blocking inside device_poll()'s USB reads (2s timeout each)
+        // and never reached the Shutdown event, so shutdown() never ran and the
+        // process was forced down mid-transfer — which hangs the device MCU.
+        // Refusing *new* transfers is safe: in-flight ones still drain within
+        // their own timeout, so handlers unwind quickly and cleanly.
+        if shutting_down() {
+            return Err(TransportError::Usb(rusb::Error::Interrupted));
+        }
         let mut offset = 0usize;
         while offset < data.len() {
             let n = if self.ep_out_interrupt {
@@ -206,6 +247,15 @@ impl RusbBulk {
     }
 
     pub fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, TransportError> {
+        // FIX: refuse to start new transfers once shutdown begins. The main
+        // loop was blocking inside device_poll()'s USB reads (2s timeout each)
+        // and never reached the Shutdown event, so shutdown() never ran and the
+        // process was forced down mid-transfer — which hangs the device MCU.
+        // Refusing *new* transfers is safe: in-flight ones still drain within
+        // their own timeout, so handlers unwind quickly and cleanly.
+        if shutting_down() {
+            return Err(TransportError::Usb(rusb::Error::Interrupted));
+        }
         if self.ep_in_interrupt {
             Ok(self.handle.read_interrupt(self.ep_in, buf, timeout)?)
         } else {
@@ -222,6 +272,9 @@ impl RusbBulk {
         buf: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, TransportError> {
+        if shutting_down() {
+            return Err(TransportError::Usb(rusb::Error::Interrupted));
+        }
         Ok(self
             .handle
             .read_control(request_type, request, value, index, buf, timeout)?)
@@ -236,6 +289,9 @@ impl RusbBulk {
         data: &[u8],
         timeout: Duration,
     ) -> Result<usize, TransportError> {
+        if shutting_down() {
+            return Err(TransportError::Usb(rusb::Error::Interrupted));
+        }
         Ok(self
             .handle
             .write_control(request_type, request, value, index, data, timeout)?)

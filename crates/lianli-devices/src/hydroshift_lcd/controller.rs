@@ -390,7 +390,13 @@ impl HydroShiftLcdController {
         self.variant
     }
 
-    pub fn is_lcd_available(&self) -> Result<bool> {
+    pub fn is_lcd_available(&self, stop: &AtomicBool) -> Result<bool> {
+        // Checked before the write too. A write against a wedged device can
+        // occupy the whole transfer timeout, which is exactly the budget of
+        // the bounded join waiting for this attempt to end.
+        if stop.load(Ordering::Relaxed) {
+            bail!("AIO LCD: availability check aborted before write (stop requested)");
+        }
         let mut dev = self.device.lock();
 
         let mut pkt = vec![0u8; B_PACKET_SIZE];
@@ -401,6 +407,9 @@ impl HydroShiftLcdController {
 
         let mut buf = vec![0u8; B_PACKET_SIZE];
         loop {
+            if stop.load(Ordering::Relaxed) {
+                bail!("AIO LCD: availability check aborted (stop requested)");
+            }
             let n = dev
                 .read_timeout(&mut buf, READ_TIMEOUT_MS)
                 .context("AIO LCD: read LCD available response")?;
@@ -419,9 +428,16 @@ impl HydroShiftLcdController {
         }
     }
 
-    pub fn reset_device(&self) -> bool {
+    pub fn reset_device(&self, stop: &AtomicBool) -> bool {
         const MAX_ATTEMPTS: u32 = 20;
 
+        // Checked before the write for the same reason as in
+        // is_lcd_available, the write itself can block for the full
+        // transfer timeout.
+        if stop.load(Ordering::Relaxed) {
+            warn!("AIO LCD: reset device aborted before write (stop requested)");
+            return false;
+        }
         let mut dev = self.device.lock();
         if let Err(e) = write_a_command_raw(&mut *dev, CMD_RESET_DEVICE, &[]) {
             warn!("AIO LCD: reset device failed: {e}");
@@ -430,6 +446,10 @@ impl HydroShiftLcdController {
 
         let mut buf = [0u8; A_PACKET_SIZE];
         for _ in 0..MAX_ATTEMPTS {
+            if stop.load(Ordering::Relaxed) {
+                warn!("AIO LCD: reset device aborted (stop requested)");
+                return false;
+            }
             let n = match dev.read_timeout(&mut buf, 1000) {
                 Ok(n) => n,
                 Err(e) => {
@@ -457,7 +477,10 @@ impl HydroShiftLcdController {
         false
     }
 
-    pub fn check_and_recover_lcd(&self) -> Result<crate::traits::RecoveryAction> {
+    pub fn check_and_recover_lcd(
+        &self,
+        stop: &AtomicBool,
+    ) -> Result<crate::traits::RecoveryAction> {
         use crate::traits::RecoveryAction;
         const RECOVERY_COOLDOWN: Duration = Duration::from_secs(2);
         const UNAVAILABLE_THRESHOLD: u32 = 3;
@@ -469,7 +492,7 @@ impl HydroShiftLcdController {
         {
             return Ok(RecoveryAction::NoChange);
         }
-        match self.is_lcd_available() {
+        match self.is_lcd_available(stop) {
             Ok(true) => {
                 self.lcd_unavailable_count.store(0, Ordering::Relaxed);
                 Ok(RecoveryAction::NoChange)
@@ -485,9 +508,12 @@ impl HydroShiftLcdController {
                 self.lcd_unavailable_count.store(0, Ordering::Relaxed);
                 warn!("LCD not available ({count}/{UNAVAILABLE_THRESHOLD}) — attempting reset");
                 *self.last_recovery_attempt.lock() = Some(Instant::now());
-                if self.reset_device() {
+                if self.reset_device(stop) {
                     info!("Device reset successful, reinitializing LCD");
                     std::thread::sleep(std::time::Duration::from_millis(500));
+                    if stop.load(Ordering::Relaxed) {
+                        bail!("AIO LCD: recovery aborted before reinitialization");
+                    }
                     self.apply_lcd_settings()?;
                     Ok(RecoveryAction::Recovered)
                 } else {
@@ -903,8 +929,11 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
         self.init()
     }
 
-    fn check_and_recover_lcd(&mut self) -> Result<crate::traits::RecoveryAction> {
-        HydroShiftLcdController::check_and_recover_lcd(self)
+    fn check_and_recover_lcd(
+        &mut self,
+        stop: &AtomicBool,
+    ) -> Result<crate::traits::RecoveryAction> {
+        HydroShiftLcdController::check_and_recover_lcd(self, stop)
     }
 
     fn supports_c_command(&self) -> bool {

@@ -282,6 +282,55 @@ fn control_wired(
     }
 }
 
+/// Explain, once per minute per device, why a fan tick wrote nothing.
+fn warn_unresolvable(base_id: &str, aio_cfg: &AioConfig, curves: &HashMap<String, FanCurve>) {
+    use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
+    // Per device: one AIO going quiet must not mute the others.
+    static LAST: StdMutex<Option<HashMap<String, Instant>>> = StdMutex::new(None);
+    let mut guard = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = guard.get_or_insert_with(HashMap::new);
+    if seen
+        .get(base_id)
+        .map(|t| t.elapsed() < Duration::from_secs(60))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    seen.insert(base_id.to_string(), Instant::now());
+    drop(guard);
+
+    let names: Vec<&str> = aio_cfg
+        .fan_speeds
+        .iter()
+        .filter_map(|s| match s {
+            FanSpeed::Curve(n) => Some(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    let missing: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| {
+            curves
+                .get(*n)
+                .map(|c| c.temp_source.is_none())
+                .unwrap_or(true)
+        })
+        .collect();
+    if missing.is_empty() {
+        warn!("AIO {base_id}: no fan slot resolved to a duty, nothing written");
+    } else {
+        warn!(
+            "AIO {base_id}: no fan slot resolved to a duty, nothing written — \
+             curve(s) {:?} have no temp source and the default \
+             /sys/class/thermal/thermal_zone0/temp is unreadable here; \
+             pick a sensor for them or the fans will never be driven",
+            missing
+        );
+    }
+}
+
 fn apply_wired_fans(
     base_id: &str,
     dev: &dyn FanDevice,
@@ -299,6 +348,24 @@ fn apply_wired_fans(
         }
     }
     if !any {
+        // Intentional no-op configurations, where every slot is off or
+        // motherboard synchronized, resolve nothing by design and must not
+        // produce a warning. Only configurations that wanted a duty but
+        // could not resolve one are worth explaining.
+        let all_intentional = aio_cfg
+            .fan_speeds
+            .iter()
+            .all(|s| s.is_off() || s.is_mb_sync());
+        if !all_intentional {
+            // FIX: this used to return silently. A curve whose sensor cannot be
+            // resolved yields no duty, so nothing is written and the fans simply
+            // stay where they were — no error, no log, nothing to debug against.
+            // It is easy to hit: a curve with no explicit temp_source falls back to
+            // reading /sys/class/thermal/thermal_zone0/temp, which does not exist
+            // on plenty of systems (AMD desktops among them), so every curve built
+            // without picking a sensor is a silent no-op.
+            warn_unresolvable(base_id, aio_cfg, curves);
+        }
         return;
     }
     // First configured slot drives the single PWM channel
