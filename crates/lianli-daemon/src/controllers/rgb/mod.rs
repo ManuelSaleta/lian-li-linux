@@ -34,8 +34,6 @@ pub struct RgbController {
     openrgb_server_enabled: bool,
     /// Thermal alert override color (when Some, all devices show this color).
     thermal_override: crate::thermal_alert::SharedThermalAlert,
-    /// Tracks whether thermal override was active last tick (for edge detection).
-    thermal_was_active: bool,
     thermal_last_color: Option<[u8; 3]>,
     /// Cached last-applied OpenRGB direct colors per (device_id, zone).
     /// Used to re-push state after fan PWM disrupts the device's RGB.
@@ -75,7 +73,6 @@ impl RgbController {
             openrgb_active: false,
             openrgb_server_enabled: false,
             thermal_override: crate::thermal_alert::new_shared(),
-            thermal_was_active: false,
             thermal_last_color: None,
             last_direct: HashMap::new(),
             mb_sync_state: HashMap::new(),
@@ -90,6 +87,11 @@ impl RgbController {
         self.thermal_override = override_state;
     }
 
+    /// Whether the thermal alert override is currently requesting a color.
+    pub fn thermal_override_active(&self) -> bool {
+        self.thermal_override.lock().is_some()
+    }
+
     /// Check thermal override and apply/restore if state changed.
     /// Returns true if override is currently active.
     pub fn check_thermal_override(&mut self) -> bool {
@@ -98,15 +100,21 @@ impl RgbController {
         }
         let color = *self.thermal_override.lock();
         let active = color.is_some();
+        // Edge detect on the color itself. Clearing the alert yields None,
+        // which must still run the restore arm below.
         let changed = color != self.thermal_last_color;
 
-        if active && changed {
+        if changed {
             match color {
                 Some(rgb) => {
                     info!(
                         "Applying thermal alert override: [{},{},{}]",
                         rgb[0], rgb[1], rgb[2]
                     );
+                    // Pushing a direct frame drops devices out of MB sync
+                    // mode in firmware. Forget the cached state so the
+                    // restore path re enables sync instead of no opping.
+                    self.mb_sync_state.clear();
                     let alert_effect = RgbEffect {
                         mode: RgbMode::Static,
                         colors: vec![rgb],
@@ -139,13 +147,13 @@ impl RgbController {
                 }
                 None => {
                     info!("Thermal alert cleared — restoring RGB config");
-                    if let Some(ref config) = self.config.clone() {
-                        self.apply_config(config, &self.presets.clone());
+                    match self.config.clone() {
+                        Some(config) => self.apply_config(&config, &self.presets.clone()),
+                        None => warn!("No RGB config to restore after thermal alert"),
                     }
                 }
             }
         }
-        self.thermal_was_active = active;
         self.thermal_last_color = color;
         active
     }

@@ -712,6 +712,11 @@ impl ServiceManager {
                                 "OpenRGB server active — resyncing last direct-color frame instead of native effect"
                             );
                             rgb.resync_wireless_direct_colors();
+                        } else if rgb.thermal_override_active() {
+                            // The drift checker sees the thermal override as
+                            // drift from the configured effect. Do not let
+                            // the resync fight the alert coloring.
+                            debug!("Thermal override active — skipping RGB resync");
                         } else {
                             drop(rgb);
                             self.apply_rgb_config();
