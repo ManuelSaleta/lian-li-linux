@@ -114,6 +114,8 @@ const CONTROL_RELAXED_LEVEL: u8 = 2;
 const CONTROL_RELAX_AFTER: Duration = Duration::from_secs(3);
 
 const REOPEN_DELAY: Duration = Duration::from_millis(100);
+/// Chunk writes slower than this are logged: the panel NAKed bulk OUT.
+const SLOW_CHUNK_WRITE: Duration = Duration::from_millis(100);
 const WAIT_BUFFER_POLL: Duration = Duration::from_millis(50);
 const WAIT_BUFFER_NO_STOP_CAP: u32 = 600;
 
@@ -262,6 +264,32 @@ impl WinUsbLcdCore {
         data: &[u8],
     ) -> std::result::Result<(), lianli_transport::TransportError> {
         self.transport.lock().write_full(data, self.write_timeout)
+    }
+
+    /// `tx_write_full`, timing only the USB write itself. The lock is taken
+    /// first so a busy `SharedTransport` is not misreported as panel NAK
+    /// backpressure.
+    #[inline]
+    fn tx_write_full_timed(
+        &self,
+        data: &[u8],
+        what: &str,
+    ) -> std::result::Result<(), lianli_transport::TransportError> {
+        let tx = self.transport.lock();
+        let started = Instant::now();
+        let result = tx.write_full(data, self.write_timeout);
+        let took = started.elapsed();
+        if took > SLOW_CHUNK_WRITE {
+            // Device NAK stall: the panel is back-pressuring. Visible at WARN
+            // so field logs show stalls that the write timeout absorbed.
+            warn!(
+                "{what} stalled {} ms ({} bytes, result {:?})",
+                took.as_millis(),
+                data.len(),
+                result.as_ref().map(|_| ()).map_err(|e| e.to_string())
+            );
+        }
+        result
     }
 
     #[inline]
@@ -697,7 +725,7 @@ impl WinUsbLcdCore {
         packet[..512].copy_from_slice(&header);
         packet[512..512 + data.len()].copy_from_slice(data);
 
-        match self.tx_write_full(&packet) {
+        match self.tx_write_full_timed(&packet, "H264 chunk write") {
             Ok(_) => self.note_write_success(),
             Err(e) => {
                 // The write is refused on purpose once shutdown starts, so
@@ -710,7 +738,7 @@ impl WinUsbLcdCore {
                 warn!("H264 chunk write failed: {e}");
                 self.try_recover()
                     .with_context(|| format!("recovering from h264 write error: {e}"))?;
-                self.tx_write_full(&packet)
+                self.tx_write_full_timed(&packet, "H264 chunk write retry")
                     .context("h264 chunk write after recovery")?;
                 self.note_write_success();
             }
