@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use runtime::LcdBackend;
 
@@ -32,6 +32,39 @@ use aio_lcd_firmware::AioLcdFirmwareTracker;
 use subsystems::{Controllers, DeviceRegistry, IpcSubsystem, OpenRgbSubsystem};
 
 use runtime::ActiveTarget;
+
+fn event_label(event: &DaemonEvent) -> &'static str {
+    match event {
+        DaemonEvent::IpcUpdate => "IpcUpdate",
+        DaemonEvent::USBCheck => "USBCheck",
+        DaemonEvent::DevicePoll => "DevicePoll",
+        DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
+        DaemonEvent::DisplaySwitchToLcd { .. } => "DisplaySwitchToLcd",
+        DaemonEvent::Bind { .. } => "Bind",
+        DaemonEvent::Unbind { .. } => "Unbind",
+        DaemonEvent::SetEne6k77FanQuantity { .. } => "SetEne6k77FanQuantity",
+        DaemonEvent::FrameFinished => "FrameFinished",
+        DaemonEvent::RecreateMedia { .. } => "RecreateMedia",
+        DaemonEvent::ResyncWirelessRgb => "ResyncWirelessRgb",
+        DaemonEvent::LcdInitComplete { .. } => "LcdInitComplete",
+        DaemonEvent::SystemResumed => "SystemResumed",
+        DaemonEvent::RebootWirelessLcd { .. } => "RebootWirelessLcd",
+        DaemonEvent::DisableLc217Wifi { .. } => "DisableLc217Wifi",
+        DaemonEvent::SetLcdBrightness { .. } => "SetLcdBrightness",
+        DaemonEvent::BindAll => "BindAll",
+        DaemonEvent::UnbindAll => "UnbindAll",
+        DaemonEvent::Shutdown => "Shutdown",
+    }
+}
+
+struct WatchdogClearGuard(Arc<Mutex<(&'static str, Instant)>>);
+impl Drop for WatchdogClearGuard {
+    fn drop(&mut self) {
+        let mut op = self.0.lock();
+        op.0 = "idle";
+        op.1 = Instant::now();
+    }
+}
 
 /// Parse a colon-separated MAC address string (e.g. `"01:23:45:67:89:AB"`)
 /// into a 6-byte array. Returns `None` on malformed input.
@@ -57,18 +90,46 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     USBCheck,
     DevicePoll,
-    DisplaySwitch { device_id: String }, // LCD→Desktop. Handled by main event loop.
-    DisplaySwitchToLcd { device_id: String, pid: u16 }, // Desktop→LCD. Handled by main event loop.
-    Bind { mac_address: String }, // MAC address pending wireless device bind. Handled by main event loop.
-    Unbind { mac_address: String }, // MAC address pending wireless device unbind. Handled by main event loop.
-    SetEne6k77FanQuantity { device_id: String, quantity: u8 },
+    DisplaySwitch {
+        device_id: String,
+    }, // LCD→Desktop. Handled by main event loop.
+    DisplaySwitchToLcd {
+        device_id: String,
+        pid: u16,
+    }, // Desktop→LCD. Handled by main event loop.
+    Bind {
+        mac_address: String,
+    }, // MAC address pending wireless device bind. Handled by main event loop.
+    Unbind {
+        mac_address: String,
+    }, // MAC address pending wireless device unbind. Handled by main event loop.
+    SetEne6k77FanQuantity {
+        device_id: String,
+        quantity: u8,
+    },
     FrameFinished,
-    RecreateMedia { target_index: usize },
+    RecreateMedia {
+        target_index: usize,
+        device_id: String,
+    },
     ResyncWirelessRgb,
+    /// Background LCD init finished; the target is rebuilt so the recovery
+    /// thread starts with firmware state now known.
+    LcdInitComplete {
+        device_id: String,
+    },
     SystemResumed,
-    RebootWirelessLcd { mac: [u8; 6] },
-    DisableLc217Wifi { mac: [u8; 6], disable: bool },
-    SetLcdBrightness { device_id: String, brightness: u8 },
+    RebootWirelessLcd {
+        mac: [u8; 6],
+    },
+    DisableLc217Wifi {
+        mac: [u8; 6],
+        disable: bool,
+    },
+    SetLcdBrightness {
+        device_id: String,
+        brightness: u8,
+    },
     BindAll,
     UnbindAll,
     Shutdown, // SIGINT/SIGTERM received, exit the event loop cleanly
@@ -149,42 +210,41 @@ impl ServiceManager {
         let ready = self.aio_lcd_firmware.drain_due();
 
         for (device_id, enable_512) in ready {
-            let mut firmware_result: Option<Result<(Option<String>, bool), anyhow::Error>> = None;
-            {
-                let mut targets = self.targets.lock();
-                if let Some(target) = targets
-                    .values_mut()
+            let lcd: Option<runtime::SharedHidLcd> = {
+                let targets = self.targets.lock();
+                targets
+                    .values()
                     .find(|t| t.device_identity == device_id)
-                {
-                    if let LcdBackend::HidLcd(ref hid) = target.lcd {
-                        let mut guard = hid.lock();
-                        match guard.try_read_firmware() {
-                            Ok(()) => {
-                                let fw = guard.firmware_version_str().map(|s| s.to_string());
-                                let supports = guard.supports_c_command();
-                                guard.set_use_c_command(enable_512);
-                                firmware_result = Some(Ok((fw, supports)));
-                            }
-                            Err(e) => {
-                                firmware_result = Some(Err(e));
-                            }
-                        }
-                    }
-                }
-            }
-            match firmware_result {
-                Some(Ok((fw, supports))) => {
+                    .and_then(|t| match &t.lcd {
+                        LcdBackend::HidLcd(hid) => Some(Arc::clone(hid)),
+                        _ => None,
+                    })
+            };
+
+            let Some(lcd) = lcd else {
+                continue;
+            };
+            let Some(mut guard) = lcd.try_lock_for(Duration::from_millis(500)) else {
+                debug!("AIO LCD {device_id}: busy, deferring firmware read by 10s");
+                self.aio_lcd_firmware
+                    .schedule(&device_id, Duration::from_secs(10), enable_512);
+                continue;
+            };
+            match guard.try_read_firmware() {
+                Ok(()) => {
+                    let fw = guard.firmware_version_str().map(|s| s.to_string());
+                    let supports = guard.supports_c_command();
+                    guard.set_use_c_command(enable_512);
                     self.aio_lcd_firmware.record(&device_id, fw, supports);
                     info!("AIO LCD firmware read succeeded for {device_id}");
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     warn!(
                         "AIO LCD firmware read failed for {device_id}: {e:#}. \
                          Skipping firmware reads for 30 minutes."
                     );
                     self.aio_lcd_firmware.mark_failed(&device_id);
                 }
-                None => {}
             }
         }
     }
@@ -374,22 +434,25 @@ impl ServiceManager {
                                 target.consecutive_errors += 1;
                                 if target.consecutive_errors >= 3 {
                                     warn!("LCD[{id}] USB error (3/3): {err}");
-                                    to_recreate.push(id);
+                                    to_recreate.push((id, target.device_identity.clone()));
                                 }
                             }
                             Err(runtime::SendError::Other(err)) => {
                                 warn!("LCD[{id}] media error: {err}");
-                                to_recreate.push(id);
+                                to_recreate.push((id, target.device_identity.clone()));
                             }
                         }
                     }
-                    for id in &to_recreate {
-                        targets.remove(id);
+                    for &(id, _) in &to_recreate {
+                        targets.remove(&id);
                     }
                 }
-                for id in to_recreate {
+                for (id, device_id) in to_recreate {
                     stream_main_tx
-                        .send(DaemonEvent::RecreateMedia { target_index: id })
+                        .send(DaemonEvent::RecreateMedia {
+                            target_index: id,
+                            device_id,
+                        })
                         .ok();
                 }
                 thread::sleep(Duration::from_millis(1));
@@ -414,7 +477,49 @@ impl ServiceManager {
             }
         });
 
+        let watchdog_op: Arc<Mutex<(&'static str, Instant)>> =
+            Arc::new(Mutex::new(("idle", Instant::now())));
+        {
+            let wd = Arc::clone(&watchdog_op);
+            thread::spawn(move || {
+                let mut warned_5 = false;
+                let mut warned_30 = false;
+                let mut warned_120 = false;
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let (label, since) = *wd.lock();
+                    let elapsed = since.elapsed();
+                    if elapsed >= Duration::from_secs(120) {
+                        if !warned_120 {
+                            error!("WATCHDOG: main loop stuck on '{label}' for 2min+");
+                            warned_120 = true;
+                        }
+                    } else if elapsed >= Duration::from_secs(30) {
+                        if !warned_30 {
+                            warn!("WATCHDOG: main loop stuck on '{label}' for 30s+");
+                            warned_30 = true;
+                        }
+                    } else if elapsed >= Duration::from_secs(5) {
+                        if !warned_5 {
+                            warn!("WATCHDOG: main loop slow: '{label}' taking 5s+");
+                            warned_5 = true;
+                        }
+                    } else {
+                        warned_5 = false;
+                        warned_30 = false;
+                        warned_120 = false;
+                    }
+                }
+            });
+        }
+
         for event in rx {
+            {
+                let mut op = watchdog_op.lock();
+                op.0 = event_label(&event);
+                op.1 = Instant::now();
+            }
+            let _watchdog_guard = WatchdogClearGuard(Arc::clone(&watchdog_op));
             match event {
                 DaemonEvent::Shutdown => {
                     break;
@@ -516,8 +621,20 @@ impl ServiceManager {
                         }
                     }
                 }
-                DaemonEvent::RecreateMedia { target_index } => {
-                    if let Some(asset) = self.media_assets.get(&target_index).cloned() {
+                DaemonEvent::RecreateMedia {
+                    target_index,
+                    device_id,
+                } => {
+                    // ignore stale events from a detached recovery thread
+                    // whose target slot has since been reused
+                    let matches_current = self
+                        .targets
+                        .lock()
+                        .get(&target_index)
+                        .is_some_and(|t| t.device_identity == device_id);
+                    if !matches_current {
+                        debug!("Ignoring stale RecreateMedia for LCD[{device_id}]");
+                    } else if let Some(asset) = self.media_assets.get(&target_index).cloned() {
                         if let Some(target) = self.targets.lock().get_mut(&target_index) {
                             info!(
                                 "[devices] LCD[{}] recreating media after recovery",
@@ -525,6 +642,19 @@ impl ServiceManager {
                             );
                             target.swap_media(asset, target.custom_h264, self.tx.clone());
                         }
+                    }
+                }
+                DaemonEvent::LcdInitComplete { device_id } => {
+                    // firmware state is now recorded by the init worker;
+                    // start the recovery thread if the target was created
+                    // before init finished. Idempotent, no teardown.
+                    let tx = self.tx.clone();
+                    let mut targets = self.targets.lock();
+                    if let Some((_, target)) = targets
+                        .iter_mut()
+                        .find(|(_, t)| t.device_identity == device_id)
+                    {
+                        target.maybe_start_recovery(tx);
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {

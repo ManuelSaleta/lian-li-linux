@@ -378,17 +378,27 @@ impl ServiceManager {
                             device_cfg.orientation
                         );
                         if let LcdBackend::HidLcd(ref hid) = lcd {
-                            let mut guard = hid.lock();
-                            if let Err(e) = guard.initialize() {
-                                warn!(
-                                    "AIO LCD basic init failed for {}: {e:#}",
-                                    candidate.device_id
-                                );
-                            }
+                            // hydroshift init sleeps 10s, keep it off the main loop
                             if is_wired_aio_lcd(candidate.family) {
-                                guard.set_use_c_command(
-                                    device_cfg.aio_512_frame_for(candidate.family),
-                                );
+                                let hid_init = std::sync::Arc::clone(hid);
+                                let enable_512 = device_cfg.aio_512_frame_for(candidate.family);
+                                let device_id = candidate.device_id.clone();
+                                let init_tx = self.tx.clone();
+                                std::thread::Builder::new()
+                                    .name(format!("lcd-init-{device_id}"))
+                                    .spawn(move || {
+                                        let mut guard = hid_init.lock();
+                                        if let Err(e) = guard.initialize() {
+                                            warn!("AIO LCD init failed for {device_id}: {e:#}");
+                                        }
+                                        guard.set_use_c_command(enable_512);
+                                        drop(guard);
+                                        if let Some(tx) = init_tx {
+                                            tx.send(DaemonEvent::LcdInitComplete { device_id })
+                                                .ok();
+                                        }
+                                    })
+                                    .ok();
                                 self.aio_lcd_firmware
                                     .record(&candidate.device_id, None, false);
                                 if !self.aio_lcd_firmware.should_skip(&candidate.device_id) {
@@ -396,6 +406,14 @@ impl ServiceManager {
                                         &candidate.device_id,
                                         std::time::Duration::from_secs(10),
                                         device_cfg.aio_512_frame_for(candidate.family),
+                                    );
+                                }
+                            } else {
+                                let mut guard = hid.lock();
+                                if let Err(e) = guard.initialize() {
+                                    warn!(
+                                        "AIO LCD basic init failed for {}: {e:#}",
+                                        candidate.device_id
                                     );
                                 }
                             }

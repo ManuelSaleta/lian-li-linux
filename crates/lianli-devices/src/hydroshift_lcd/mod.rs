@@ -18,7 +18,7 @@ mod controller;
 mod protocol;
 mod rgb;
 
-pub use controller::HydroShiftLcdController;
+pub use controller::{find_au_split, pace_frame, HydroShiftLcdController};
 pub use rgb::AioLcdRgbController;
 
 /// AIO LCD device variant.

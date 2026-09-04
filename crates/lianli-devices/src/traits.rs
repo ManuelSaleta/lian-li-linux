@@ -213,6 +213,16 @@ pub trait LcdDevice: Send + Sync {
     fn try_read_firmware(&mut self) -> Result<()> {
         Ok(())
     }
+    /// fps hint for stream mode, returns the effective fps after the
+    /// device cap so callers pace at the same rate
+    fn set_stream_fps(&mut self, fps: f32) -> f32 {
+        fps.round().clamp(1.0, 30.0)
+    }
+    /// Send one H.264 access unit. Lock only for the call, never across a
+    /// whole stream.
+    fn send_h264_frame(&mut self, _frame: &[u8]) -> Result<()> {
+        anyhow::bail!("h264 streaming not supported by this device")
+    }
     fn stream_h264_reader(
         &mut self,
         _reader: &mut dyn std::io::Read,
