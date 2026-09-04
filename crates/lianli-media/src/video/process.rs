@@ -10,7 +10,8 @@
 //! invocation goes through [`output_with_timeout`] instead.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,14 +31,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Both pipes are drained on their own threads: a child that fills a pipe
 /// buffer would otherwise block before it could ever reach the deadline.
 ///
-/// On timeout the child is killed and reaped, so it cannot linger as an
-/// orphan holding the pipes (or the GPU) open.
+/// On timeout the child's whole process group is killed and reaped, so it
+/// cannot linger as an orphan holding the pipes (or the GPU) open.
 pub(crate) fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, TimedOut> {
     let program = cmd.get_program().to_string_lossy().into_owned();
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Run the child as its own process group leader, so a timeout can
+        // take down the whole tree: `Child::kill` only signals the direct
+        // child, and anything it forked would survive as an orphan holding
+        // the pipes open.
+        .process_group(0);
 
     let mut child = cmd.spawn().map_err(|source| TimedOut::Spawn {
         program: program.clone(),
@@ -65,8 +71,7 @@ pub(crate) fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Result
                 if Instant::now() >= deadline {
                     // SIGKILL: the whole point is that the child is wedged and
                     // may not be servicing signals it could catch.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_group_and_reap(&mut child);
                     // The pipes close as the child dies, so the readers finish.
                     let _ = stdout_reader.join();
                     let _ = stderr_reader.join();
@@ -75,8 +80,7 @@ pub(crate) fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Result
                 thread::sleep(POLL_INTERVAL);
             }
             Err(source) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group_and_reap(&mut child);
                 return Err(TimedOut::Spawn { program, source });
             }
         }
@@ -87,6 +91,16 @@ pub(crate) fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Result
         stdout: stdout_reader.join().unwrap_or_default(),
         stderr: stderr_reader.join().unwrap_or_default(),
     })
+}
+
+/// SIGKILL the child's whole process group, then reap the child itself.
+fn kill_group_and_reap(child: &mut Child) {
+    let pgid = -(child.id() as libc::pid_t);
+    if unsafe { libc::kill(pgid, libc::SIGKILL) } == -1 {
+        // The group is already gone; the child cannot be far behind.
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 impl From<TimedOut> for crate::common::MediaError {
