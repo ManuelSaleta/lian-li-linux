@@ -159,7 +159,7 @@ impl WirelessController {
         }
     }
 
-    fn send_bind_packet(
+    pub(super) fn send_bind_packet(
         &self,
         mac: &[u8; 6],
         target_master_mac: &[u8; 6],

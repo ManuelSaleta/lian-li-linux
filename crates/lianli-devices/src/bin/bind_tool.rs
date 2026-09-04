@@ -38,11 +38,23 @@ fn main() -> Result<()> {
             print_device_list(&devices);
         }
 
-        match prompt("\n[r]efresh list / [b]ind / [u]nbind / [q]uit: ")?.as_str() {
+        match prompt("\n[r]efresh list / [b]ind / [u]nbind / [c]hannel / [q]uit: ")?.as_str() {
             "r" => continue,
             "q" | "" => break,
             "b" => prompt_and_run(&ctrl, &devices, Action::Bind)?,
             "u" => prompt_and_run(&ctrl, &devices, Action::Unbind)?,
+            "c" => {
+                let ch = prompt("channel (1-39): ")?;
+                match ch.parse::<u8>() {
+                    Ok(n) if (1..=39).contains(&n) => {
+                        ctrl.switch_channel(n)?;
+                        eprintln!(
+                            "channel switch issued, refresh the list and watch each device ch column"
+                        );
+                    }
+                    _ => eprintln!("invalid channel: {ch}"),
+                }
+            }
             other => eprintln!("unknown command: {other}"),
         }
 
