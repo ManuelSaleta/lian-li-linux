@@ -13,10 +13,11 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const TX_FAILURE_THRESHOLD: u32 = 5;
+const CHANNEL_SWITCH_BACKOFF: Duration = Duration::from_secs(600);
 
 pub struct WirelessController {
     pub(super) tx: Option<Arc<Mutex<RusbBulk>>>,
@@ -29,6 +30,7 @@ pub struct WirelessController {
     pub(super) discovered_devices: Arc<Mutex<Vec<DiscoveredDevice>>>,
     pub(super) device_health: DeviceHealthMap,
     pub(super) master_entries: MasterEntryMap,
+    pub(super) arbitration_backoff: Arc<Mutex<Option<(u8, Instant)>>>,
     pub(super) clock_init_sent: Arc<AtomicBool>,
     /// Motherboard PWM duty cycle (0-255) extracted from RX GetDev response bytes [2:3].
     /// 0xFFFF means unavailable/not yet read.
@@ -56,6 +58,7 @@ impl Clone for WirelessController {
             discovered_devices: Arc::clone(&self.discovered_devices),
             device_health: Arc::clone(&self.device_health),
             master_entries: Arc::clone(&self.master_entries),
+            arbitration_backoff: Arc::clone(&self.arbitration_backoff),
             clock_init_sent: Arc::clone(&self.clock_init_sent),
             mobo_pwm: Arc::clone(&self.mobo_pwm),
             fg_sync: Arc::clone(&self.fg_sync),
@@ -83,6 +86,7 @@ impl WirelessController {
             discovered_devices: Arc::new(Mutex::new(Vec::new())),
             device_health: Arc::new(Mutex::new(Default::default())),
             master_entries: Arc::new(Mutex::new(Default::default())),
+            arbitration_backoff: Arc::new(Mutex::new(None)),
             clock_init_sent: Arc::new(AtomicBool::new(false)),
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
             fg_sync: Arc::new(AtomicBool::new(false)),
@@ -583,8 +587,9 @@ impl WirelessController {
 
     /// Channel our dongle should occupy given the masters visible via
     /// GetDev. Masters sort by MAC and take channels 8, 12, 16 ... so two
-    /// controllers in radio range never share one. Returns None when the
-    /// current channel already matches the slot or the slot is unusable.
+    /// controllers in radio range never share one. A dongle on its own is
+    /// never moved: with no other master visible there is nothing to de
+    /// conflict with, whatever channel the pair already runs on.
     pub fn arbitration_target(&self) -> Option<u8> {
         let current = *self.master_channel.lock();
         if !current.is_multiple_of(2) {
@@ -595,6 +600,9 @@ impl WirelessController {
             return None;
         }
         let mut macs: Vec<[u8; 6]> = self.master_entries.lock().keys().copied().collect();
+        if macs.is_empty() {
+            return None;
+        }
         if !macs.contains(&ours) {
             macs.push(ours);
         }
@@ -603,6 +611,11 @@ impl WirelessController {
         let target = (8 + idx * 4) as u8;
         if target > 38 || target == current {
             return None;
+        }
+        if let Some((blocked, until)) = *self.arbitration_backoff.lock() {
+            if blocked == target && Instant::now() < until {
+                return None;
+            }
         }
         let others: Vec<([u8; 6], u8)> = {
             let masters = self.master_entries.lock();
@@ -622,6 +635,8 @@ impl WirelessController {
     /// Move the dongle and all bound devices to a new channel. Mirrors the
     /// vendor behaviour: host state plus bind packets that carry the new
     /// channel in the payload, addressed on each device's current channel.
+    /// If any device refuses to migrate the switch is reverted, the failed
+    /// target is blocked for ten minutes and the caller gets an error.
     pub fn switch_channel(&self, target: u8) -> Result<()> {
         if !(2..=38).contains(&target) || !target.is_multiple_of(2) {
             bail!("invalid arbitration channel {target}");
@@ -643,13 +658,36 @@ impl WirelessController {
                 .collect()
         };
 
-        for (mac, rx) in bound {
-            if rx == 0 {
+        let mut failed: Vec<([u8; 6], u8)> = Vec::new();
+        for (mac, rx) in &bound {
+            if *rx == 0 {
                 continue;
             }
-            if let Err(e) = self.converge_bind_state(&mac, &master_mac, rx) {
+            if let Err(e) = self.converge_bind_state(mac, &master_mac, *rx) {
                 warn!("channel migration incomplete for {:02x?}: {e:#}", mac);
+                failed.push((*mac, *rx));
             }
+        }
+
+        if !failed.is_empty() {
+            warn!(
+                "device(s) did not follow the channel switch, reverting to {current} and backing off channel {target}"
+            );
+            *self.master_channel.lock() = current;
+            for (mac, rx) in &failed {
+                let _ = self.converge_bind_state(mac, &master_mac, *rx);
+            }
+            *self.arbitration_backoff.lock() = Some((
+                target,
+                Instant::now()
+                    .checked_add(CHANNEL_SWITCH_BACKOFF)
+                    .unwrap_or_else(Instant::now),
+            ));
+            bail!(
+                "channel switch to {target} reverted, {}/{} device(s) stayed behind",
+                failed.len(),
+                bound.len()
+            );
         }
 
         self.save_rf_config()?;
@@ -885,6 +923,33 @@ mod tests {
 
         *c.master_channel.lock() = 7;
         assert_eq!(c.arbitration_target(), None);
+    }
+
+    #[test]
+    fn lone_dongle_is_never_moved() {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = [9u8; 6];
+        *c.master_channel.lock() = 2;
+        assert_eq!(c.arbitration_target(), None);
+    }
+
+    #[test]
+    fn arbitration_backoff_blocks_failed_target() {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = [9u8; 6];
+        *c.master_channel.lock() = 8;
+        c.master_entries.lock().insert(
+            [7u8; 6],
+            crate::wireless::discovery::MasterEntry {
+                channel: 8,
+                last_seen: std::time::Instant::now(),
+            },
+        );
+        *c.arbitration_backoff.lock() = Some((12, Instant::now() + Duration::from_secs(60)));
+        assert_eq!(c.arbitration_target(), None);
+
+        *c.arbitration_backoff.lock() = Some((12, Instant::now() - Duration::from_secs(1)));
+        assert_eq!(c.arbitration_target(), Some(12));
     }
 
     #[test]
