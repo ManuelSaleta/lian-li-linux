@@ -236,6 +236,15 @@ pub struct DeviceInfo {
     pub screen_height: Option<u32>,
     #[serde(default)]
     pub is_unbound_wireless: bool,
+    /// Bind state for unbound wireless devices: "ready_to_bind" when the
+    /// device reports no master, "bind_other" when it belongs to another
+    /// controller. None for bound or wired devices.
+    #[serde(default)]
+    pub wireless_bind_status: Option<String>,
+    /// True when the master owning a "bind_other" device is currently on
+    /// air, meaning the daemon refuses to bind or unbind it.
+    #[serde(default)]
+    pub foreign_master_online: bool,
     /// Target pump RPM range (min, max) for wireless AIOs. None for non-AIO devices.
     #[serde(default)]
     pub pump_rpm_range: Option<(u32, u32)>,

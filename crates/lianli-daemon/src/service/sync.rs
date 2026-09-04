@@ -168,6 +168,8 @@ impl ServiceManager {
                 screen_width: screen.map(|s| s.width),
                 screen_height: screen.map(|s| s.height),
                 is_unbound_wireless: false,
+                wireless_bind_status: None,
+                foreign_master_online: false,
                 pump_rpm_range: None,
                 fan_quantity: None,
                 max_fan_quantity: None,
@@ -274,6 +276,8 @@ impl ServiceManager {
                 screen_width: None,
                 screen_height: None,
                 is_unbound_wireless: false,
+                wireless_bind_status: Some("bind_link".to_string()),
+                foreign_master_online: false,
                 pump_rpm_range: dev.fan_type.pump_rpm_range(),
                 fan_quantity: None,
                 max_fan_quantity: None,
@@ -341,6 +345,12 @@ impl ServiceManager {
                 screen_width: None,
                 screen_height: None,
                 is_unbound_wireless: true,
+                wireless_bind_status: Some(if dev.master_mac == [0u8; 6] {
+                    "ready_to_bind".to_string()
+                } else {
+                    "bind_other".to_string()
+                }),
+                foreign_master_online: self.wireless.foreign_master_online(&dev.master_mac),
                 pump_rpm_range: dev.fan_type.pump_rpm_range(),
                 fan_quantity: None,
                 max_fan_quantity: None,

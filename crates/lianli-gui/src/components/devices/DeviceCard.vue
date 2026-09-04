@@ -98,11 +98,33 @@ async function onSwitchDisplay() {
 // ── Bind / unbind ──────────────────────────────────────────────────────────
 const isUnboundWireless = computed(() => d.value.is_unbound_wireless);
 const isBoundWireless = computed(() => d.value.device_id.startsWith("wireless:"));
+const isBindOther = computed(() => d.value.wireless_bind_status === "bind_other");
+const foreignOnline = computed(() => d.value.foreign_master_online === true);
+const bindLabel = computed(() => {
+  if (pending.value === "bind") return "Binding...";
+  return isBindOther.value ? "Take over" : "Bind";
+});
 
 async function onBind() {
   const mac = d.value.device_id.startsWith("wireless-unbound:")
     ? d.value.device_id.slice("wireless-unbound:".length)
     : d.value.device_id;
+  if (isBindOther.value) {
+    const ok = await new Promise<boolean>((resolve) => {
+      dialog.warning({
+        title: "Take over this device?",
+        content:
+          "It currently belongs to another controller. Taking it over will disconnect it from that PC.",
+        positiveText: "Take over",
+        negativeText: "Cancel",
+        onPositiveClick: () => resolve(true),
+        onNegativeClick: () => resolve(false),
+        onClose: () => resolve(false),
+        onMaskClick: () => resolve(false),
+      });
+    });
+    if (!ok) return;
+  }
   devices.pending.set(d.value.device_id, "bind");
   await aio.bindWireless(mac);
   await refreshSoon();
@@ -218,17 +240,20 @@ async function ping() {
 
     <!-- Bind / unbind -->
     <div class="action-row">
+      <div v-if="isUnboundWireless && isBindOther" class="bind-other-note">
+        {{ foreignOnline ? "Owned by another controller (online)" : "Owned by another controller (offline)" }}
+      </div>
       <n-button
         v-if="isUnboundWireless"
         block
         size="small"
-        type="primary"
+        :type="isBindOther ? 'warning' : 'primary'"
         :loading="pending === 'bind'"
-        :disabled="pending === 'bind'"
+        :disabled="pending === 'bind' || (isBindOther && foreignOnline)"
         @click="onBind"
       >
         <template v-if="pending === 'bind'" #icon><Loader2 :size="14" class="spin" /></template>
-        {{ pending === "bind" ? "Binding..." : "Bind" }}
+        {{ bindLabel }}
       </n-button>
       <n-button
         v-if="isBoundWireless"
@@ -330,6 +355,10 @@ async function ping() {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+}
+.bind-other-note {
+  font-size: var(--font-size-sm);
+  opacity: 0.75;
 }
 .spin {
   animation: spin 1s linear infinite;

@@ -546,6 +546,8 @@ impl ServiceManager {
                     screen_width: None,
                     screen_height: None,
                     is_unbound_wireless: false,
+                    wireless_bind_status: None,
+                    foreign_master_online: false,
                     pump_rpm_range: None,
                     fan_quantity: supports_quantity.then_some(fan_count),
                     max_fan_quantity: max_quantity,

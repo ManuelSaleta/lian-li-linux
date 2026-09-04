@@ -61,6 +61,8 @@ export interface DeviceInfo {
   screen_width: number | null;
   screen_height: number | null;
   is_unbound_wireless: boolean;
+  wireless_bind_status?: string | null;
+  foreign_master_online?: boolean;
   pump_rpm_range?: [number, number] | null;
   fan_quantity?: number | null;
   max_fan_quantity?: number | null;
