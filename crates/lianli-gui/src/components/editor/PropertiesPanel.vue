@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useDialog } from "naive-ui";
 import { FolderOpen, Plus, Trash2 } from "lucide-vue-next";
 import type { Widget, RGBA, RGB, SensorSourceConfig, SensorRange, GradientStop } from "@/types";
@@ -19,6 +19,16 @@ const emit = defineEmits<{
 const dialog = useDialog();
 
 const w = computed(() => props.widget);
+
+// The widget id must commit on blur, not per keystroke, or the selection
+// tracking loses the widget mid edit. A plain :value input without an
+// update listener reverts every keystroke, so keep a local draft.
+const idDraft = ref("");
+watch(
+  () => w.value?.id,
+  (v) => (idDraft.value = v ?? ""),
+  { immediate: true },
+);
 
 // Non-null view used inside the v-if="w" branch — avoids repeating null checks
 // on every inline handler. `current` is only read when `w` is non-null.
@@ -295,7 +305,7 @@ async function browsePath(key: string) {
     <template v-if="w">
       <div class="group-title">Common</div>
       <div class="field"><label class="muted">ID</label>
-        <n-input :value="current.id" size="small" @blur="emit('patchCommon', current.id, 'id', ($event.target as HTMLInputElement).value)" />
+        <n-input v-model:value="idDraft" size="small" @blur="emit('patchCommon', current.id, 'id', idDraft)" />
       </div>
       <div class="grid4">
         <div class="field"><label class="muted">X</label>
@@ -341,7 +351,7 @@ async function browsePath(key: string) {
             size="small"
             placeholder="Shell command — must print a number to stdout"
             :value="(current.kind as any)[key].cmd"
-            @blur="emit('patchKind', current.id, key, { type: 'command', cmd: ($event.target as HTMLInputElement).value })"
+            @update:value="(v) => emit('patchKind', current.id, key, { type: 'command', cmd: v })"
           />
         </div>
         <!-- Color list (sensor ranges / gradient stops) -->
@@ -421,10 +431,10 @@ async function browsePath(key: string) {
         <div v-else class="field">
           <label class="muted">{{ pretty(key) }}</label>
           <div class="path-row" v-if="key === 'path'">
-            <n-input :value="(current.kind as any)[key]" size="small" @blur="emit('patchKind', current.id, key, ($event.target as HTMLInputElement).value)" />
+            <n-input :value="(current.kind as any)[key]" size="small" @update:value="(v) => emit('patchKind', current.id, key, v)" />
             <n-button size="small" @click="browsePath(key)"><template #icon><FolderOpen :size="14" /></template></n-button>
           </div>
-          <n-input v-else :value="(current.kind as any)[key]" size="small" @blur="emit('patchKind', current.id, key, ($event.target as HTMLInputElement).value)" />
+          <n-input v-else :value="(current.kind as any)[key]" size="small" @update:value="(v) => emit('patchKind', current.id, key, v)" />
         </div>
       </template>
     </template>
