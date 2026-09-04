@@ -105,7 +105,7 @@ impl WirelessController {
         Ok(())
     }
 
-    fn converge_bind_state(
+    pub(super) fn converge_bind_state(
         &self,
         mac: &[u8; 6],
         target_master_mac: &[u8; 6],
@@ -136,10 +136,13 @@ impl WirelessController {
                 .device_health
                 .lock()
                 .get(mac)
-                .map(|h| (h.raw_master, h.raw_rx));
+                .map(|h| (h.raw_master, h.raw_rx, h.raw_channel));
 
+            let master_ch = *self.master_channel.lock();
             let converged = match observed {
-                Some((m, r)) => &m == target_master_mac && r == target_rx,
+                Some((m, r, ch)) => {
+                    &m == target_master_mac && r == target_rx && (target_rx == 0 || ch == master_ch)
+                }
                 None => target_master_mac == &[0u8; 6],
             };
             if converged {
@@ -147,9 +150,10 @@ impl WirelessController {
             }
             if Instant::now() >= deadline {
                 bail!(
-                    "bind convergence for {:02x?} timed out after {attempts} attempt(s); observed={:?}",
+                    "bind convergence for {:02x?} timed out after {attempts} attempt(s); observed={:?} ch={}",
                     mac,
-                    observed
+                    observed.map(|o| (o.0, o.1)),
+                    observed.map(|o| o.2).unwrap_or(0)
                 );
             }
         }
@@ -221,8 +225,7 @@ impl WirelessController {
         1
     }
 
-    /// Broadcast SaveConfig to persist device bindings to flash.
-    fn save_rf_config(&self) -> Result<()> {
+    pub(super) fn save_rf_config(&self) -> Result<()> {
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
 
@@ -268,6 +271,7 @@ mod tests {
             masters.insert(
                 [7u8; 6],
                 MasterEntry {
+                    channel: 8,
                     last_seen: Instant::now(),
                 },
             );

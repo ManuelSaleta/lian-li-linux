@@ -162,6 +162,8 @@ pub struct ServiceManager {
     wireless_pending_streak: u32,
     wireless_rebind_in_flight: Arc<AtomicBool>,
     wireless_rebind_last: HashMap<[u8; 6], Instant>,
+    wireless_channel_streak: Option<(u8, u32)>,
+    wireless_channel_in_flight: Arc<AtomicBool>,
     last_poll_mono: Instant,
     last_poll_wall: std::time::SystemTime,
     restart_requested: bool,
@@ -196,6 +198,8 @@ impl ServiceManager {
             wireless_pending_streak: 0,
             wireless_rebind_in_flight: Arc::new(AtomicBool::new(false)),
             wireless_rebind_last: HashMap::new(),
+            wireless_channel_streak: None,
+            wireless_channel_in_flight: Arc::new(AtomicBool::new(false)),
             last_poll_mono: Instant::now(),
             last_poll_wall: std::time::SystemTime::now(),
             restart_requested: false,
@@ -294,6 +298,7 @@ impl ServiceManager {
         }
 
         self.run_wireless_rebind_supervisor();
+        self.run_wireless_channel_supervisor();
 
         self.check_wired_hotplug();
         self.reconcile_wired_wireless_binding();
@@ -355,6 +360,40 @@ impl ServiceManager {
             }
             in_flight.store(false, Ordering::Relaxed);
         });
+    }
+
+    /// Move our dongle off a channel shared with another master. The
+    /// conflict must persist three consecutive polls before switching so a
+    /// briefly powered neighbour does not reshuffle anything.
+    fn run_wireless_channel_supervisor(&mut self) {
+        if self.wireless_channel_in_flight.load(Ordering::Relaxed) {
+            return;
+        }
+        match self.wireless.arbitration_target() {
+            Some(target) => {
+                let streak = match self.wireless_channel_streak {
+                    Some((t, n)) if t == target => (t, n + 1),
+                    _ => (target, 1),
+                };
+                let ready = streak.1 >= 3;
+                self.wireless_channel_streak = Some(streak);
+                if !ready {
+                    return;
+                }
+                self.wireless_channel_streak = None;
+                self.wireless_channel_in_flight
+                    .store(true, Ordering::Relaxed);
+                let wireless = self.wireless.clone();
+                let in_flight = Arc::clone(&self.wireless_channel_in_flight);
+                thread::spawn(move || {
+                    if let Err(e) = wireless.switch_channel(target) {
+                        warn!("channel arbitration failed: {e:#}");
+                    }
+                    in_flight.store(false, Ordering::Relaxed);
+                });
+            }
+            None => self.wireless_channel_streak = None,
+        }
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.

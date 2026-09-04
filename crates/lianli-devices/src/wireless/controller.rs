@@ -581,6 +581,82 @@ impl WirelessController {
         self.device_health.lock().get(mac).map(|h| h.raw_master)
     }
 
+    /// Channel our dongle should occupy given the masters visible via
+    /// GetDev. Masters sort by MAC and take channels 8, 12, 16 ... so two
+    /// controllers in radio range never share one. Returns None when the
+    /// current channel already matches the slot or the slot is unusable.
+    pub fn arbitration_target(&self) -> Option<u8> {
+        let current = *self.master_channel.lock();
+        if !current.is_multiple_of(2) {
+            return None;
+        }
+        let ours = *self.master_mac.lock();
+        if ours == [0u8; 6] {
+            return None;
+        }
+        let mut macs: Vec<[u8; 6]> = self.master_entries.lock().keys().copied().collect();
+        if !macs.contains(&ours) {
+            macs.push(ours);
+        }
+        macs.sort_unstable();
+        let idx = macs.iter().position(|m| *m == ours)?;
+        let target = (8 + idx * 4) as u8;
+        if target > 38 || target == current {
+            return None;
+        }
+        let others: Vec<([u8; 6], u8)> = {
+            let masters = self.master_entries.lock();
+            macs.iter()
+                .filter(|m| **m != ours)
+                .filter_map(|m| masters.get(m).map(|e| (*m, e.channel)))
+                .collect()
+        };
+        info!(
+            "{:?} master dongles in range {:02x?}, moving to channel {target}",
+            others.len(),
+            others
+        );
+        Some(target)
+    }
+
+    /// Move the dongle and all bound devices to a new channel. Mirrors the
+    /// vendor behaviour: host state plus bind packets that carry the new
+    /// channel in the payload, addressed on each device's current channel.
+    pub fn switch_channel(&self, target: u8) -> Result<()> {
+        if !(2..=38).contains(&target) || !target.is_multiple_of(2) {
+            bail!("invalid arbitration channel {target}");
+        }
+        let current = *self.master_channel.lock();
+        if current == target {
+            return Ok(());
+        }
+        *self.master_channel.lock() = target;
+        info!("switching wireless channel {current} -> {target}");
+
+        let master_mac = *self.master_mac.lock();
+        let bound: Vec<([u8; 6], u8)> = {
+            let health = self.device_health.lock();
+            health
+                .iter()
+                .filter(|(_, h)| h.bind_intent && !h.dead)
+                .map(|(mac, h)| (*mac, h.raw_rx))
+                .collect()
+        };
+
+        for (mac, rx) in bound {
+            if rx == 0 {
+                continue;
+            }
+            if let Err(e) = self.converge_bind_state(&mac, &master_mac, rx) {
+                warn!("channel migration incomplete for {:02x?}: {e:#}", mac);
+            }
+        }
+
+        self.save_rf_config()?;
+        info!("wireless channel now {target}");
+        Ok(())
+    }
+
     pub fn device_by_mac(&self, mac: &[u8; 6]) -> Option<DiscoveredDevice> {
         self.discovered_devices
             .lock()
@@ -785,5 +861,47 @@ mod tests {
         let c = controller_with_health(vec![(mac(), entry([7u8; 6]))]);
         assert_eq!(c.observed_master_of(&mac()), Some([7u8; 6]));
         assert_eq!(c.observed_master_of(&[9, 9, 9, 9, 9, 9]), None);
+    }
+
+    #[test]
+    fn arbitration_targets_spread_masters_by_mac() {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = [9u8; 6];
+        assert_eq!(c.arbitration_target(), None);
+
+        let mut masters = c.master_entries.lock();
+        masters.insert(
+            [7u8; 6],
+            crate::wireless::discovery::MasterEntry {
+                channel: 8,
+                last_seen: std::time::Instant::now(),
+            },
+        );
+        drop(masters);
+        assert_eq!(c.arbitration_target(), Some(12));
+
+        *c.master_channel.lock() = 12;
+        assert_eq!(c.arbitration_target(), None);
+
+        *c.master_channel.lock() = 7;
+        assert_eq!(c.arbitration_target(), None);
+    }
+
+    #[test]
+    fn arbitration_slot_follows_mac_order() {
+        let c = WirelessController::new();
+        *c.master_mac.lock() = [8u8; 6];
+        let mut masters = c.master_entries.lock();
+        for m in [[7u8; 6], [9u8; 6]] {
+            masters.insert(
+                m,
+                crate::wireless::discovery::MasterEntry {
+                    channel: 8,
+                    last_seen: std::time::Instant::now(),
+                },
+            );
+        }
+        drop(masters);
+        assert_eq!(c.arbitration_target(), Some(12));
     }
 }

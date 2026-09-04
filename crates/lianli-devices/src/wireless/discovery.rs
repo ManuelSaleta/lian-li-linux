@@ -225,6 +225,7 @@ pub(super) const REBIND_FOREIGN_AFTER: Duration = Duration::from_secs(10);
 /// while freshly sighted, which guards bind and unbind against touching
 /// devices another live controller owns.
 pub(super) struct MasterEntry {
+    pub channel: u8,
     pub last_seen: Instant,
 }
 
@@ -252,7 +253,13 @@ pub(super) fn merge_master_sightings(found: &[([u8; 6], u8)], masters: &MasterEn
                 mac
             );
         }
-        masters.insert(*mac, MasterEntry { last_seen: now });
+        masters.insert(
+            *mac,
+            MasterEntry {
+                channel: *channel,
+                last_seen: now,
+            },
+        );
     }
     masters.retain(|_, m| now.duration_since(m.last_seen) <= LIVENESS_TIMEOUT);
 }
@@ -267,6 +274,7 @@ pub(super) struct DeviceHealth {
     pub dead: bool,
     pub raw_master: [u8; 6],
     pub raw_rx: u8,
+    pub raw_channel: u8,
     pub raw_seen: Instant,
     pub foreign_since: Option<Instant>,
     pub observed_master: [u8; 6],
@@ -285,6 +293,7 @@ impl DeviceHealth {
             dead: false,
             raw_master: [0u8; 6],
             raw_rx: 0,
+            raw_channel: 0,
             raw_seen: Instant::now(),
             foreign_since: None,
             master_cand: None,
@@ -466,6 +475,7 @@ fn merge_sightings(
         h.raw_seen = now;
         h.raw_master = rec.master_mac;
         h.raw_rx = rec.rx_type;
+        h.raw_channel = rec.channel;
 
         let p = &mut h.published;
         p.device_type = rec.device_type;
