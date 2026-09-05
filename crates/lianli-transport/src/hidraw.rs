@@ -7,10 +7,14 @@ use tracing::warn;
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+pub type HidrawReopener = std::sync::Arc<dyn Fn() -> anyhow::Result<HidrawTransport> + Send + Sync>;
+
 pub struct HidrawTransport {
     device: HidDevice,
     /// hidapi write has no timeout, use a nonblocking fd for writes
     write_fd: Option<std::fs::File>,
+    reopener: Option<HidrawReopener>,
+    reopen_count: std::sync::atomic::AtomicU64,
 }
 
 impl HidrawTransport {
@@ -43,7 +47,59 @@ impl HidrawTransport {
                     }
                 },
             );
-        Self { device, write_fd }
+        Self {
+            device,
+            write_fd,
+            reopener: None,
+            reopen_count: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn set_reopener(&mut self, reopener: HidrawReopener) {
+        self.reopener = Some(reopener);
+    }
+
+    fn try_reopen(&mut self) -> Result<(), TransportError> {
+        let reopener = self
+            .reopener
+            .clone()
+            .ok_or_else(|| TransportError::Other("no reopener configured".into()))?;
+        let replacement = reopener().map_err(|e| TransportError::Other(format!("reopen: {e}")))?;
+        let count = self
+            .reopen_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        *self = replacement;
+        self.reopen_count
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn with_reopen<T>(
+        &mut self,
+        mut op: impl FnMut(&mut Self) -> Result<T, TransportError>,
+        label: &str,
+    ) -> Result<T, TransportError> {
+        match op(self) {
+            Ok(v) => Ok(v),
+            Err(e) if self.reopener.is_some() => {
+                if crate::usb::shutting_down() {
+                    tracing::debug!(
+                        "Hidraw {label} failed ({e}) while shutting down, not reopening"
+                    );
+                    return Err(e);
+                }
+                warn!("Hidraw {label} failed ({e}); attempting reopen");
+                self.try_reopen()?;
+                tracing::info!("Hidraw handle reopened, retrying {label}");
+                op(self)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn reopen_count(&self) -> u64 {
+        self.reopen_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn write_timed(
@@ -205,32 +261,52 @@ mod tests {
 
 impl HidTransport for HidrawTransport {
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-        self.write_timed(data, WRITE_TIMEOUT)
+        self.with_reopen(|s| s.write_timed(data, WRITE_TIMEOUT), "write")
     }
 
     fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError> {
-        self.device
-            .read_timeout(buf, timeout_ms)
-            .map_err(|e| TransportError::Read(e.to_string()))
+        self.with_reopen(
+            |s| {
+                s.device
+                    .read_timeout(buf, timeout_ms)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "read_timeout",
+        )
     }
 
     fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-        self.device
-            .send_feature_report(data)
-            .map_err(|e| TransportError::Write(e.to_string()))?;
-        Ok(data.len())
+        self.with_reopen(
+            |s| {
+                s.device
+                    .send_feature_report(data)
+                    .map_err(|e| TransportError::Write(e.to_string()))?;
+                Ok(data.len())
+            },
+            "send_feature_report",
+        )
     }
 
     fn get_feature_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.device
-            .get_feature_report(buf)
-            .map_err(|e| TransportError::Read(e.to_string()))
+        self.with_reopen(
+            |s| {
+                s.device
+                    .get_feature_report(buf)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "get_feature_report",
+        )
     }
 
     fn get_input_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.device
-            .get_input_report(buf)
-            .map_err(|e| TransportError::Read(e.to_string()))
+        self.with_reopen(
+            |s| {
+                s.device
+                    .get_input_report(buf)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "get_input_report",
+        )
     }
 
     fn read_flush(&mut self) {
@@ -241,5 +317,9 @@ impl HidTransport for HidrawTransport {
                 _ => break,
             }
         }
+    }
+
+    fn reopen_count(&self) -> u64 {
+        HidrawTransport::reopen_count(self)
     }
 }
