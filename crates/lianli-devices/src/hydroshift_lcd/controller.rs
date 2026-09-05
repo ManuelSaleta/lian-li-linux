@@ -429,7 +429,7 @@ impl HydroShiftLcdController {
             .context("AIO LCD: write LCD available check")?;
 
         let mut buf = vec![0u8; B_PACKET_SIZE];
-        loop {
+        let available = loop {
             if stop.load(Ordering::Relaxed) {
                 bail!("AIO LCD: availability check aborted (stop requested)");
             }
@@ -438,17 +438,19 @@ impl HydroShiftLcdController {
                 .context("AIO LCD: read LCD available response")?;
 
             if n == 0 {
-                return Ok(true);
+                break true;
             }
             if buf[1] == CMD_LCD_AVAILABLE {
                 let data_len = (buf[9] as usize) << 8 | buf[10] as usize;
-                return Ok(data_len == 1 && buf[B_HEADER_LEN] == 0);
+                break data_len == 1 && buf[B_HEADER_LEN] == 0;
             }
             debug!(
                 "AIO LCD: is_lcd_available: skipping stale response cmd={:#04x}",
                 buf[1]
             );
-        }
+        };
+        self.check_reinit_locked(&mut *dev)?;
+        Ok(available)
     }
 
     pub fn reset_device(&self, stop: &AtomicBool) -> bool {
@@ -710,7 +712,8 @@ impl HydroShiftLcdController {
     fn send_b_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
         self.check_reinit_locked(&mut *dev)?;
-        Self::send_b_command_raw(&mut *dev, cmd, data)
+        Self::send_b_command_raw(&mut *dev, cmd, data)?;
+        self.check_reinit_locked(&mut *dev)
     }
 
     fn send_chunked(&self, cmd: u8, data: &[u8]) -> Result<()> {
@@ -754,7 +757,7 @@ impl HydroShiftLcdController {
         }
 
         self.read_ack(&mut *dev, "send_chunked", ACK_TIMEOUT_MS);
-        Ok(())
+        self.check_reinit_locked(&mut *dev)
     }
 
     fn send_chunked_with(
@@ -798,7 +801,7 @@ impl HydroShiftLcdController {
         }
 
         self.read_ack(&mut *dev, "send_chunked_with", ACK_TIMEOUT_MS);
-        Ok(())
+        self.check_reinit_locked(&mut *dev)
     }
 
     fn read_ack(&self, dev: &mut dyn HidTransport, label: &str, timeout_ms: i32) {

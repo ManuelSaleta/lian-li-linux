@@ -22,7 +22,7 @@ fn make_hidraw_reopener(
     usage_page: Option<u16>,
 ) -> HidrawReopener {
     Arc::new(move || {
-        let (dev, path) = open_hidraw_device(vid, pid, bus, &port_numbers, usage_page)?;
+        let (dev, path) = open_hidraw_device_strict(vid, pid, bus, &port_numbers, usage_page)?;
         let mut transport = HidrawTransport::new(dev, path);
         transport.set_reopener(make_hidraw_reopener(
             vid,
@@ -33,6 +33,45 @@ fn make_hidraw_reopener(
         ));
         Ok(transport)
     })
+}
+
+/// Recovery only accepts the exact saved topology so a replug or sibling
+/// device with the same VID PID usage page can never be opened instead
+fn open_hidraw_device_strict(
+    vid: u16,
+    pid: u16,
+    bus: u8,
+    port_numbers: &[u8],
+    usage_page: Option<u16>,
+) -> Result<(hidapi::HidDevice, Option<std::ffi::OsString>)> {
+    let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
+    let expected = hidraw_path_for_usb_topology(bus, port_numbers).ok_or_else(|| {
+        anyhow::anyhow!(
+            "hidraw topology {bus}-{:?} for {vid:04x}:{pid:04x} not present on reopen",
+            port_numbers
+        )
+    })?;
+    let info = api
+        .device_list()
+        .find(|info| {
+            info.vendor_id() == vid
+                && info.product_id() == pid
+                && usage_page.is_none_or(|up| info.usage_page() == up)
+                && info.path() == expected.as_c_str()
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "hidraw device {vid:04x}:{pid:04x} at saved topology {bus}-{:?} not found",
+                port_numbers
+            )
+        })?;
+    let path: std::ffi::OsString = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(info.path().to_bytes()).to_os_string()
+    };
+    info.open_device(&api)
+        .map(|d| (d, Some(path)))
+        .map_err(|e| anyhow::anyhow!("hidraw reopen {vid:04x}:{pid:04x}: {e}"))
 }
 
 fn make_rusb_reopener(

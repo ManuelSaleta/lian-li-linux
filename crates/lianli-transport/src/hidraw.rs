@@ -65,9 +65,13 @@ impl HidrawTransport {
             .clone()
             .ok_or_else(|| TransportError::Other("no reopener configured".into()))?;
         let replacement = reopener().map_err(|e| TransportError::Other(format!("reopen: {e}")))?;
-        let count = self.reopen_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let count = self
+            .reopen_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         *self = replacement;
-        self.reopen_count.store(count, std::sync::atomic::Ordering::SeqCst);
+        self.reopen_count
+            .store(count, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -80,7 +84,9 @@ impl HidrawTransport {
             Ok(v) => Ok(v),
             Err(e) if self.reopener.is_some() => {
                 if crate::usb::shutting_down() {
-                    tracing::debug!("Hidraw {label} failed ({e}) while shutting down, not reopening");
+                    tracing::debug!(
+                        "Hidraw {label} failed ({e}) while shutting down, not reopening"
+                    );
                     return Err(e);
                 }
                 warn!("Hidraw {label} failed ({e}); attempting reopen");

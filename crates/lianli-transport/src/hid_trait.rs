@@ -48,7 +48,11 @@ mod tests {
         fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
             Ok(data.len())
         }
-        fn read_timeout(&mut self, _buf: &mut [u8], _timeout_ms: i32) -> Result<usize, TransportError> {
+        fn read_timeout(
+            &mut self,
+            _buf: &mut [u8],
+            _timeout_ms: i32,
+        ) -> Result<usize, TransportError> {
             Ok(0)
         }
         fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {
@@ -71,7 +75,11 @@ mod tests {
         fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
             Ok(data.len())
         }
-        fn read_timeout(&mut self, _buf: &mut [u8], _timeout_ms: i32) -> Result<usize, TransportError> {
+        fn read_timeout(
+            &mut self,
+            _buf: &mut [u8],
+            _timeout_ms: i32,
+        ) -> Result<usize, TransportError> {
             Ok(0)
         }
         fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {

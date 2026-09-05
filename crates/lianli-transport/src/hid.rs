@@ -246,9 +246,13 @@ impl RusbHid {
             .clone()
             .ok_or_else(|| TransportError::Other("no reopener configured".into()))?;
         let replacement = reopener().map_err(|e| TransportError::Other(format!("reopen: {e}")))?;
-        let count = self.reopen_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let count = self
+            .reopen_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         *self = replacement;
-        self.reopen_count.store(count, std::sync::atomic::Ordering::SeqCst);
+        self.reopen_count
+            .store(count, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 

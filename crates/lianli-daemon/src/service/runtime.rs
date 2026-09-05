@@ -28,6 +28,32 @@ pub(super) type SharedHidLcd = Arc<Mutex<Box<dyn LcdDevice>>>;
 // boundary would otherwise grow `accum` without limit
 const MAX_AU_BYTES: usize = 4 * 1024 * 1024;
 
+/// Sends one access unit with three attempts, false when aborted or failed
+fn send_h264_au_with_retry(lcd: &SharedHidLcd, au: &[u8], aborted: &dyn Fn() -> bool) -> bool {
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        if aborted() {
+            return false;
+        }
+        let result = {
+            let mut guard = lcd.lock();
+            guard.send_h264_frame(au)
+        };
+        match result {
+            Ok(()) => return true,
+            Err(e) => {
+                debug!("HID h264 send error (attempt {attempt}/3): {e:#}");
+                last_err = Some(e);
+                thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        warn!("HID h264 send failed after retries: {e:#}");
+    }
+    false
+}
+
 /// Returns the join handle plus the worker's private halt flag so a
 /// replacement stream can stop this one promptly.
 fn spawn_hid_h264_stream(
@@ -84,29 +110,7 @@ fn spawn_hid_h264_stream(
                 if au.is_empty() {
                     continue;
                 }
-                let mut send_err = None;
-                for attempt in 1..=3 {
-                    if halted() {
-                        return;
-                    }
-                    let result = {
-                        let mut guard = lcd.lock();
-                        guard.send_h264_frame(&au)
-                    };
-                    match result {
-                        Ok(()) => {
-                            send_err = None;
-                            break;
-                        }
-                        Err(e) => {
-                            debug!("HID h264 stream send error (attempt {attempt}/3): {e:#}");
-                            send_err = Some(e);
-                            thread::sleep(Duration::from_millis(150));
-                        }
-                    }
-                }
-                if let Some(e) = send_err {
-                    warn!("HID h264 stream send failed after retries: {e:#}");
+                if !send_h264_au_with_retry(&lcd, &au, &halted) {
                     return;
                 }
                 pace_frame(&mut next_deadline, frame_interval);
@@ -117,9 +121,7 @@ fn spawn_hid_h264_stream(
         }
         if clean_eof && !halted() && !accum.is_empty() {
             pace_frame(&mut next_deadline, frame_interval);
-            if let Err(e) = lcd.lock().send_h264_frame(&accum) {
-                debug!("HID h264 flush: {e:#}");
-            }
+            send_h264_au_with_retry(&lcd, &accum, &halted);
         }
     });
     (handle, halt)
@@ -942,6 +944,8 @@ struct H264FileSource {
     started: bool,
     hid_thread: Option<JoinHandle<()>>,
     hid_stop: Arc<AtomicBool>,
+    /// Set by the worker when it ended without a stop request
+    hid_completed: Option<Arc<AtomicBool>>,
     /// start() runs every streaming tick; back off after an open failure
     /// so a missing file retries periodically instead of once or per-tick.
     retry_after: Option<std::time::Instant>,
@@ -958,6 +962,7 @@ impl H264FileSource {
             started: false,
             hid_thread: None,
             hid_stop: Arc::new(AtomicBool::new(false)),
+            hid_completed: None,
             retry_after: None,
         }
     }
@@ -968,10 +973,17 @@ impl FrameSource for H264FileSource {
         if self.started {
             if let Some(ref t) = self.hid_thread {
                 if t.is_finished() {
-                    warn!("HID h264 stream thread ended; resetting for restart");
+                    let completed = self
+                        .hid_completed
+                        .as_ref()
+                        .is_some_and(|c| c.load(Ordering::Acquire));
                     if let Some(t) = self.hid_thread.take() {
                         let _ = t.join();
                     }
+                    if completed {
+                        return Ok(());
+                    }
+                    warn!("HID h264 stream thread ended; resetting for restart");
                     self.hid_stop = Arc::new(AtomicBool::new(false));
                     self.started = false;
                 } else {
@@ -1004,8 +1016,14 @@ impl FrameSource for H264FileSource {
                 let lcd = Arc::clone(hid);
                 let (looping, fps) = (self.looping, self.fps);
                 let stop = Arc::clone(&self.hid_stop);
+                let completed = Arc::new(AtomicBool::new(false));
+                let done = Arc::clone(&completed);
+                self.hid_completed = Some(completed);
                 self.hid_thread = Some(thread::spawn(move || {
-                    stream_h264_file_to_hid(lcd, file, looping, fps, stop);
+                    stream_h264_file_to_hid(lcd, file, looping, fps, Arc::clone(&stop));
+                    if !stop.load(Ordering::Relaxed) {
+                        done.store(true, Ordering::Release);
+                    }
                 }));
             }
             _ => {}
@@ -1161,18 +1179,19 @@ fn stream_h264_file_to_hid(
     };
     let mut read_buf = vec![0u8; 64 * 1024];
     let mut next_deadline = Instant::now() + frame_interval;
+    let stopped = || stop.load(Ordering::Relaxed);
     // a single-AU file never yields a split boundary, its only frame rides
     // the EOF flush, allow it exactly one looping pass
     let mut first_pass = true;
     let mut saw_boundary = false;
     'outer: loop {
-        if stop.load(Ordering::Relaxed) {
+        if stopped() {
             break;
         }
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         let mut sent_any = false;
         loop {
-            if stop.load(Ordering::Relaxed) {
+            if stopped() {
                 break 'outer;
             }
             let n = match file.read(&mut read_buf) {
@@ -1194,36 +1213,14 @@ fn stream_h264_file_to_hid(
                 break 'outer;
             }
             while let Some(split) = find_au_split(&accum) {
-                if stop.load(Ordering::Relaxed) {
+                if stopped() {
                     break 'outer;
                 }
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if au.is_empty() {
                     continue;
                 }
-                let mut send_err = None;
-                for attempt in 1..=3 {
-                    if stop.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                    let result = {
-                        let mut guard = lcd.lock();
-                        guard.send_h264_frame(&au)
-                    };
-                    match result {
-                        Ok(()) => {
-                            send_err = None;
-                            break;
-                        }
-                        Err(e) => {
-                            debug!("HID h264 stream send error (attempt {attempt}/3): {e:#}");
-                            send_err = Some(e);
-                            thread::sleep(Duration::from_millis(150));
-                        }
-                    }
-                }
-                if let Some(e) = send_err {
-                    warn!("HID h264 stream send failed after retries: {e:#}");
+                if !send_h264_au_with_retry(&lcd, &au, &stopped) {
                     break 'outer;
                 }
                 saw_boundary = true;
@@ -1233,14 +1230,13 @@ fn stream_h264_file_to_hid(
         }
         // reached only via the EOF break (every other exit is break 'outer),
         // residual flush is paced like a regular AU
-        if !stop.load(Ordering::Relaxed) && !accum.is_empty() {
+        if !stopped() && !accum.is_empty() {
             pace_frame(&mut next_deadline, frame_interval);
-            match lcd.lock().send_h264_frame(&accum) {
-                Ok(()) => sent_any = true,
-                Err(e) => debug!("HID h264 flush: {e:#}"),
+            if send_h264_au_with_retry(&lcd, &accum, &stopped) {
+                sent_any = true;
             }
         }
-        if !looping || stop.load(Ordering::Relaxed) {
+        if !looping || stopped() {
             break;
         }
         // only loop when real AU boundaries were found: a boundary-less
