@@ -13,7 +13,7 @@ use lianli_shared::screen::ScreenInfo;
 use lianli_transport::HidTransport;
 use parking_lot::Mutex;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -169,6 +169,7 @@ pub struct HydroShiftLcdController {
     last_recovery_attempt: Mutex<Option<Instant>>,
     drain_stop: Arc<AtomicBool>,
     lcd_unavailable_count: AtomicU32,
+    last_reopen_count: AtomicU64,
 }
 
 impl HydroShiftLcdController {
@@ -191,6 +192,7 @@ impl HydroShiftLcdController {
             last_recovery_attempt: Mutex::new(None),
             drain_stop: Arc::new(AtomicBool::new(false)),
             lcd_unavailable_count: AtomicU32::new(0),
+            last_reopen_count: AtomicU64::new(0),
         })
     }
 
@@ -324,7 +326,7 @@ impl HydroShiftLcdController {
         Ok(hs)
     }
 
-    pub fn apply_lcd_settings(&self) -> Result<()> {
+    fn apply_lcd_settings_raw(&self, dev: &mut dyn HidTransport) -> Result<()> {
         let brightness = self.brightness.load(Ordering::Relaxed);
         let rotation = self.rotation.load(Ordering::Relaxed);
         let mut payload = [0u8; 8];
@@ -333,8 +335,28 @@ impl HydroShiftLcdController {
         payload[2] = rotation;
         payload[7] = self.video_fps.load(Ordering::Relaxed);
 
-        self.send_b_command(CMD_LCD_CONTROL, &payload)?;
+        Self::send_b_command_raw(dev, CMD_LCD_CONTROL, &payload)?;
         debug!("LCD settings applied: brightness={brightness}, rotation={rotation}");
+        Ok(())
+    }
+
+    pub fn apply_lcd_settings(&self) -> Result<()> {
+        let mut dev = self.device.lock();
+        self.last_reopen_count
+            .store(dev.reopen_count(), Ordering::Relaxed);
+        self.apply_lcd_settings_raw(&mut *dev)
+    }
+
+    fn check_reinit_locked(&self, dev: &mut dyn HidTransport) -> Result<()> {
+        let current = dev.reopen_count();
+        let last = self.last_reopen_count.load(Ordering::Relaxed);
+        if current > last {
+            info!(
+                "HydroShift LCD transport reopened (count: {current} > {last}); re-applying LCD settings"
+            );
+            self.apply_lcd_settings_raw(dev)?;
+            self.last_reopen_count.store(current, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -398,6 +420,7 @@ impl HydroShiftLcdController {
             bail!("AIO LCD: availability check aborted before write (stop requested)");
         }
         let mut dev = self.device.lock();
+        self.check_reinit_locked(&mut *dev)?;
 
         let mut pkt = vec![0u8; B_PACKET_SIZE];
         pkt[0] = REPORT_ID_B;
@@ -517,13 +540,43 @@ impl HydroShiftLcdController {
                     self.apply_lcd_settings()?;
                     Ok(RecoveryAction::Recovered)
                 } else {
-                    warn!("Device reset failed");
-                    Ok(RecoveryAction::NoChange)
+                    warn!("Device reset failed, attempting fallback LCD settings reinit");
+                    if let Err(err) = self.apply_lcd_settings() {
+                        warn!("Fallback apply_lcd_settings failed: {err:#}");
+                        Ok(RecoveryAction::NoChange)
+                    } else {
+                        info!("Fallback apply_lcd_settings succeeded");
+                        Ok(RecoveryAction::Recovered)
+                    }
                 }
             }
             Err(e) => {
-                debug!("LCD availability check failed: {e:#}");
-                Ok(RecoveryAction::NoChange)
+                let count = self.lcd_unavailable_count.fetch_add(1, Ordering::Relaxed) + 1;
+                debug!("LCD availability check failed ({count}/{UNAVAILABLE_THRESHOLD}): {e:#}");
+                if count < UNAVAILABLE_THRESHOLD {
+                    return Ok(RecoveryAction::NoChange);
+                }
+                self.lcd_unavailable_count.store(0, Ordering::Relaxed);
+                warn!("LCD availability check failed {count} times — attempting recovery");
+                *self.last_recovery_attempt.lock() = Some(Instant::now());
+                if self.reset_device(stop) {
+                    info!("Device reset successful, reinitializing LCD");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if stop.load(Ordering::Relaxed) {
+                        bail!("AIO LCD: recovery aborted before reinitialization");
+                    }
+                    self.apply_lcd_settings()?;
+                    Ok(RecoveryAction::Recovered)
+                } else {
+                    warn!("Device reset failed, attempting fallback LCD settings reinit");
+                    if let Err(err) = self.apply_lcd_settings() {
+                        warn!("Fallback apply_lcd_settings failed: {err:#}");
+                        Ok(RecoveryAction::NoChange)
+                    } else {
+                        info!("Fallback apply_lcd_settings succeeded");
+                        Ok(RecoveryAction::Recovered)
+                    }
+                }
             }
         }
     }
@@ -615,11 +668,10 @@ impl HydroShiftLcdController {
         write_a_command_raw(&mut *dev, cmd, data)
     }
 
-    fn send_b_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
+    fn send_b_command_raw(dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
         let total_size = data.len();
         let mut offset = 0;
         let mut packet_num: u32 = 0;
-        let mut dev = self.device.lock();
 
         loop {
             let remaining = total_size.saturating_sub(offset);
@@ -648,8 +700,17 @@ impl HydroShiftLcdController {
             }
         }
 
-        self.read_ack(&mut *dev, "send_b_command", READ_TIMEOUT_MS);
+        let mut buf = [0u8; B_PACKET_SIZE];
+        if let Err(e) = dev.read_timeout(&mut buf, READ_TIMEOUT_MS) {
+            debug!("AIO LCD: send_b_command ack: {e:#}");
+        }
         Ok(())
+    }
+
+    fn send_b_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
+        let mut dev = self.device.lock();
+        self.check_reinit_locked(&mut *dev)?;
+        Self::send_b_command_raw(&mut *dev, cmd, data)
     }
 
     fn send_chunked(&self, cmd: u8, data: &[u8]) -> Result<()> {
@@ -663,6 +724,7 @@ impl HydroShiftLcdController {
         let mut offset = 0;
         let mut packet_num: u32 = 0;
         let mut dev = self.device.lock();
+        self.check_reinit_locked(&mut *dev)?;
 
         loop {
             let remaining = total_size.saturating_sub(offset);
@@ -707,6 +769,7 @@ impl HydroShiftLcdController {
         let mut offset = 0;
         let mut packet_num: u32 = 0;
         let mut dev = self.device.lock();
+        self.check_reinit_locked(&mut *dev)?;
 
         loop {
             let remaining = total_size.saturating_sub(offset);
@@ -926,7 +989,8 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
     }
 
     fn initialize(&mut self) -> Result<()> {
-        self.init()
+        self.init()?;
+        self.apply_lcd_settings()
     }
 
     fn check_and_recover_lcd(

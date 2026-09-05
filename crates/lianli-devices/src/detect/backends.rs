@@ -3,7 +3,9 @@ use super::DetectedDevice;
 use anyhow::Result;
 use lianli_shared::config::HidBackend;
 use lianli_shared::device_id::DeviceFamily;
-use lianli_transport::{HidTransport, HidrawTransport, RusbBulk, RusbHid, RusbHidReopener};
+use lianli_transport::{
+    HidTransport, HidrawReopener, HidrawTransport, RusbBulk, RusbHid, RusbHidReopener,
+};
 use parking_lot::Mutex;
 use rusb::{Device, GlobalContext};
 use std::sync::Arc;
@@ -11,6 +13,27 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 type SharedHid = Arc<Mutex<Box<dyn HidTransport>>>;
+
+fn make_hidraw_reopener(
+    vid: u16,
+    pid: u16,
+    bus: u8,
+    port_numbers: Vec<u8>,
+    usage_page: Option<u16>,
+) -> HidrawReopener {
+    Arc::new(move || {
+        let (dev, path) = open_hidraw_device(vid, pid, bus, &port_numbers, usage_page)?;
+        let mut transport = HidrawTransport::new(dev, path);
+        transport.set_reopener(make_hidraw_reopener(
+            vid,
+            pid,
+            bus,
+            port_numbers.clone(),
+            usage_page,
+        ));
+        Ok(transport)
+    })
+}
 
 fn make_rusb_reopener(
     vid: u16,
@@ -209,10 +232,11 @@ pub fn open_shared_hid(
 ) -> Result<SharedHid> {
     match backend {
         HidBackend::Hidraw => {
+            let pn = port_numbers.to_vec();
             let (dev, path) = open_hidraw_device(vid, pid, bus, port_numbers, usage_page)?;
-            Ok(Arc::new(Mutex::new(Box::new(HidrawTransport::new(
-                dev, path,
-            )))))
+            let mut transport = HidrawTransport::new(dev, path);
+            transport.set_reopener(make_hidraw_reopener(vid, pid, bus, pn, usage_page));
+            Ok(Arc::new(Mutex::new(Box::new(transport))))
         }
         HidBackend::Rusb => {
             let pn = port_numbers.to_vec();

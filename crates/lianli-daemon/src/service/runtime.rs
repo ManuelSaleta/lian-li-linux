@@ -84,12 +84,29 @@ fn spawn_hid_h264_stream(
                 if au.is_empty() {
                     continue;
                 }
-                let result = {
-                    let mut guard = lcd.lock();
-                    guard.send_h264_frame(&au)
-                };
-                if let Err(e) = result {
-                    warn!("HID h264 stream send error: {e:#}");
+                let mut send_err = None;
+                for attempt in 1..=3 {
+                    if halted() {
+                        return;
+                    }
+                    let result = {
+                        let mut guard = lcd.lock();
+                        guard.send_h264_frame(&au)
+                    };
+                    match result {
+                        Ok(()) => {
+                            send_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("HID h264 stream send error (attempt {attempt}/3): {e:#}");
+                            send_err = Some(e);
+                            thread::sleep(Duration::from_millis(150));
+                        }
+                    }
+                }
+                if let Some(e) = send_err {
+                    warn!("HID h264 stream send failed after retries: {e:#}");
                     return;
                 }
                 pace_frame(&mut next_deadline, frame_interval);
@@ -949,7 +966,20 @@ impl H264FileSource {
 impl FrameSource for H264FileSource {
     fn start(&mut self, lcd: &LcdBackend) -> anyhow::Result<()> {
         if self.started {
-            return Ok(());
+            if let Some(ref t) = self.hid_thread {
+                if t.is_finished() {
+                    warn!("HID h264 stream thread ended; resetting for restart");
+                    if let Some(t) = self.hid_thread.take() {
+                        let _ = t.join();
+                    }
+                    self.hid_stop = Arc::new(AtomicBool::new(false));
+                    self.started = false;
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
         }
         if let Some(t) = self.retry_after {
             if std::time::Instant::now() < t {
@@ -1171,12 +1201,29 @@ fn stream_h264_file_to_hid(
                 if au.is_empty() {
                     continue;
                 }
-                let result = {
-                    let mut guard = lcd.lock();
-                    guard.send_h264_frame(&au)
-                };
-                if let Err(e) = result {
-                    warn!("HID h264 stream send error: {e:#}");
+                let mut send_err = None;
+                for attempt in 1..=3 {
+                    if stop.load(Ordering::Relaxed) {
+                        break 'outer;
+                    }
+                    let result = {
+                        let mut guard = lcd.lock();
+                        guard.send_h264_frame(&au)
+                    };
+                    match result {
+                        Ok(()) => {
+                            send_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("HID h264 stream send error (attempt {attempt}/3): {e:#}");
+                            send_err = Some(e);
+                            thread::sleep(Duration::from_millis(150));
+                        }
+                    }
+                }
+                if let Some(e) = send_err {
+                    warn!("HID h264 stream send failed after retries: {e:#}");
                     break 'outer;
                 }
                 saw_boundary = true;

@@ -39,6 +39,7 @@ pub struct RusbHid {
     /// Optional self-healing reopener. When set, an I/O error triggers a
     /// fresh open + retry.
     reopener: Option<RusbHidReopener>,
+    reopen_count: std::sync::atomic::AtomicU64,
 }
 
 impl RusbHid {
@@ -193,6 +194,7 @@ impl RusbHid {
             ep_in,
             ep_out,
             reopener,
+            reopen_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -244,8 +246,14 @@ impl RusbHid {
             .clone()
             .ok_or_else(|| TransportError::Other("no reopener configured".into()))?;
         let replacement = reopener().map_err(|e| TransportError::Other(format!("reopen: {e}")))?;
+        let count = self.reopen_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         *self = replacement;
+        self.reopen_count.store(count, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    pub fn reopen_count(&self) -> u64 {
+        self.reopen_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Run `op` against the inner handle. If it fails and a reopener is
@@ -518,5 +526,9 @@ impl HidTransport for RusbHid {
 
     fn read_flush(&mut self) {
         RusbHid::read_flush(self)
+    }
+
+    fn reopen_count(&self) -> u64 {
+        RusbHid::reopen_count(self)
     }
 }

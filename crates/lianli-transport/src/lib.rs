@@ -20,5 +20,5 @@ pub mod usb;
 pub use error::TransportError;
 pub use hid::{RusbHid, RusbHidReopener};
 pub use hid_trait::HidTransport;
-pub use hidraw::HidrawTransport;
+pub use hidraw::{HidrawReopener, HidrawTransport};
 pub use usb::RusbBulk;
