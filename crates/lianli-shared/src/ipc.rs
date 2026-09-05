@@ -259,9 +259,9 @@ pub struct DeviceInfo {
     /// (port, fan_index) for daisy-chained TL LCD fans. None for other devices.
     #[serde(default)]
     pub port_index: Option<(u8, u8)>,
-    /// MAC of the wireless group this wired LCD receiver is paired with
-    /// (via V2 dongle HID topology matching). None for non-LCD devices or
-    /// when no V2 dongle is present.
+    /// MAC of the bound wireless group this wired device duplicates.
+    /// Set via V2 dongle HID topology matching for LCD fans or via the
+    /// device link MAC for receivers and AIOs. The GUI hides tagged entries.
     #[serde(default)]
     pub wireless_group_mac: Option<String>,
     #[serde(default)]

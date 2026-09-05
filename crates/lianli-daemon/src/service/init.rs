@@ -268,16 +268,11 @@ impl ServiceManager {
     }
 
     pub(super) fn reconcile_wired_wireless_binding(&self) {
-        let aio_macs: HashSet<[u8; 6]> = self
-            .wireless
-            .devices()
-            .iter()
-            .filter(|d| d.is_aio())
-            .map(|d| d.mac)
-            .collect();
+        // Wired devices whose link MAC matches a bound wireless group are RF owned
+        let bound_macs: HashSet<[u8; 6]> = self.wireless.devices().iter().map(|d| d.mac).collect();
         for dev in self.registry.fan_devices.values() {
             if let Some(mac) = dev.wireless_link_mac() {
-                dev.set_wireless_bound(aio_macs.contains(&mac));
+                dev.set_wireless_bound(bound_macs.contains(&mac));
             }
         }
     }

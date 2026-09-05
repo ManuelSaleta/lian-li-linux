@@ -50,7 +50,9 @@ export const useDevicesStore = defineStore("devices", () => {
   const pending = usePendingAction();
 
   const visible = computed(() =>
-    list.value.filter((d) => !DONGLE_FAMILIES.includes(d.family)),
+    list.value.filter(
+      (d) => !DONGLE_FAMILIES.includes(d.family) && d.wireless_group_mac == null,
+    ),
   );
 
   /** Device lookup by id. */
@@ -58,8 +60,11 @@ export const useDevicesStore = defineStore("devices", () => {
     return list.value.find((d) => d.device_id === id);
   }
 
-  /** Devices that expose an LCD screen. */
-  const lcdDevices = computed(() => visible.value.filter((d) => d.has_lcd));
+  /**
+   * Devices that expose an LCD screen. Derived from the full list so wired
+   * LCD endpoints hidden as wireless duplicates stay targetable here.
+   */
+  const lcdDevices = computed(() => list.value.filter((d) => d.has_lcd));
 
   /** Devices that have controllable fans (excluding AIOs handled on the AIO page). */
   const fanDevices = computed(() =>

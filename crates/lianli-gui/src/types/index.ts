@@ -69,6 +69,7 @@ export interface DeviceInfo {
   firmware_version?: string | null;
   supports_c_command?: boolean;
   port_index?: [number, number] | null;
+  wireless_group_mac?: string | null;
 }
 
 export interface OpenRgbServerStatus {

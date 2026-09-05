@@ -57,6 +57,10 @@ Both V1 (VID 0x0416) and V2 (VID 0x1A86) wireless dongles are supported. Binding
 
 > **Note:** Wireless devices with LCDs still need to be plugged in via USB to control the LCD. LCD cannot be controlled through wireless dongle alone.
 
+When a device is connected both ways at once it shows once as a wireless group and the duplicate
+wired entry is hidden, control and telemetry go over RF. Merging wired LCD fans into their wireless
+group needs the V2 dongle, V1 dongles show both entries.
+
 ### USB
 
 | Device | Fan Control | RGB | LCD | Pump | Tested |

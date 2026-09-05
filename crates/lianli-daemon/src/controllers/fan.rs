@@ -4,7 +4,7 @@ use lianli_devices::traits::FanDevice;
 use lianli_devices::wireless::{build_payload, SensorSnapshot, WirelessController};
 use lianli_shared::fan::{interpolate_curve, FanConfig, FanCurve, FanSpeed};
 use lianli_shared::sensors::{self, picker, ResolvedSensor, SensorInfo, SensorSource};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -272,6 +272,12 @@ fn fan_control_thread(
 
         let mut wireless_pwm_changed = false;
 
+        // RF bound wired devices are driven via the wireless path
+        let bound_wireless_macs: HashSet<[u8; 6]> = wireless
+            .as_ref()
+            .map(|w| w.devices().iter().map(|d| d.mac).collect())
+            .unwrap_or_default();
+
         for (group_idx, group) in config.speeds.iter().enumerate() {
             let is_wireless = group
                 .device_id
@@ -357,6 +363,13 @@ fn fan_control_thread(
                     apply_wireless_by_id(&wireless, device_id, &speeds, group_idx);
                 } else if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
                     if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
+                        if dev
+                            .wireless_link_mac()
+                            .is_some_and(|m| bound_wireless_macs.contains(&m))
+                        {
+                            debug!("Skipping RF-bound wired device {device_id}");
+                            continue;
+                        }
                         let stop = dev.stop_pwm();
                         let mapped = map_stop(&speeds, stop);
                         if let Err(err) = dev.set_fan_speed(port, mapped[0]) {
@@ -366,6 +379,13 @@ fn fan_control_thread(
                         warn!("Fan group {group_idx}: device '{device_id}' not found");
                     }
                 } else if let Some(dev) = wired.get(device_id) {
+                    if dev
+                        .wireless_link_mac()
+                        .is_some_and(|m| bound_wireless_macs.contains(&m))
+                    {
+                        debug!("Skipping RF-bound wired device {device_id}");
+                        continue;
+                    }
                     let stop = dev.stop_pwm();
                     let mapped = map_stop(&speeds, stop);
                     if let Err(err) = dev.set_fan_speeds(&mapped) {

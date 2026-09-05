@@ -3,7 +3,7 @@ use lianli_devices::detect::{enumerate_devices, probe_tl_lcd_port_indices};
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::DeviceInfo;
 use lianli_shared::screen::screen_info_for;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
 impl ServiceManager {
@@ -362,29 +362,22 @@ impl ServiceManager {
             });
         }
 
-        let aio_macs: HashSet<[u8; 6]> = self
-            .wireless
-            .devices()
-            .iter()
-            .filter(|d| d.is_aio())
-            .map(|d| d.mac)
-            .collect();
-        let wireless_bound_base: HashSet<String> = self
+        // Tag wired fan entries whose link MAC is bound wireless so the GUI
+        // can hide them, they stay targetable for LCD and brightness
+        let bound_macs: HashSet<[u8; 6]> = self.wireless.devices().iter().map(|d| d.mac).collect();
+        let link_mac_of_base: HashMap<&str, [u8; 6]> = self
             .registry
             .fan_devices
             .iter()
-            .filter(|(_, d)| d.wireless_link_mac().is_some_and(|m| aio_macs.contains(&m)))
-            .map(|(id, _)| id.clone())
+            .filter_map(|(id, d)| {
+                let mac = d.wireless_link_mac()?;
+                bound_macs.contains(&mac).then_some((id.as_str(), mac))
+            })
             .collect();
 
-        let visible_fan_info: Vec<DeviceInfo> = self
-            .registry
-            .fan_device_info
-            .iter()
-            .filter(|d| !wireless_bound_base.contains(base_of_port_suffix(&d.device_id)))
-            .cloned()
-            .collect();
-        devices.extend(visible_fan_info.clone());
+        let mut fan_info: Vec<DeviceInfo> = self.registry.fan_device_info.clone();
+        tag_fan_entries(&mut fan_info, &link_mac_of_base);
+        devices.extend(fan_info);
 
         // Read wired fan RPMs and split per port.
         for (base_id, dev) in self.registry.fan_devices.iter() {
@@ -432,20 +425,24 @@ impl ServiceManager {
         // USB bus contention from opening every device for serial reads.
         // Drop entries already emitted from fan_device_info above so each
         // physical endpoint surfaces exactly once.
-        let opened_topos: HashSet<&str> = visible_fan_info
+        let opened_topos: HashSet<&str> = self
+            .registry
+            .fan_device_info
             .iter()
             .filter_map(|d| d.topology_key.as_deref())
+            .collect();
+        let bound_mac_strs: HashSet<String> = self
+            .wireless
+            .devices()
+            .iter()
+            .map(|d| d.mac_str())
             .collect();
         devices.extend(
             self.registry
                 .cached_usb_devices
                 .iter()
-                .filter(|d| {
-                    d.topology_key
-                        .as_deref()
-                        .is_none_or(|t| !opened_topos.contains(t))
-                })
-                .cloned(),
+                .cloned()
+                .filter_map(|d| retained_cache_entry(d, &opened_topos, &bound_mac_strs)),
         );
 
         {
@@ -479,11 +476,135 @@ fn find_wireless_group_mac(
         if lianli_devices::wireless::share_parent(entry.bus, &entry.port_numbers, bus, ports)
             && known_wireless_macs.contains(&entry.mac)
         {
-            return Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                entry.mac[0], entry.mac[1], entry.mac[2], entry.mac[3], entry.mac[4], entry.mac[5],
-            ));
+            return Some(mac_str(&entry.mac));
         }
     }
     None
+}
+
+fn mac_str(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+fn tag_fan_entries(fan_info: &mut [DeviceInfo], link_mac_of_base: &HashMap<&str, [u8; 6]>) {
+    for d in fan_info.iter_mut() {
+        if let Some(mac) = link_mac_of_base.get(base_of_port_suffix(&d.device_id)) {
+            d.wireless_group_mac = Some(mac_str(mac));
+        }
+    }
+}
+
+fn retained_cache_entry(
+    mut d: DeviceInfo,
+    opened_topos: &HashSet<&str>,
+    bound_mac_strs: &HashSet<String>,
+) -> Option<DeviceInfo> {
+    if d.topology_key
+        .as_deref()
+        .is_some_and(|t| opened_topos.contains(t))
+    {
+        return None;
+    }
+    if !d
+        .wireless_group_mac
+        .as_deref()
+        .is_some_and(|m| bound_mac_strs.contains(m))
+    {
+        d.wireless_group_mac = None;
+    }
+    Some(d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(device_id: &str, topology_key: Option<&str>) -> DeviceInfo {
+        DeviceInfo {
+            device_id: device_id.to_string(),
+            family: DeviceFamily::WiredReceiver,
+            name: "Test".to_string(),
+            serial: Some(device_id.to_string()),
+            vid: 0x43A8,
+            pid: 0x0101,
+            has_lcd: false,
+            has_fan: true,
+            has_pump: false,
+            has_rgb: true,
+            has_pump_control: false,
+            fan_count: Some(3),
+            per_fan_control: None,
+            mb_sync_support: false,
+            rgb_zone_count: None,
+            screen_width: None,
+            screen_height: None,
+            is_unbound_wireless: false,
+            wireless_bind_status: None,
+            foreign_master_online: false,
+            pump_rpm_range: None,
+            fan_quantity: None,
+            max_fan_quantity: None,
+            firmware_version: None,
+            supports_c_command: false,
+            port_index: None,
+            wireless_group_mac: None,
+            topology_key: topology_key.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn tag_fan_entries_matches_base_and_port_ids() {
+        let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let mut links = HashMap::new();
+        links.insert("hid:abc", mac);
+        let mut fan_info = vec![
+            dev("hid:abc", None),
+            dev("hid:abc:port2", None),
+            dev("hid:other", None),
+        ];
+        tag_fan_entries(&mut fan_info, &links);
+        assert_eq!(
+            fan_info[0].wireless_group_mac.as_deref(),
+            Some("11:22:33:44:55:66")
+        );
+        assert_eq!(
+            fan_info[1].wireless_group_mac.as_deref(),
+            Some("11:22:33:44:55:66")
+        );
+        assert_eq!(fan_info[2].wireless_group_mac, None);
+    }
+
+    #[test]
+    fn cache_entry_dropped_when_topology_opened() {
+        let mut topos = HashSet::new();
+        topos.insert("1-2.3");
+        let d = retained_cache_entry(dev("hid:abc", Some("1-2.3")), &topos, &HashSet::new());
+        assert!(d.is_none());
+    }
+
+    #[test]
+    fn cache_entry_stale_tag_cleared() {
+        let mut bound = HashSet::new();
+        bound.insert("aa:bb:cc:dd:ee:ff".to_string());
+        let mut entry = dev("hid:abc", Some("1-2.3"));
+        entry.wireless_group_mac = Some("11:22:33:44:55:66".to_string());
+        let kept = retained_cache_entry(entry, &HashSet::new(), &bound).unwrap();
+        assert_eq!(kept.wireless_group_mac, None);
+    }
+
+    #[test]
+    fn cache_entry_bound_tag_kept() {
+        let mut bound = HashSet::new();
+        bound.insert("aa:bb:cc:dd:ee:ff".to_string());
+        let mut entry = dev("hid:abc", None);
+        entry.wireless_group_mac = Some("aa:bb:cc:dd:ee:ff".to_string());
+        let kept = retained_cache_entry(entry, &HashSet::new(), &bound).unwrap();
+        assert_eq!(
+            kept.wireless_group_mac.as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+    }
 }

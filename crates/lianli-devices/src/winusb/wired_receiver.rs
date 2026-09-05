@@ -11,6 +11,7 @@ use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
 use lianli_transport::usb::{RusbBulk, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
 use parking_lot::Mutex;
 use rusb::{Device, GlobalContext};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -133,6 +134,10 @@ pub struct WiredReceiverController {
     /// Frame-terminator counter for RGB streaming ack cadence (vendor: read
     /// ack every 14th frame terminator, not every frame).
     stream_ack_counter: Mutex<u8>,
+    /// Group MAC from GetInfo, equals the wireless record MAC of the same fans.
+    mac: Mutex<Option<[u8; 6]>>,
+    /// Set while the fan group is bound over RF, suppresses wired writes and telemetry.
+    is_wireless: AtomicBool,
 }
 
 impl WiredReceiverController {
@@ -157,11 +162,16 @@ impl WiredReceiverController {
             led_buffer: Mutex::new(Vec::new()),
             color_nonce: Mutex::new(1),
             stream_ack_counter: Mutex::new(0),
+            mac: Mutex::new(None),
+            is_wireless: AtomicBool::new(false),
         };
 
         if let Ok(status) = ctrl.get_info() {
             *ctrl.fan_count.lock() = status.fan_count.clamp(1, 4);
             *ctrl.is_inf_right_attach.lock() = status.is_inf_right_attach;
+            if !status.mac.iter().all(|&b| b == 0) {
+                *ctrl.mac.lock() = Some(status.mac);
+            }
             info!(
                 "{}: {} fans detected{}",
                 params.name,
@@ -266,6 +276,9 @@ impl WiredReceiverController {
 
     /// SetFansPWM (0x13) with per-device PWM floor.
     pub fn set_fans_pwm(&self, duties: [u8; 4]) -> Result<()> {
+        if self.is_wireless.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let fan_count = *self.fan_count.lock() as usize;
         let right_attach = *self.is_inf_right_attach.lock();
         let mut duties = duties;
@@ -296,6 +309,9 @@ impl WiredReceiverController {
     /// Enable/disable motherboard PWM sync. Sentinels all four fan ports
     /// to value 6, which the firmware interprets as "follow MB PWM header."
     pub fn set_mb_sync(&self, enabled: bool) -> Result<()> {
+        if self.is_wireless.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let mut tx = [0u8; PACKET_SIZE];
         tx[0] = CMD_SET_FANS_PWM;
         if enabled {
@@ -429,6 +445,9 @@ impl WiredReceiverController {
         interval_ms: u16,
         is_outer_match_max: bool,
     ) -> Result<()> {
+        if self.is_wireless.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let right_attach = *self.is_inf_right_attach.lock();
         let ordered = if right_attach {
             reverse_per_fan_chunks(colors, self.params.leds_per_fan as usize)
@@ -572,6 +591,9 @@ impl FanDevice for WiredReceiverController {
     }
 
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
+        if self.is_wireless.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
         let status = self.get_info()?;
         Ok(status.fan_rpm.to_vec())
     }
@@ -591,6 +613,14 @@ impl FanDevice for WiredReceiverController {
 
     fn set_mb_rpm_sync(&self, _port: u8, sync: bool) -> Result<()> {
         self.set_mb_sync(sync)
+    }
+
+    fn wireless_link_mac(&self) -> Option<[u8; 6]> {
+        *self.mac.lock()
+    }
+
+    fn set_wireless_bound(&self, bound: bool) {
+        self.is_wireless.store(bound, Ordering::Relaxed);
     }
 }
 
