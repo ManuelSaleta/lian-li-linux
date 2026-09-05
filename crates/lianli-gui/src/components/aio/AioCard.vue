@@ -6,6 +6,7 @@ import { useDevicesStore } from "@/stores/devices";
 import { useFansStore } from "@/stores/fans";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
 import LabeledSlider from "@/components/common/LabeledSlider.vue";
+import SensorSelect from "@/components/common/SensorSelect.vue";
 import { enumerateSensorsAsOptions, optionForConfig, decodeOption } from "@/stores/sensorOptions";
 
 const props = defineProps<{ device: DeviceInfo }>();
@@ -176,16 +177,16 @@ const mac = computed(() =>
 
       <!-- Display sensors -->
       <div class="field"><label class="muted">CPU Temp</label>
-        <n-select size="small" :value="sensorValue('cpu_temp_source')" :options="sensorOptions" @update:value="(v) => onSensor('cpu_temp_source', v)" filterable />
+        <SensorSelect size="small" :value="sensorValue('cpu_temp_source')" :options="sensorOptions" @update:value="(v) => onSensor('cpu_temp_source', v)" filterable />
       </div>
       <div class="field"><label class="muted">CPU Load</label>
-        <n-select size="small" :value="sensorValue('cpu_load_source')" :options="sensorOptions" @update:value="(v) => onSensor('cpu_load_source', v)" filterable />
+        <SensorSelect size="small" :value="sensorValue('cpu_load_source')" :options="sensorOptions" @update:value="(v) => onSensor('cpu_load_source', v)" filterable />
       </div>
       <div class="field"><label class="muted">GPU Temp</label>
-        <n-select size="small" :value="sensorValue('gpu_temp_source')" :options="sensorOptions" @update:value="(v) => onSensor('gpu_temp_source', v)" filterable />
+        <SensorSelect size="small" :value="sensorValue('gpu_temp_source')" :options="sensorOptions" @update:value="(v) => onSensor('gpu_temp_source', v)" filterable />
       </div>
       <div class="field"><label class="muted">GPU Load</label>
-        <n-select size="small" :value="sensorValue('gpu_load_source')" :options="sensorOptions" @update:value="(v) => onSensor('gpu_load_source', v)" filterable />
+        <SensorSelect size="small" :value="sensorValue('gpu_load_source')" :options="sensorOptions" @update:value="(v) => onSensor('gpu_load_source', v)" filterable />
       </div>
 
       <!-- Text colors -->

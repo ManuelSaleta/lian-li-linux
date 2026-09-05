@@ -184,3 +184,10 @@ a:hover {
 .page-leave-to {
   opacity: 0;
 }
+
+/* Sensor pickers: dropdown expands to the longest option (min trigger
+   width), capped with a horizontal scroll fallback for extreme labels */
+.sensor-select-menu {
+  max-width: min(560px, 90vw);
+  overflow-x: auto;
+}

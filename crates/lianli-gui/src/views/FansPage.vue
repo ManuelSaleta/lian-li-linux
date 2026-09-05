@@ -6,6 +6,7 @@ import { useConfigStore } from "@/stores/config";
 import { useDevicesStore } from "@/stores/devices";
 import FanCurveEditor from "@/components/fans/FanCurveEditor.vue";
 import FanGroupCard from "@/components/fans/FanGroupCard.vue";
+import SensorSelect from "@/components/common/SensorSelect.vue";
 import type { SensorSource, DeviceInfo } from "@/types";
 import { enumerateSensorsAsOptions } from "@/stores/sensorOptions";
 
@@ -219,7 +220,7 @@ function onHysteresisPwm(v: number | null) {
           </div>
           <div class="field">
             <label class="muted">Temperature source</label>
-            <n-select
+            <SensorSelect
               size="small"
               :value="tempSourceValue"
               :options="sensorOptions"

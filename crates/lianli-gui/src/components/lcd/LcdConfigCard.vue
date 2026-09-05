@@ -13,6 +13,7 @@ import SensorGaugeEditor from "@/components/lcd/SensorGaugeEditor.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
 import OrientationPicker from "@/components/common/OrientationPicker.vue";
 import LabeledSlider from "@/components/common/LabeledSlider.vue";
+import SensorSelect from "@/components/common/SensorSelect.vue";
 import { enumerateSensorsAsOptions, optionForConfig, decodeOption } from "@/stores/sensorOptions";
 import { screenSupportsH264, aio512FrameDefault } from "@/constants/screen";
 
@@ -390,7 +391,7 @@ const brightness = computed({
     <template v-if="entry.type === 'sensor'">
       <div class="field">
         <label class="muted">Sensor source</label>
-        <n-select :value="sensorSourceValue()" :options="sensorOptions" size="small" filterable @update:value="onSensorSource" />
+        <SensorSelect :value="sensorSourceValue()" :options="sensorOptions" size="small" filterable @update:value="onSensorSource" />
       </div>
       <div v-if="entry.sensor?.source?.type === 'command'" class="field">
         <label class="muted">Custom command</label>

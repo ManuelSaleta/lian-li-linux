@@ -4,6 +4,7 @@ import { useDialog } from "naive-ui";
 import { FolderOpen, Plus, Trash2 } from "lucide-vue-next";
 import type { Widget, RGBA, RGB, SensorSourceConfig, SensorRange, GradientStop } from "@/types";
 import { open } from "@tauri-apps/plugin-dialog";
+import SensorSelect from "@/components/common/SensorSelect.vue";
 
 const props = defineProps<{
   widget: Widget | null;
@@ -339,7 +340,7 @@ async function browsePath(key: string) {
         <!-- Source (sensor) -->
         <div v-if="valueKind(key, (current.kind as any)[key]) === 'source'" class="field">
           <label class="muted">{{ pretty(key) }}</label>
-          <n-select
+          <SensorSelect
             size="small"
             :value="sourceSelectValue(key)"
             :options="sourceOptionsFor(key)"
