@@ -1020,8 +1020,7 @@ impl FrameSource for H264FileSource {
                 let done = Arc::clone(&completed);
                 self.hid_completed = Some(completed);
                 self.hid_thread = Some(thread::spawn(move || {
-                    stream_h264_file_to_hid(lcd, file, looping, fps, Arc::clone(&stop));
-                    if !stop.load(Ordering::Relaxed) {
+                    if stream_h264_file_to_hid(lcd, file, looping, fps, stop) {
                         done.store(true, Ordering::Release);
                     }
                 }));
@@ -1162,13 +1161,14 @@ fn make_frame_source(
     }
 }
 
+/// True when the file finished on its own and the worker must not restart
 fn stream_h264_file_to_hid(
     lcd: SharedHidLcd,
     mut file: std::fs::File,
     looping: bool,
     fps: f32,
     stop: Arc<AtomicBool>,
-) {
+) -> bool {
     use lianli_devices::hydroshift_lcd::{find_au_split, pace_frame};
     use std::io::{Read, Seek, SeekFrom};
     use std::time::Instant;
@@ -1184,21 +1184,21 @@ fn stream_h264_file_to_hid(
     // the EOF flush, allow it exactly one looping pass
     let mut first_pass = true;
     let mut saw_boundary = false;
-    'outer: loop {
+    loop {
         if stopped() {
-            break;
+            return false;
         }
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         let mut sent_any = false;
         loop {
             if stopped() {
-                break 'outer;
+                return false;
             }
             let n = match file.read(&mut read_buf) {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("HID h264 file read error: {e:#}");
-                    break 'outer;
+                    return false;
                 }
             };
             if n == 0 {
@@ -1210,25 +1210,25 @@ fn stream_h264_file_to_hid(
                     "HID h264 file: no AU boundary within {} bytes, aborting",
                     MAX_AU_BYTES
                 );
-                break 'outer;
+                return false;
             }
             while let Some(split) = find_au_split(&accum) {
                 if stopped() {
-                    break 'outer;
+                    return false;
                 }
                 let au: Vec<u8> = accum.drain(..split).collect();
                 if au.is_empty() {
                     continue;
                 }
                 if !send_h264_au_with_retry(&lcd, &au, &stopped) {
-                    break 'outer;
+                    return false;
                 }
                 saw_boundary = true;
                 sent_any = true;
                 pace_frame(&mut next_deadline, frame_interval);
             }
         }
-        // reached only via the EOF break (every other exit is break 'outer),
+        // reached only via the EOF break (every other exit is a return),
         // residual flush is paced like a regular AU
         if !stopped() && !accum.is_empty() {
             pace_frame(&mut next_deadline, frame_interval);
@@ -1236,19 +1236,22 @@ fn stream_h264_file_to_hid(
                 sent_any = true;
             }
         }
-        if !looping || stopped() {
-            break;
+        if stopped() {
+            return false;
+        }
+        if !looping {
+            return true;
         }
         // only loop when real AU boundaries were found: a boundary-less
         // file's flush would otherwise re-send identical data forever
         if !sent_any || (first_pass && !saw_boundary) {
             warn!("HID h264 file produced no complete access units, stopping");
-            break;
+            return true;
         }
         first_pass = false;
         if let Err(e) = file.seek(SeekFrom::Start(0)) {
             warn!("HID h264 file seek failed: {e:#}");
-            break;
+            return false;
         }
     }
 }
