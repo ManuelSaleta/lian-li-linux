@@ -9,6 +9,10 @@ autostart directories. EVDI capture requires its userspace library and kernel mo
 The capture coordinator verifies the active graphical session and bounds worker
 startup, communication and teardown. Runtime video/FPS changes recreate its encoder.
 
+Hyprland sessions use a native headless output and Wayland capture. Output ownership
+is recorded for recovery, and mode changes are checked against the active output.
+Only the application's owned headless output is removed during cleanup.
+
 Playback prepares replacements separately and retires old sources without blocking
 the streaming loop. Settings reports the active transfer method, encoder and FPS
 limit. Retry failed media uses saved settings without saving unrelated drafts.

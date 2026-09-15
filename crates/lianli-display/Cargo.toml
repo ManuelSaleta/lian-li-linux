@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 libloading = "0.8.9"
 anyhow = { workspace = true }
 lianli-evdi = { path = "../lianli-evdi" }

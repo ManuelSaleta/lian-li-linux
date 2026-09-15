@@ -36,6 +36,20 @@ pub struct Control {
 }
 
 impl Control {
+    pub(crate) fn wayland_stream(&self) -> Result<UnixStream> {
+        let runtime =
+            std::env::var_os("XDG_RUNTIME_DIR").context("No graphical runtime directory")?;
+        let display = std::env::var_os("WAYLAND_DISPLAY").context("No Wayland display")?;
+        let path = Path::new(&runtime).join(display);
+        let stream = socket::connect(&path, Instant::now() + CONTROL_TIMEOUT)?;
+        let peer = socket::credentials(&stream)?;
+        ensure!(
+            peer.uid == self.uid && peer.pid == self.pid,
+            "Wayland and Hyprland control belong to different sessions"
+        );
+        Ok(stream)
+    }
+
     pub fn from_env() -> Result<Self> {
         let runtime =
             std::env::var_os("XDG_RUNTIME_DIR").context("No graphical runtime directory")?;

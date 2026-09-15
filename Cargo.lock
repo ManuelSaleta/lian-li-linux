@@ -2609,6 +2609,8 @@ dependencies = [
  "socket2",
  "tempfile",
  "tracing",
+ "wayland-client",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

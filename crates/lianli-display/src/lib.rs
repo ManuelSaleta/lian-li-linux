@@ -6,6 +6,7 @@ pub mod frame;
 pub mod hyprland;
 pub mod login;
 mod socket;
+pub mod wayland;
 
 use anyhow::Result;
 use frame::{Frame, Mode, PixelFormat};
