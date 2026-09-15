@@ -142,7 +142,7 @@ impl ServiceManager {
         let targets = self
             .targets
             .try_lock_for(Duration::from_millis(100))
-            .ok_or("LCD targets are busy; retry shortly")?;
+            .ok_or("LCD targets are busy. Retry shortly.")?;
         let planned: Vec<_> = targets
             .iter()
             .filter(|(index, target)| {
@@ -307,16 +307,16 @@ impl ServiceManager {
         let mut targets = self
             .targets
             .try_lock_for(Duration::from_millis(100))
-            .ok_or("LCD targets are busy; retry shortly")?;
+            .ok_or("LCD targets are busy. Retry shortly.")?;
         for plan in &pending.targets {
             let current = targets
                 .get(&plan.index)
-                .ok_or("LCD disappeared while preparing; previous session preserved")?;
+                .ok_or("LCD disconnected during preparation. Previous session preserved.")?;
             if current.device_identity != plan.identity
                 || !Arc::ptr_eq(&current.asset, &plan.previous)
                 || current.cleaner_payload_limit() != plan.payload_limit
             {
-                return Err("LCD changed while preparing; previous session preserved".into());
+                return Err("LCD changed during preparation. Previous session preserved.".into());
             }
         }
         let mut saved = Vec::new();
@@ -451,7 +451,7 @@ impl ServiceManager {
         let targets_handle = Arc::clone(&self.targets);
         let mut targets = targets_handle
             .try_lock_for(Duration::from_millis(100))
-            .ok_or("LCD targets are busy; cleaner restoration deferred")?;
+            .ok_or("LCD targets are busy. Previous display restoration is waiting.")?;
         let mut restore = Vec::new();
         for session in &mut self.pixel_clean_sessions {
             let mut retained = Vec::new();

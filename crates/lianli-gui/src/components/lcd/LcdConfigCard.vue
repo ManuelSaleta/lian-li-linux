@@ -380,8 +380,8 @@ async function handleStopClean() {
   stopPending.value = true;
   try {
     const result = await lcd.stopPixelClean(cleanerTargetId.value);
-    if (result.stopped) message.info("Pixel cleaner stopped; previous display restoration requested");
-    else message.warning("This session was not stopped; refreshed its status from the daemon");
+    if (result.stopped) message.info("Pixel cleaner stopped. Previous display restoration requested");
+    else message.warning("This session was not stopped. Refreshed its status from the daemon");
   } catch (err) {
     message.error(`Failed to stop pixel cleaner: ${err}`);
   } finally {

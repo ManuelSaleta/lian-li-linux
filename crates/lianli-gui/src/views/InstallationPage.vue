@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { useMessage } from "naive-ui";
 import { useDaemonStore } from "@/stores/daemon";
 import { useInstallationStore } from "@/stores/installation";
-import ServiceStatus from "@/components/common/ServiceStatus.vue";
+import MediaStreamStatus from "@/components/common/MediaStreamStatus.vue";
 import DiagnosticExport from "@/components/common/DiagnosticExport.vue";
 import DesktopStreamStatus from "@/components/common/DesktopStreamStatus.vue";
 import { INSTALLATION_GUIDES, type CheckState, type InstallationGuide } from "@/types/installation";
@@ -14,8 +14,10 @@ const daemon = useDaemonStore();
 const message = useMessage();
 const checkedAt = computed(() => installation.report
   ? new Date(installation.report.checked_at_unix_ms).toLocaleString() : "Not checked yet");
+const needsAttention = computed(() => (installation.report?.findings ?? []).filter((finding) => finding.state !== "passed" && finding.state !== "not_applicable"));
+const otherFindings = computed(() => (installation.report?.findings ?? []).filter((finding) => finding.state === "passed" || finding.state === "not_applicable"));
 const stateLabels: Record<CheckState, string> = {
-  passed: "Passed", failed: "Failed", unavailable: "Unverified", not_applicable: "Not applicable",
+  passed: "Passed", failed: "Failed", unavailable: "Unverified", not_applicable: "N/A",
 };
 onMounted(() => {
   if (!installation.report) void installation.recheck();
@@ -43,46 +45,45 @@ async function recheck() {
     <n-alert v-if="installation.error" type="error" title="Check could not finish">
       {{ installation.error }} Previous results, if shown, may be out of date.
     </n-alert>
-    <n-card title="Daemon connection">
-      <n-tag :type="daemon.connected ? 'success' : 'warning'">
-        {{ daemon.connected ? "Connected" : "Waiting for daemon" }}
-      </n-tag>
-      <p v-if="daemon.info">Version {{ daemon.info.version }} · {{ daemon.info.mode }} mode</p>
-      <p v-if="daemon.socketPath">{{ daemon.socketPath }}</p>
-      <p v-if="!daemon.connected">
-        Fresh installations leave both services stopped. Choose one service mode using the guide.
-        If a service is already starting, wait and recheck; if it fails, inspect its journal.
-      </p>
-      <p v-else-if="!daemon.info">This daemon does not report its identity. Update the daemon and GUI together.</p>
-      <n-button @click="guide(installation.report?.context.kind === 'distrobox' ? 'distrobox' : 'service_modes')">
-        Open service guide
-      </n-button>
-    </n-card>
-    <ServiceStatus />
+    <div class="connection-row">
+      <n-tag :type="daemon.connected ? 'success' : 'warning'">{{ daemon.connected ? 'Connected' : 'Offline' }}</n-tag>
+      <span v-if="daemon.info">{{ daemon.info.version }} · {{ daemon.info.mode }}</span>
+      <router-link to="/settings">Service settings</router-link>
+      <n-button size="small" text type="primary" @click="guide(installation.report?.context.kind === 'distrobox' ? 'distrobox' : 'service_modes')">Setup guide</n-button>
+    </div>
+    <p v-if="!daemon.connected" class="muted">Start a service in Settings, then Recheck.</p>
+    <div class="checks-grid">
+      <n-card v-for="finding in needsAttention" :key="finding.code" :title="finding.title" size="small">
+        <template #header-extra><n-tag size="small" :type="finding.severity === 'error' ? 'error' : 'warning'">{{ stateLabels[finding.state] }}</n-tag></template>
+        <p>{{ finding.remediation || finding.evidence }}</p>
+        <details><summary>Details</summary><p class="check-context">{{ finding.context }} · {{ finding.feature }}</p><p>{{ finding.evidence }}</p></details>
+        <n-button size="small" text @click="guide(finding.guide)">Open guide</n-button>
+      </n-card>
+    </div>
+    <details v-if="otherFindings.length" class="passed-checks">
+      <summary>{{ otherFindings.length }} passed or non-applicable checks</summary>
+      <div class="checks-grid">
+        <n-card v-for="finding in otherFindings" :key="finding.code" size="small" :title="finding.title">
+          <template #header-extra><n-tag size="small" :type="finding.state === 'passed' ? 'success' : 'default'">{{ stateLabels[finding.state] }}</n-tag></template>
+          <p class="check-context">{{ finding.feature }}</p>
+          <details><summary>Details</summary><p>{{ finding.evidence }}</p><n-button size="small" text @click="guide(finding.guide)">Open guide</n-button></details>
+        </n-card>
+      </div>
+    </details>
+    <MediaStreamStatus />
     <DesktopStreamStatus />
-    <DiagnosticExport />
-    <n-card v-for="finding in installation.report?.findings ?? []" :key="finding.code" :title="finding.title">
-      <template #header-extra>
-        <n-tag :type="finding.state === 'passed' ? 'success' : finding.severity === 'error' ? 'error' : 'warning'">
-          {{ stateLabels[finding.state] }}
-        </n-tag>
-      </template>
-      <div class="check-context">{{ finding.context }} · {{ finding.feature }}</div>
-      <p>{{ finding.evidence }}</p>
-      <p v-if="finding.state !== 'passed'">{{ finding.remediation }}</p>
-      <n-button @click="guide(finding.guide)">Open guide</n-button>
-    </n-card>
-    <n-alert type="info" title="What these checks verify">
-      These checks report installation files, service snapshots, daemon credentials, USB/HID node permissions and the last configuration load.
-      Node permissions do not prove that driver operations or desktop capture will succeed. Configuration findings describe the last load attempt; Recheck does not reload files or start devices.
-    </n-alert>
+    <details class="diagnostics"><summary>Export diagnostics & daemon logs</summary><DiagnosticExport /></details>
+    <details><summary>About these checks</summary><p>Checks cover installation, permissions, service state and the last configuration load. Recheck does not reload configuration or test physical playback.</p><p v-if="daemon.socketPath">{{ daemon.socketPath }}</p></details>
   </div>
 </template>
 
 <style scoped>
-.health-page { display: flex; flex-direction: column; gap: var(--space-4); max-width: 1000px; }
+.health-page { display: flex; flex-direction: column; gap: var(--space-4); }
 .health-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 h1 { font-size: var(--font-size-2xl); margin: 0; }
 p { margin: var(--space-3) 0; overflow-wrap: anywhere; }
 .check-context { color: var(--text-secondary); }
+.checks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: var(--space-3); }
+.connection-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+summary { cursor: pointer; color: var(--text-secondary); margin-bottom: var(--space-2); }
 </style>

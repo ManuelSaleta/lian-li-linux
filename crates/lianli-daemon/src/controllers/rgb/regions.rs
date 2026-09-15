@@ -208,8 +208,10 @@ fn legacy_fan_regions(
         if per_fan_colors {
             comparable.colors = effect.colors.clone();
         }
-        ensure!(comparable == effect && zone.swap_tb == first.swap_tb && zone.swap_lr == first.swap_lr,
-            "independent per-fan animations cannot be migrated to group effects; choose a group effect");
+        ensure!(
+            comparable == effect && zone.swap_tb == first.swap_tb && zone.swap_lr == first.swap_lr,
+            "Per-fan animations cannot be converted to group effects. Choose a group effect."
+        );
         palette.push(zone.effect.colors.first().copied().unwrap_or([0; 3]));
     }
     ensure!(

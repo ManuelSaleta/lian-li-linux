@@ -32,7 +32,7 @@ export const useAioStore = defineStore("aio", () => {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       throw new Error(
-        "Wireless operation is still pending; refresh the device list to check its state.",
+        "Wireless operation is still pending. Refresh the device list to check its state.",
       );
     } catch (e) {
       lastError.value = String(e);

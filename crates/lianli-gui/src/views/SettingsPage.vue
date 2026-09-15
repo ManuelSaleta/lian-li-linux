@@ -8,10 +8,9 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import StatusDot from "@/components/common/StatusDot.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
-import MediaStreamStatus from "@/components/common/MediaStreamStatus.vue";
+import ServiceStatus from "@/components/common/ServiceStatus.vue";
 import StateBackups from "@/components/common/StateBackups.vue";
 import CatalogStorage from "@/components/common/CatalogStorage.vue";
-import ServiceStatus from "@/components/common/ServiceStatus.vue";
 import { useIpc } from "@/composables/useIpc";
 
 const REPO_URL = "https://github.com/sgtaziz/lian-li-linux";
@@ -120,24 +119,6 @@ function onHidBackend(v: "hidraw" | "rusb") {
 
 <template>
   <div class="page settings-page">
-    <!-- Daemon status -->
-    <section class="card">
-      <div class="section-head">
-        <h2 class="section-title">Daemon Status</h2>
-        <span class="status-tag">
-          <StatusDot :color="daemon.connected ? 'success' : 'danger'" />
-          {{ daemon.connected ? "Connected" : "Offline" }}
-        </span>
-      </div>
-      <div class="kv"><span class="muted">Socket</span><span class="mono">{{ daemon.socketPath || "—" }}</span></div>
-      <div class="kv"><span class="muted">Daemon version</span><span>{{ daemon.version || "Unavailable" }}</span></div>
-      <template v-if="daemon.info">
-        <div class="kv"><span class="muted">Configuration mode</span><span>{{ daemon.info.mode }}</span></div>
-        <div class="kv"><span class="muted">Configuration file</span><span class="mono">{{ daemon.info.config_path }}</span></div>
-      </template>
-    </section>
-
-    <!-- Configuration -->
     <section class="card">
       <div class="section-head">
         <h2 class="section-title">Configuration</h2>
@@ -174,22 +155,29 @@ function onHidBackend(v: "hidraw" | "rusb") {
         />
       </div>
       <p class="hint">Uses available GPU video encoders and decoders, with software fallback. Save to apply to active streams.</p>
-      <n-alert v-for="(status, index) in daemon.mediaPreparation" :key="index"
-        :type="status.state === 'failed' ? 'error' : 'info'" class="media-status">
-        <strong>LCD {{ Number(index) + 1 }} · {{ status.device_id }}</strong>
-        <div v-if="status.state === 'waiting_for_device'">Waiting for this LCD to connect so media can be prepared for its screen.</div>
-        <div v-else-if="status.state === 'preparing'">Preparing media. Existing content continues until the replacement is ready.</div>
-        <div v-else-if="status.state === 'failed'">{{ status.error }} Existing content is kept when available. Save again to retry.</div>
-        <div v-else>Media prepared. Playback requires the LCD to be connected and ready.</div>
-      </n-alert>
       <p v-if="daemon.connected && !daemon.info?.capabilities.includes('hardware_video')" class="hint">Update the daemon to manage hardware video from Settings.</p>
     </section>
 
-    <MediaStreamStatus />
-    <StateBackups />
     <ServiceStatus />
+    <StateBackups />
     <CatalogStorage />
     <CatalogStorage managed />
+
+    <section class="card">
+      <div class="section-head">
+        <h2 class="section-title">Daemon Status</h2>
+        <span class="status-tag">
+          <StatusDot :color="daemon.connected ? 'success' : 'danger'" />
+          {{ daemon.connected ? "Connected" : "Offline" }}
+        </span>
+      </div>
+      <div class="kv"><span class="muted">Socket</span><span class="mono">{{ daemon.socketPath || "—" }}</span></div>
+      <div class="kv"><span class="muted">Daemon version</span><span>{{ daemon.version || "Unavailable" }}</span></div>
+      <template v-if="daemon.info">
+        <div class="kv"><span class="muted">Configuration mode</span><span>{{ daemon.info.mode }}</span></div>
+        <div class="kv"><span class="muted">Configuration file</span><span class="mono">{{ daemon.info.config_path }}</span></div>
+      </template>
+    </section>
 
     <!-- Thermal alert -->
     <section class="card">
