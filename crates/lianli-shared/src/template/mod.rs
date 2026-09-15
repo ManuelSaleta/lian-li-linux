@@ -37,7 +37,7 @@ pub struct LcdTemplate {
     pub base_width: u32,
     pub base_height: u32,
     pub background: TemplateBackground,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_limits::widgets")]
     pub widgets: Vec<Widget>,
     #[serde(default)]
     pub rotated: bool,

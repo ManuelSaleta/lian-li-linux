@@ -496,6 +496,39 @@ fn default_clock_hub_radius() -> f32 {
 }
 
 impl WidgetKind {
+    pub fn font_ref(&self) -> Option<&FontRef> {
+        match self {
+            Self::Label { font, .. }
+            | Self::ValueText { font, .. }
+            | Self::ClockDigital { font, .. } => Some(font),
+            Self::ClockAnalog { numbers_font, .. } => Some(numbers_font),
+            Self::Sparkline {
+                axis_label_font, ..
+            } => Some(axis_label_font),
+            _ => None,
+        }
+    }
+
+    pub fn font_ref_mut(&mut self) -> Option<&mut FontRef> {
+        match self {
+            Self::Label { font, .. }
+            | Self::ValueText { font, .. }
+            | Self::ClockDigital { font, .. } => Some(font),
+            Self::ClockAnalog { numbers_font, .. } => Some(numbers_font),
+            Self::Sparkline {
+                axis_label_font, ..
+            } => Some(axis_label_font),
+            _ => None,
+        }
+    }
+
+    pub fn asset_path_mut(&mut self) -> Option<&mut PathBuf> {
+        match self {
+            Self::Image { path, .. } | Self::Video { path, .. } => Some(path),
+            other => other.font_ref_mut().and_then(|font| font.path.as_mut()),
+        }
+    }
+
     pub fn kind_id(&self) -> &'static str {
         match self {
             Self::Label { .. } => "label",

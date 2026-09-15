@@ -49,6 +49,14 @@ pub struct LcdConfig {
 }
 
 impl LcdConfig {
+    pub fn resolve_paths(&mut self, base: &Path) {
+        crate::media_dependencies::map_lcd_paths(self, |path| {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        });
+    }
+
     pub fn brightness(&self) -> u8 {
         self.brightness.unwrap_or(100).min(100)
     }
@@ -82,6 +90,30 @@ impl LcdConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_settings()?;
+        if self.media_type == MediaType::Sensor {
+            if let Some(sensor) = &self.sensor {
+                sensor.validate()?;
+            }
+        }
+        if matches!(
+            self.media_type,
+            MediaType::Image | MediaType::Video | MediaType::Gif
+        ) {
+            if let Some(path) = &self.path {
+                if !path.exists() {
+                    bail!(
+                        "LCD[{}] media path '{}' does not exist",
+                        self.device_id(),
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_settings(&self) -> Result<()> {
         if self.index.is_none() && self.serial.is_none() {
             bail!("device config requires either 'index' or 'serial' field");
         }
@@ -90,16 +122,9 @@ impl LcdConfig {
 
         match self.media_type {
             MediaType::Image | MediaType::Video | MediaType::Gif => {
-                let path = self
-                    .path
+                self.path
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("LCD[{device_id}] requires a media path"))?;
-                if !path.exists() {
-                    bail!(
-                        "LCD[{device_id}] media path '{}' does not exist",
-                        path.display()
-                    );
-                }
             }
             MediaType::Color => {
                 if self.rgb.is_none() {
@@ -112,7 +137,7 @@ impl LcdConfig {
                         "LCD[{device_id}] sensor configuration missing 'sensor' section"
                     )
                 })?;
-                descriptor.validate()?;
+                descriptor.validate_settings()?;
             }
             MediaType::Doublegauge | MediaType::Cooler => {}
             MediaType::Custom => {
@@ -128,8 +153,8 @@ impl LcdConfig {
         }
 
         if let Some(fps) = self.fps {
-            if fps <= 0.0 {
-                bail!("LCD[{device_id}] fps must be positive");
+            if !fps.is_finite() || fps <= 0.0 {
+                bail!("LCD[{device_id}] fps must be finite and positive");
             }
         }
 
@@ -220,11 +245,17 @@ pub struct AppConfig {
     pub turn_off_lcds_on_shutdown: bool,
     #[serde(default = "default_fps")]
     pub default_fps: f32,
+    #[serde(default)]
+    pub hardware_video: bool,
     #[serde(default, skip_serializing)]
     pub hid_driver: Option<String>,
     #[serde(default)]
     pub hid_backend: HidBackend,
-    #[serde(default, alias = "devices")]
+    #[serde(
+        default,
+        alias = "devices",
+        deserialize_with = "crate::serde_limits::lcds"
+    )]
     pub lcds: Vec<LcdConfig>,
     #[serde(default)]
     pub fan_curves: Vec<FanCurve>,
@@ -275,6 +306,7 @@ impl Default for AppConfig {
         Self {
             turn_off_lcds_on_shutdown: default_true(),
             default_fps: default_fps(),
+            hardware_video: false,
             hid_driver: None,
             hid_backend: HidBackend::default(),
             lcds: Vec::new(),
@@ -301,7 +333,20 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<(Self, Vec<String>)> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let reader = BufReader::new(file);
-        let mut cfg: AppConfig = serde_json::from_reader(reader)
+        Self::from_reader(reader, path)
+    }
+
+    /// Applies startup migrations and resolves media paths against the destination file.
+    pub fn from_reader(reader: impl std::io::Read, path: &Path) -> Result<(Self, Vec<String>)> {
+        use std::io::Read;
+        const MAX_BYTES: u64 = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        reader.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_BYTES,
+            "Configuration exceeds 16 MiB"
+        );
+        let mut cfg: AppConfig = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {}", path.display()))?;
 
         let base_dir = path
@@ -372,22 +417,10 @@ impl AppConfig {
                 _ => {}
             }
 
-            if let Some(existing) = &device.path {
-                if existing.is_relative() {
-                    device.path = Some(base_dir.join(existing));
-                }
-            }
+            device.resolve_paths(&base_dir);
 
             if let Some(sensor) = &mut device.sensor {
-                if let Some(font_path) = &sensor.font_path {
-                    if font_path.is_relative() {
-                        sensor.font_path = Some(base_dir.join(font_path));
-                    }
-                }
-                // Legacy configs stored the sensor poll rate inside the
-                // descriptor; promote it to the top-level field so Doublegauge
-                // / Cooler pick it up too. Zero out the descriptor copy after
-                // migration so future saves don't re-emit the stale value.
+                // Preserve the legacy sensor cadence in the shared LCD field.
                 if sensor.update_interval_ms != 0 {
                     if device.update_interval_ms.is_none() {
                         device.update_interval_ms = Some(sensor.update_interval_ms);
@@ -405,7 +438,6 @@ impl AppConfig {
             bail!("default_fps must be greater than zero");
         }
 
-        // Normalize orientations to nearest 90°
         for device in &mut cfg.lcds {
             let normalized = (device.orientation % 360.0 + 360.0) % 360.0;
             let snapped = ((normalized + 45.0) / 90.0).floor() * 90.0;
@@ -454,6 +486,23 @@ pub fn config_identity(cfg: &LcdConfig) -> ConfigKey {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hardware_video_defaults_off_and_round_trips_explicit_choices() {
+        let legacy: super::AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.hardware_video);
+        assert!(!super::AppConfig::default().hardware_video);
+        for enabled in [true, false] {
+            let config = super::AppConfig {
+                hardware_video: enabled,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_value(&config).unwrap();
+            assert_eq!(encoded["hardware_video"], enabled);
+            let decoded: super::AppConfig = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.hardware_video, enabled);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -487,6 +536,48 @@ mod tests {
 
     fn lcd(serial: &str) -> String {
         format!(r#"{{"serial": "{serial}", "type": "color", "rgb": [0, 0, 0]}}"#)
+    }
+
+    #[test]
+    fn in_memory_config_uses_destination_paths_and_enforces_the_size_limit() {
+        let json = br#"{"lcds":[{"index":0,"type":"video","path":"clip.mp4","orientation":100}]}"#;
+        let (config, _) =
+            AppConfig::from_reader(&json[..], Path::new("/state/config.json")).unwrap();
+        assert_eq!(
+            config.lcds[0].path.as_deref(),
+            Some(Path::new("/state/clip.mp4"))
+        );
+        assert_eq!(config.lcds[0].orientation, 90.0);
+        assert!(
+            AppConfig::from_reader(std::io::repeat(b' '), Path::new("config.json"))
+                .unwrap_err()
+                .to_string()
+                .contains("16 MiB")
+        );
+    }
+
+    #[test]
+    fn settings_validation_does_not_require_assets_to_exist_but_requires_valid_values() {
+        let sensor: LcdConfig = serde_json::from_str(
+            r#"{"index":0,"type":"sensor","sensor":{"label":"Load","unit":"%","source":{"type":"constant","value":50},"font_path":"/missing-lianli-validation-font.ttf"}}"#,
+        ).unwrap();
+        assert!(sensor.validate_settings().is_ok());
+        assert!(sensor.validate().is_err());
+        let mut config: LcdConfig = serde_json::from_str(
+            r#"{"index":0,"type":"video","path":"/missing-lianli-validation-asset.mp4"}"#,
+        )
+        .unwrap();
+        assert!(config.validate_settings().is_ok());
+        config.path = None;
+        assert!(config.validate_settings().is_err());
+        config.media_type = MediaType::Color;
+        config.rgb = Some([0, 0, 0]);
+        for fps in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            config.fps = Some(fps);
+            assert!(config.validate_settings().is_err());
+        }
+        config.fps = Some(30.0);
+        assert!(config.validate_settings().is_ok());
     }
 
     #[test]

@@ -182,6 +182,16 @@ pub struct SensorDescriptor {
 
 impl SensorDescriptor {
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_settings()?;
+        if let Some(path) = &self.font_path {
+            if !path.exists() {
+                anyhow::bail!("sensor font_path '{}' does not exist", path.display());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_settings(&self) -> anyhow::Result<()> {
         match &self.source {
             SensorSourceConfig::Constant { value } => {
                 if !value.is_finite() {
@@ -247,12 +257,6 @@ impl SensorDescriptor {
 
         if self.decimal_places > 10 {
             anyhow::bail!("sensor decimal_places must be 10 or less");
-        }
-
-        if let Some(path) = &self.font_path {
-            if !path.exists() {
-                anyhow::bail!("sensor font_path '{}' does not exist", path.display());
-            }
         }
 
         let mut last_max = -f32::INFINITY;

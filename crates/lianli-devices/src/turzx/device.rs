@@ -3,7 +3,7 @@ use super::framing::{build_config_packet, build_power_off, fragment_stream_a, pa
 use super::vendor_caps::{parse_vendor_desc, Mode, VendorCaps};
 use super::{STREAM_B_FINAL, VID};
 use anyhow::{bail, Context, Result};
-use lianli_transport::usb::{RusbBulk, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
+use lianli_transport::usb::{self, RusbBulk, LCD_READ_TIMEOUT, LCD_WRITE_TIMEOUT};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -32,10 +32,39 @@ pub struct DeviceIdentity {
 
 impl TurzxDisplay {
     pub fn open(pid: u16) -> Result<Self> {
-        let mut transport =
+        let transport =
             RusbBulk::open(VID, pid).with_context(|| format!("opening {VID:04x}:{pid:04x}"))?;
+        Self::initialize_transport(transport, pid, || false)
+    }
+
+    pub fn open_device(
+        device: rusb::Device<rusb::GlobalContext>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !cancelled() && !usb::shutting_down(),
+            "TURZX startup cancelled"
+        );
+        let desc = device
+            .device_descriptor()
+            .context("reading TURZX identity")?;
+        anyhow::ensure!(
+            desc.vendor_id() == VID,
+            "selected USB device is not a TURZX panel"
+        );
+        let pid = desc.product_id();
+        let transport = RusbBulk::open_device(device)
+            .with_context(|| format!("opening selected {VID:04x}:{pid:04x}"))?;
+        Self::initialize_transport(transport, pid, cancelled)
+    }
+
+    fn initialize_transport(
+        mut transport: RusbBulk,
+        pid: u16,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self> {
         transport
-            .detach_and_configure(&format!("turzx-{pid:04x}"))
+            .detach_and_configure_with_cancel(&format!("turzx-{pid:04x}"), &cancelled)
             .context("claiming interface 0")?;
 
         let identity = resolve_identity(&transport, pid);
@@ -44,6 +73,10 @@ impl TurzxDisplay {
             identity.usb_serial, identity.port_path, identity.edid_serial
         );
 
+        anyhow::ensure!(
+            !cancelled() && !usb::shutting_down(),
+            "TURZX startup cancelled"
+        );
         let _ = transport.write(&build_power_off(), LCD_WRITE_TIMEOUT);
         std::thread::sleep(Duration::from_millis(100));
 
@@ -55,11 +88,15 @@ impl TurzxDisplay {
             streaming: false,
             identity,
         };
-        this.init()?;
+        this.init(cancelled)?;
         Ok(this)
     }
 
-    fn init(&mut self) -> Result<()> {
+    fn init(&mut self, cancelled: impl Fn() -> bool) -> Result<()> {
+        anyhow::ensure!(
+            !cancelled() && !usb::shutting_down(),
+            "TURZX startup cancelled"
+        );
         let mut buf = vec![0u8; 512];
         let n = self
             .transport
@@ -72,6 +109,10 @@ impl TurzxDisplay {
         let mut status = [0u8; 1];
         let mut ready = false;
         for _ in 0..READY_POLL_ATTEMPTS {
+            anyhow::ensure!(
+                !cancelled() && !usb::shutting_down(),
+                "TURZX startup cancelled"
+            );
             let n = self
                 .transport
                 .control_in(0xC1, 0x01, 0, 0, &mut status, LCD_READ_TIMEOUT)
@@ -86,6 +127,10 @@ impl TurzxDisplay {
             bail!("TURZX device never reported ready (bit 0x10 never set)");
         }
 
+        anyhow::ensure!(
+            !cancelled() && !usb::shutting_down(),
+            "TURZX startup cancelled"
+        );
         let mut raw_edid = [0u8; 128];
         let n = self
             .transport
@@ -216,7 +261,9 @@ fn resolve_identity(transport: &RusbBulk, pid: u16) -> DeviceIdentity {
 impl Drop for TurzxDisplay {
     fn drop(&mut self) {
         if self.streaming {
-            if let Err(e) = self.transport.write(&build_power_off(), LCD_WRITE_TIMEOUT) {
+            if let Err(e) = usb::with_teardown_io(LCD_WRITE_TIMEOUT, || {
+                self.transport.write(&build_power_off(), LCD_WRITE_TIMEOUT)
+            }) {
                 debug!(
                     "TURZX {VID:04x}:{:04x} Drop power-off failed: {e}",
                     self.pid

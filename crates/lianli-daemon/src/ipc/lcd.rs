@@ -49,6 +49,7 @@ pub fn render_template_preview(
     template: lianli_shared::template::LcdTemplate,
     width: u32,
     height: u32,
+    hardware_video: bool,
 ) -> IpcResponse {
     let preview_screen = ScreenInfo {
         width,
@@ -62,7 +63,15 @@ pub fn render_template_preview(
         play_count: 0,
     };
     let all_sensors = lianli_shared::sensors::enumerate_sensors();
-    match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false, 30.0) {
+    match CustomAsset::new(
+        &template,
+        0.0,
+        &preview_screen,
+        &all_sensors,
+        false,
+        30.0,
+        hardware_video,
+    ) {
         Ok(asset) => {
             asset.seed_preview_history();
             match asset.render_frame(true) {

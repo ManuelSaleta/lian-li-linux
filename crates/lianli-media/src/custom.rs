@@ -5,16 +5,19 @@
 //! render tick, and encodes the result as JPEG. Widget drawing lives under
 //! [`widgets`], shared helpers under [`helpers`].
 
+mod geometry;
 mod helpers;
+mod history;
 mod widgets;
 
 use crate::common::{encode_jpeg_rgba, render_dimensions, MediaError};
 use crate::sensor::FrameInfo;
 use crate::video::decode_frames_to_rgba;
+use crate::PreparationControl;
 use ab_glyph::FontVec;
 use helpers::{
     fast_overlay, fit_image, format_sensor_readout, load_font_from_disk, resolve_sensor_source,
-    widget_font_refs, widget_sensor_source, widget_size_px,
+    widget_sensor_source, widget_size_px,
 };
 use image::imageops::FilterType;
 use image::{Rgba, RgbaImage};
@@ -66,6 +69,7 @@ pub struct CustomAsset {
     smooth_edges: bool,
     frame_index: AtomicUsize,
     start_instant: Instant,
+    _retained_budget: crate::resource_budget::RetainedBudget,
 }
 
 impl std::fmt::Debug for CustomAsset {
@@ -87,38 +91,68 @@ impl CustomAsset {
         all_sensors: &[SensorInfo],
         smooth_edges: bool,
         fps: f32,
+        control: impl Into<PreparationControl>,
     ) -> Result<Arc<Self>, MediaError> {
+        let control = control.into();
+        control.check()?;
+        let (canvas_w, canvas_h) = render_dimensions(screen, orientation);
+        let (uniform_scale, scaled_w, scaled_h) =
+            geometry::validate(template, canvas_w, canvas_h, smooth_edges)?;
+        let mut retained_budget = crate::resource_budget::RetainedBudget::default();
+        retained_budget.reserve(canvas_w as usize * canvas_h as usize * 8)?;
+        for widget in &template.widgets {
+            let (width, height) = widget_size_px(widget, uniform_scale);
+            let copies = if matches!(widget.kind, WidgetKind::Image { .. }) {
+                2
+            } else {
+                1
+            };
+            retained_budget.reserve(width as usize * height as usize * 4 * copies)?;
+        }
+        crate::asset_access::validate_dependencies(
+            &lianli_shared::media_dependencies::template_dependencies(template),
+            &control,
+        )?;
         let default_path = default_font_path().ok_or_else(|| {
-            MediaError::Sensor("no system font available; install fontconfig or DejaVu Sans".into())
+            MediaError::Sensor("No system font found. Install fontconfig or DejaVu Sans.".into())
         })?;
         let default_font = load_font_from_disk(&default_path)?;
+        retained_budget.reserve(default_font.as_slice().len())?;
         let mut fonts: HashMap<PathBuf, FontVec> = HashMap::new();
         for w in &template.widgets {
-            for fr in widget_font_refs(&w.kind) {
+            control.check()?;
+            if let Some(fr) = w.kind.font_ref() {
                 if let Some(p) = &fr.path {
                     if !fonts.contains_key(p) {
-                        match load_font_from_disk(p) {
-                            Ok(f) => {
-                                fonts.insert(p.clone(), f);
-                            }
-                            Err(e) => warn!(
-                                "template '{}' widget '{}' font '{}' failed: {e}",
+                        let font = load_font_from_disk(p).map_err(|error| {
+                            MediaError::InvalidConfig(format!(
+                                "Template '{}' widget '{}' font '{}': {error}",
                                 template.id,
                                 w.id,
                                 p.display()
-                            ),
-                        }
+                            ))
+                        })?;
+                        retained_budget.reserve(font.as_slice().len())?;
+                        fonts.insert(p.clone(), font);
                     }
                 }
             }
         }
 
-        let (canvas_w, canvas_h) = render_dimensions(screen, orientation);
-        let uniform_scale = (canvas_w as f32 / template.base_width as f32)
-            .min(canvas_h as f32 / template.base_height as f32)
-            .max(0.01);
-        let scaled_w = (template.base_width as f32 * uniform_scale).round() as u32;
-        let scaled_h = (template.base_height as f32 * uniform_scale).round() as u32;
+        for widget in &template.widgets {
+            control.check()?;
+            let font = widget.kind.font_ref().map_or(&default_font, |reference| {
+                helpers::resolve_font(reference, &fonts, &default_font)
+            });
+            let scale = uniform_scale * geometry::supersampling(&widget.kind, smooth_edges) as f32;
+            geometry::validate_font(&widget.kind, scale, font).map_err(|error| {
+                MediaError::InvalidConfig(format!(
+                    "Template '{}' widget '{}' font: {error}",
+                    template.id, widget.id
+                ))
+            })?;
+        }
+
         let offset_x = ((canvas_w as i32) - scaled_w as i32) / 2;
         let offset_y = ((canvas_h as i32) - scaled_h as i32) / 2;
 
@@ -138,25 +172,32 @@ impl CustomAsset {
                 let rect = Rect::at(offset_x, offset_y).of_size(scaled_w, scaled_h);
                 draw_filled_rect_mut(&mut composite, rect, fill);
             }
-            TemplateBackground::Image { path } => match ::image::open(path) {
+            TemplateBackground::Image { path } => match crate::image::open_image(path) {
                 Ok(img) => {
                     let resized = img
                         .resize_exact(scaled_w, scaled_h, FilterType::Lanczos3)
                         .to_rgba8();
                     fast_overlay(&mut composite, &resized, offset_x as i64, offset_y as i64);
                 }
-                Err(e) => warn!(
-                    "template '{}' background image '{}' failed to load: {e}",
-                    template.id,
-                    path.display()
-                ),
+                Err(error) => {
+                    return Err(MediaError::InvalidConfig(format!(
+                        "Template '{}' background image '{}': {error}",
+                        template.id,
+                        path.display()
+                    )))
+                }
             },
         }
 
         let mut widget_states: Vec<WidgetState> = Vec::with_capacity(template.widgets.len());
 
         for widget in &template.widgets {
+            control.check()?;
             let mut state = WidgetState::blank();
+            if let WidgetKind::Sparkline { history_length, .. } = &widget.kind {
+                state.history.reserve(history::capacity(*history_length));
+                retained_budget.reserve(state.history.capacity() * std::mem::size_of::<f32>())?;
+            }
             state.sample_interval =
                 default_sample_interval(&widget.kind, widget.update_interval_ms);
 
@@ -172,25 +213,31 @@ impl CustomAsset {
 
             if let WidgetKind::Image { path, fit, .. } = &widget.kind {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
-                match ::image::open(path) {
+                match crate::image::open_image(path) {
                     Ok(img) => {
                         state.loaded_image = Some(fit_image(img, ww, wh, *fit));
                     }
-                    Err(e) => warn!(
-                        "template '{}' widget '{}' image '{}' failed: {e}",
-                        template.id,
-                        widget.id,
-                        path.display()
-                    ),
+                    Err(error) => {
+                        return Err(MediaError::InvalidConfig(format!(
+                            "Template '{}' widget '{}' image '{}': {error}",
+                            template.id,
+                            widget.id,
+                            path.display()
+                        )))
+                    }
                 }
             }
 
             if let WidgetKind::Video { path, .. } = &widget.kind {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
                 let requested = widget.fps.unwrap_or(30.0).min(fps);
-                let decode_fps = crate::video::cap_fps_to_source(path, requested);
-                match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1)) {
+                let decode_fps =
+                    crate::video::ffmpeg::cap_fps_cancellable(path, requested, &control)?;
+                match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1), &control) {
                     Ok((frames, durations)) => {
+                        for frame in &frames {
+                            retained_budget.reserve(frame.as_raw().len())?;
+                        }
                         let total_ms: u64 = durations
                             .iter()
                             .map(|d| d.as_millis() as u64)
@@ -203,24 +250,29 @@ impl CustomAsset {
                             .fps
                             .map(|_| (1000.0 / decode_fps.max(1.0)).round() as u64);
                     }
-                    Err(e) => warn!(
-                        "template '{}' widget '{}' video '{}' decode failed: {e}",
-                        template.id,
-                        widget.id,
-                        path.display()
-                    ),
+                    Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
+                    Err(error) => {
+                        return Err(MediaError::InvalidConfig(format!(
+                            "Template '{}' widget '{}' video '{}': {error}",
+                            template.id,
+                            widget.id,
+                            path.display()
+                        )))
+                    }
                 }
             }
 
             widget_states.push(state);
         }
 
+        control.check()?;
         let fps = fps.max(1.0);
         let frame_interval =
             Duration::from_nanos(1_000_000_000 / fps as u64).max(Duration::from_millis(16));
 
         let scratch = composite.clone();
         Ok(Arc::new(Self {
+            _retained_budget: retained_budget,
             template: template.clone(),
             widget_states: Mutex::new(widget_states),
             template_image: composite,
@@ -268,17 +320,7 @@ impl CustomAsset {
                 ..
             } = &widget.kind
             {
-                let cap = (*history_length).max(8) as usize;
-                let span = (value_max - value_min).abs().max(1.0);
-                let base = (value_min + value_max) * 0.5;
-                state.history.clear();
-                state.history.reserve(cap);
-                for i in 0..cap {
-                    let t = i as f32 / (cap - 1).max(1) as f32;
-                    let phase = t * std::f32::consts::PI * 3.0;
-                    let v = base + span * 0.35 * phase.sin();
-                    state.history.push_back(v);
-                }
+                history::seed(&mut state.history, *history_length, *value_min, *value_max);
             }
         }
     }
@@ -336,6 +378,7 @@ impl CustomAsset {
         force: bool,
         cb: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>, MediaError> {
+        let text_work = crate::text_work::FrameTextWork::begin();
         let now = Instant::now();
         let elapsed_ms = now
             .saturating_duration_since(self.start_instant)
@@ -382,11 +425,7 @@ impl CustomAsset {
                         state.last_quantized = quantized;
                     }
                     if let WidgetKind::Sparkline { history_length, .. } = &widget.kind {
-                        let cap = (*history_length).max(2) as usize;
-                        state.history.push_back(raw);
-                        while state.history.len() > cap {
-                            state.history.pop_front();
-                        }
+                        history::push(&mut state.history, *history_length, raw);
                         any_dynamic_changed = true;
                     }
                 }
@@ -468,11 +507,87 @@ impl CustomAsset {
                 &self.default_font,
                 self.smooth_edges,
             );
+            if let Err(error) = text_work.check() {
+                state.cached_render = None;
+                state.cached_render_key = None;
+                return Err(error);
+            }
         }
         drop(states);
 
         let result = cb(scratch.as_raw());
         drop(scratch);
         Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod text_work_tests {
+    use super::*;
+
+    #[test]
+    fn excessive_text_never_reaches_the_frame_consumer_and_can_recover() {
+        let widgets: Vec<_> = (0..20)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("label-{index}"), "x": 4, "y": 4, "width": 8, "height": 8,
+                    "kind": {"type": "label", "text": "M".repeat(4096), "font_size": 1,
+                        "color": [255,255,255,255]}
+                })
+            })
+            .collect();
+        let template: LcdTemplate = serde_json::from_value(serde_json::json!({
+            "id": "text-work", "name": "Text work", "base_width": 8, "base_height": 8,
+            "background": {"type": "color", "rgb": [0,0,0]}, "widgets": widgets
+        }))
+        .unwrap();
+        let font = crate::fonts::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../templates/assets/neon-us88/JetBrainsMonoNL-Medium.ttf"),
+        )
+        .unwrap();
+        let mut asset = CustomAsset {
+            widget_states: Mutex::new(
+                (0..template.widgets.len())
+                    .map(|_| WidgetState::blank())
+                    .collect(),
+            ),
+            template,
+            template_image: RgbaImage::new(8, 8),
+            scratch: Mutex::new(RgbaImage::new(8, 8)),
+            screen: ScreenInfo::WIRELESS_LCD,
+            orientation: 0.0,
+            update_interval: Duration::from_millis(100),
+            render_fps: 10.0,
+            uniform_scale: 1.0,
+            offset_x: 0,
+            offset_y: 0,
+            canonical_width: 8,
+            canonical_height: 8,
+            fonts: HashMap::new(),
+            default_font: font,
+            smooth_edges: false,
+            frame_index: AtomicUsize::new(0),
+            start_instant: Instant::now(),
+            _retained_budget: crate::resource_budget::RetainedBudget::default(),
+        };
+        let error = asset
+            .render_frame_rgba_with(true, |_| panic!("partial frame was published"))
+            .unwrap_err();
+        assert!(error.to_string().contains("per-frame work limit"));
+        let states = asset.widget_states.lock();
+        assert!(states.iter().any(|state| state.cached_render.is_some()));
+        assert!(states
+            .iter()
+            .any(|state| state.cached_render.is_none() && state.cached_render_key.is_none()));
+        drop(states);
+        asset.template.widgets.truncate(1);
+        asset.widget_states.lock().truncate(1);
+        assert_eq!(
+            asset
+                .render_frame_rgba_with(true, |bytes| bytes.len())
+                .unwrap(),
+            Some(8 * 8 * 4)
+        );
     }
 }

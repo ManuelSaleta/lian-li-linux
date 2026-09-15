@@ -88,6 +88,12 @@ export interface PixelCleanStatus {
 }
 
 export interface TelemetrySnapshot {
+  media_preparation?: Record<string, {
+    generation: number;
+    device_id: string;
+    state: "waiting_for_device" | "preparing" | "ready" | "failed";
+    error: string | null;
+  }>;
   fan_rpms: Record<string, number[]>;
   coolant_temps: Record<string, number>;
   streaming_active: boolean;
@@ -408,6 +414,7 @@ export interface Ene6k77DeviceConfig {
 export interface AppConfig {
   turn_off_lcds_on_shutdown: boolean;
   default_fps: number;
+  hardware_video: boolean;
   hid_backend: "hidraw" | "rusb";
   lcds: LcdConfig[];
   fan_curves: FanCurve[];

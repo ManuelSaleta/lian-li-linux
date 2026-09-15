@@ -16,6 +16,7 @@ function defaultConfig(): AppConfig {
   return {
     turn_off_lcds_on_shutdown: true,
     default_fps: 30,
+    hardware_video: false,
     hid_backend: "hidraw",
     lcds: [],
     fan_curves: [],

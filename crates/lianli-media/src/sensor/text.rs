@@ -60,7 +60,12 @@ fn draw_text_centered(
     offset_y: i32,
     font: &FontVec,
 ) {
-    if size <= 0.0 || text.is_empty() {
+    if !crate::text_work::text(text) {
+        return;
+    }
+    let width = width.min(image.width());
+    let height = height.min(image.height());
+    if !size.is_finite() || size <= 0.0 || text.is_empty() || width == 0 || height == 0 {
         return;
     }
 
@@ -68,25 +73,35 @@ fn draw_text_centered(
     let scaled = font.as_scaled(scale);
 
     let mut cursor_x = 0.0_f32;
-    let mut positioned: Vec<ab_glyph::Glyph> = Vec::with_capacity(text.len());
     for ch in text.chars() {
         let glyph_id = scaled.glyph_id(ch);
-        let glyph = glyph_id.with_scale_and_position(scale, point(cursor_x, scaled.ascent()));
-        positioned.push(glyph);
         cursor_x += scaled.h_advance(glyph_id);
     }
 
     let text_width = cursor_x;
-    let start_x = ((width as f32 - text_width) / 2.0) as i32;
-    let start_y = (height as i32 / 2) + offset_y;
+    let start_x = ((width as f32 - text_width) / 2.0) as i64;
+    let start_y = i64::from(height) / 2 + i64::from(offset_y);
 
-    for glyph in positioned {
+    cursor_x = 0.0;
+    for ch in text.chars() {
+        let glyph_id = scaled.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(scale, point(cursor_x, scaled.ascent()));
+        cursor_x += scaled.h_advance(glyph_id);
         if let Some(outlined) = scaled.outline_glyph(glyph) {
             let bb = outlined.px_bounds();
+            let Some((left, top)) =
+                crate::text_raster::visible_bounds(bb, (start_x, start_y), (width, height))
+            else {
+                continue;
+            };
+            if !crate::text_work::raster((bb.max.x - bb.min.x) as u64, (bb.max.y - bb.min.y) as u64)
+            {
+                return;
+            }
             outlined.draw(|gx, gy, gv| {
-                let x = start_x + bb.min.x as i32 + gx as i32;
-                let y = start_y + bb.min.y as i32 + gy as i32;
-                if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+                let x = left.saturating_add(i64::from(gx));
+                let y = top.saturating_add(i64::from(gy));
+                if x >= 0 && x < i64::from(width) && y >= 0 && y < i64::from(height) {
                     let px = image.get_pixel_mut(x as u32, y as u32);
                     let alpha = gv;
                     px.0[0] = ((color[0] as f32 * alpha) + (px.0[0] as f32 * (1.0 - alpha))) as u8;
@@ -146,26 +161,40 @@ fn draw_text_center_bitmap(
     color: [u8; 3],
     offset_y: i32,
 ) {
-    if scale == 0 {
+    if !crate::text_work::text(text) {
         return;
     }
-    let glyphs: Vec<[u8; 7]> = text.chars().map(glyph_pattern).collect();
-    if glyphs.is_empty() {
+    let width = width.min(image.width());
+    let height = height.min(image.height());
+    if scale == 0 || width == 0 || height == 0 {
         return;
     }
-    let glyph_width = 5 * scale;
-    let spacing = scale;
-    let total_width = (glyphs.len() as u32 * (glyph_width + spacing) - spacing).min(width);
-    let start_x = ((width - total_width) / 2) as i32;
-    let start_y = ((height as i32) / 2) + offset_y - ((7 * scale) as i32 / 2);
+    let step = 6 * u64::from(scale);
+    let measured_glyphs = (u64::from(width) + u64::from(scale)) / step + 1;
+    let glyph_count = text.chars().take(measured_glyphs as usize).count();
+    if glyph_count == 0 {
+        return;
+    }
+    let total_width = (glyph_count as u64 * step - u64::from(scale)).min(u64::from(width));
+    let start_x = (u64::from(width) - total_width) as i64 / 2;
+    let start_y = i64::from(height) / 2 + i64::from(offset_y) - 7 * i64::from(scale) / 2;
 
-    for (i, bitmap) in glyphs.iter().enumerate() {
-        let base_x = start_x + i as i32 * (glyph_width as i32 + spacing as i32);
+    for (i, character) in text.chars().take(glyph_count).enumerate() {
+        let base_x = start_x + i as i64 * step as i64;
+        if base_x >= i64::from(width) {
+            break;
+        }
+        if !crate::text_work::raster(
+            u64::from(width).min(5 * u64::from(scale)),
+            u64::from(height).min(7 * u64::from(scale)),
+        ) {
+            return;
+        }
         draw_bitmap_character(
             image,
             (width, height),
             (base_x, start_y),
-            *bitmap,
+            glyph_pattern(character),
             scale,
             color,
         );
@@ -175,7 +204,7 @@ fn draw_text_center_bitmap(
 fn draw_bitmap_character(
     image: &mut RgbImage,
     (width, height): (u32, u32),
-    (base_x, base_y): (i32, i32),
+    (base_x, base_y): (i64, i64),
     bitmap: [u8; 7],
     scale: u32,
     color: [u8; 3],
@@ -183,16 +212,125 @@ fn draw_bitmap_character(
     for (row, mask) in bitmap.iter().enumerate() {
         for col in 0..5 {
             if (mask >> (4 - col)) & 1 == 1 {
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let x = base_x + (col * scale) as i32 + dx as i32;
-                        let y = base_y + (row as i32 * scale as i32) + dy as i32;
-                        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-                            image.put_pixel(x as u32, y as u32, Rgb(color));
-                        }
+                let left = base_x + i64::from(col) * i64::from(scale);
+                let top = base_y + row as i64 * i64::from(scale);
+                let right = (left + i64::from(scale)).min(i64::from(width));
+                let bottom = (top + i64::from(scale)).min(i64::from(height));
+                for y in top.max(0)..bottom {
+                    for x in left.max(0)..right {
+                        image.put_pixel(x as u32, y as u32, Rgb(color));
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttf_text_clips_extreme_offsets_without_overflow() {
+        let font = crate::fonts::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../templates/assets/neon-us88/JetBrainsMonoNL-Medium.ttf"),
+        )
+        .unwrap();
+        let mut image = RgbImage::from_pixel(32, 32, Rgb([3, 7, 11]));
+        let original = image.clone();
+        for offset in [i32::MIN, i32::MAX] {
+            draw_text_centered(
+                &mut image,
+                (u32::MAX, u32::MAX),
+                "42 °C",
+                18.0,
+                [255; 3],
+                offset,
+                &font,
+            );
+        }
+        assert_eq!(image, original);
+        draw_text_centered(&mut image, (32, 32), "42 °C", 18.0, [255; 3], -4, &font);
+        assert_ne!(image, original);
+    }
+
+    #[test]
+    fn bitmap_text_bounds_work_for_extreme_scale_offsets_and_long_input() {
+        let mut image = RgbImage::new(8, 8);
+        draw_text_center_bitmap(&mut image, 8, 8, "8", u32::MAX, [255, 0, 0], i32::MAX);
+        draw_text_center_bitmap(&mut image, 8, 8, "8", u32::MAX, [255, 0, 0], i32::MIN);
+        let mut expected = RgbImage::new(80, 32);
+        draw_text_center_bitmap(&mut expected, 80, 32, &"8".repeat(20), 2, [255, 0, 0], 0);
+        let mut actual = RgbImage::new(80, 32);
+        draw_text_center_bitmap(
+            &mut actual,
+            80,
+            32,
+            &"8".repeat(1_000_000),
+            2,
+            [255, 0, 0],
+            0,
+        );
+        assert_eq!(actual, expected);
+        let mut filled = RgbImage::new(4, 4);
+        draw_bitmap_character(
+            &mut filled,
+            (4, 4),
+            (-2, -2),
+            [31; 7],
+            u32::MAX,
+            [7, 11, 19],
+        );
+        assert!(filled.pixels().all(|pixel| pixel.0 == [7, 11, 19]));
+    }
+
+    #[test]
+    fn sensor_text_preserves_ttf_and_bitmap_pixels() {
+        let font = crate::fonts::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../templates/assets/neon-us88/JetBrainsMonoNL-Medium.ttf"),
+        )
+        .unwrap();
+        let mut hashes = Vec::new();
+        for offset in [-5, 5] {
+            let mut image = RgbImage::from_pixel(80, 32, Rgb([3, 7, 11]));
+            draw_text_centered(
+                &mut image,
+                (80, 32),
+                "42.5 °C abc",
+                18.0,
+                [240, 220, 180],
+                offset,
+                &font,
+            );
+            hashes.push(
+                image
+                    .as_raw()
+                    .iter()
+                    .fold(0xcbf29ce484222325u64, |hash, byte| {
+                        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                    }),
+            );
+            let mut image = RgbImage::from_pixel(80, 32, Rgb([3, 7, 11]));
+            draw_text_center_bitmap(&mut image, 80, 32, "42.5 C abc", 2, [240, 220, 180], offset);
+            hashes.push(
+                image
+                    .as_raw()
+                    .iter()
+                    .fold(0xcbf29ce484222325u64, |hash, byte| {
+                        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                    }),
+            );
+        }
+        assert_eq!(
+            hashes,
+            vec![
+                3676089542022841177,
+                5441611535783272777,
+                11566977614713818520,
+                12761253909401323977
+            ]
+        );
     }
 }

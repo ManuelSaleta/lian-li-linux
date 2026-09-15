@@ -13,6 +13,112 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+const MAX_DIAGNOSTIC_LINE: usize = 2048;
+const MAX_PROBE_LINES: usize = 8;
+const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
+
+fn live_frame_bytes(
+    width: u32,
+    height: u32,
+    rotation: u16,
+    screen: &ScreenInfo,
+) -> Result<usize, MediaError> {
+    let output = match rotation {
+        0 | 180 => (width, height),
+        90 | 270 => (height, width),
+        _ => {
+            return Err(MediaError::InvalidConfig(
+                "H.264 rotation must be 0, 90, 180 or 270 degrees".into(),
+            ))
+        }
+    };
+    if !screen.h264 || output != (screen.width, screen.height) || width == 0 || height == 0 {
+        return Err(MediaError::InvalidConfig(
+            "Live H.264 dimensions must match a supported panel after rotation".into(),
+        ));
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes <= 64 * 1024 * 1024)
+        .ok_or_else(|| {
+            MediaError::InvalidConfig("Live H.264 frame exceeds the 64 MiB limit".into())
+        })
+}
+
+struct PendingEncoder(Option<Child>);
+
+impl Drop for PendingEncoder {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            if let Err(error) = child.wait() {
+                warn!("Failed to reap rejected FFmpeg encoder: {error}");
+            }
+        }
+    }
+}
+
+fn read_diagnostic_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    consumed: &mut usize,
+) -> std::io::Result<bool> {
+    line.clear();
+    let mut had_input = false;
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(had_input);
+        }
+        had_input = true;
+        let end = bytes.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(bytes.len(), |index| index + 1);
+        let retained = count.min(MAX_DIAGNOSTIC_LINE - line.len());
+        line.extend_from_slice(&bytes[..retained]);
+        reader.consume(count);
+        *consumed += count;
+        if *consumed >= 64 * 1024 {
+            thread::sleep(Duration::from_millis(10));
+            *consumed = 0;
+        }
+        if end.is_some() {
+            return Ok(true);
+        }
+    }
+}
+
+#[derive(Default)]
+struct DiagnosticRate {
+    next: Option<Instant>,
+    suppressed: u64,
+}
+
+impl DiagnosticRate {
+    fn observe(&mut self, now: Instant) -> Option<u64> {
+        if self.next.is_some_and(|next| now < next) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.next = Some(now + DIAGNOSTIC_INTERVAL);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+fn retain_probe_line(lines: &mut Vec<String>, line: String) -> bool {
+    let failed = line.contains("Error while opening encoder")
+        || line.contains("Could not open encoder")
+        || line.contains("Failed to initialise")
+        || line.contains("Device creation failed");
+    if failed {
+        lines.clear();
+    }
+    if lines.len() < MAX_PROBE_LINES {
+        lines.push(line);
+    }
+    failed
+}
+
 /// Try to grow ffmpeg's stdin pipe buffer so a full RGBA frame fits in a single
 /// kernel-side buffer. With the default 64 KB pipe size, a 3.7 MB frame
 /// fragments into ~58 write() syscalls and ffmpeg rate-limits the writer to
@@ -42,18 +148,24 @@ pub struct LiveH264Encoder {
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     frame_bytes: usize,
+    kind: EncoderKind,
 }
 
 impl LiveH264Encoder {
+    pub fn encoder_status(&self, hardware_video: bool) -> lianli_shared::ipc::MediaEncoderStatus {
+        self.kind.status(hardware_video)
+    }
     pub fn spawn(
         width: u32,
         height: u32,
         fps: f32,
         rotation_deg: u16,
-        _screen: &ScreenInfo,
+        screen: &ScreenInfo,
+        hardware_video: bool,
     ) -> Result<Self, MediaError> {
-        let fps_int = fps.round().max(1.0) as u32;
-        let bitrate = (width as u64 * height as u64 * fps_int as u64 / 4).max(1_000_000);
+        let frame_bytes = live_frame_bytes(width, height, rotation_deg, screen)?;
+        let fps_int = super::h264::frame_rate(fps, screen);
+        let bitrate = super::h264::bitrate(width, height, fps_int);
         let bitrate_str = format!("{bitrate}");
         let fps_str = fps_int.to_string();
         let size_str = format!("{width}x{height}");
@@ -65,8 +177,15 @@ impl LiveH264Encoder {
         };
 
         let mut last_err: Option<String> = None;
-        for kind in encoder_chain() {
-            match try_spawn(*kind, &size_str, &fps_str, &bitrate_str, transpose) {
+        for kind in encoder_chain(hardware_video) {
+            match try_spawn(
+                *kind,
+                &size_str,
+                &fps_str,
+                &bitrate_str,
+                transpose,
+                frame_bytes,
+            ) {
                 Ok(child) => {
                     info!(
                         "live H.264 encoder: {width}x{height}@{fps_int}fps via {}",
@@ -82,7 +201,7 @@ impl LiveH264Encoder {
         }
 
         Err(MediaError::Ffmpeg(format!(
-            "all live H.264 encoders failed; last error: {}",
+            "All live H.264 encoders failed. Last error: {}",
             last_err.unwrap_or_default()
         )))
     }
@@ -181,6 +300,7 @@ fn try_spawn(
     fps_str: &str,
     bitrate_str: &str,
     transpose: Option<&str>,
+    frame_bytes: usize,
 ) -> Result<LiveH264Encoder, String> {
     let mut args: Vec<String> = vec!["-loglevel".into(), "error".into()];
     args.extend(hwaccel_input_args(kind));
@@ -206,20 +326,24 @@ fn try_spawn(
     args.extend(["-an".into(), "-f".into(), "h264".into(), "pipe:1".into()]);
 
     debug!("live h264 ffmpeg args: {}", args.join(" "));
-    let mut child = Command::new("ffmpeg")
+    let child = Command::new("ffmpeg")
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    let mut pending = PendingEncoder(Some(child));
+    let child = pending.0.as_mut().unwrap();
 
     std::thread::sleep(Duration::from_millis(200));
     if let Ok(Some(status)) = child.try_wait() {
         let mut err_buf = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
+        if let Some(stderr) = child.stderr.take() {
             use std::io::Read;
-            let _ = stderr.read_to_string(&mut err_buf);
+            let _ = stderr
+                .take((MAX_DIAGNOSTIC_LINE * MAX_PROBE_LINES) as u64)
+                .read_to_string(&mut err_buf);
         }
         return Err(format!(
             "ffmpeg exited early ({status}): {}",
@@ -240,11 +364,6 @@ fn try_spawn(
         .take()
         .ok_or_else(|| "ffmpeg stderr missing".to_string())?;
 
-    let (w, h) = size_str
-        .split_once('x')
-        .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)))
-        .ok_or_else(|| format!("bad size_str {size_str}"))?;
-    let frame_bytes = (w as usize) * (h as usize) * 4;
     grow_pipe(stdin.as_raw_fd(), frame_bytes);
     grow_pipe(stdout.as_raw_fd(), 1 << 19);
     // A stalled USB consumer must not trap the renderer in an encoder pipe write.
@@ -253,8 +372,6 @@ fn try_spawn(
         || unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         let error = std::io::Error::last_os_error();
-        let _ = child.kill();
-        let _ = child.wait();
         return Err(format!("nonblocking encoder stdin: {error}"));
     }
 
@@ -265,39 +382,45 @@ fn try_spawn(
     let open_failed_clone = Arc::clone(&open_failed);
     let probe_log_clone = Arc::clone(&probe_log);
     let kind_name = kind.name();
-    thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().map_while(Result::ok) {
-            if line.is_empty() {
-                continue;
-            }
-            if probing_clone.load(Ordering::Relaxed) {
-                if line.contains("Error while opening encoder")
-                    || line.contains("Could not open encoder")
-                    || line.contains("Failed to initialise")
-                    || line.contains("Device creation failed")
-                {
-                    open_failed_clone.store(true, Ordering::Relaxed);
+    thread::Builder::new()
+        .name("h264-diagnostics".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::with_capacity(MAX_DIAGNOSTIC_LINE);
+            let mut rate = DiagnosticRate::default();
+            let mut consumed = 0;
+            loop {
+                match read_diagnostic_line(&mut reader, &mut bytes, &mut consumed) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        debug!("ffmpeg[{kind_name}] diagnostic pipe closed: {error}");
+                        break;
+                    }
                 }
-                probe_log_clone.lock().push(line);
-            } else {
-                warn!("ffmpeg[{kind_name}]: {line}");
+                let line = String::from_utf8_lossy(&bytes).trim().to_owned();
+                if line.is_empty() {
+                    continue;
+                }
+                if probing_clone.load(Ordering::Relaxed) {
+                    if retain_probe_line(&mut probe_log_clone.lock(), line) {
+                        open_failed_clone.store(true, Ordering::Relaxed);
+                    }
+                } else if let Some(suppressed) = rate.observe(Instant::now()) {
+                    warn!(suppressed, "ffmpeg[{kind_name}]: {line}");
+                }
             }
-        }
-    });
+        })
+        .map_err(|error| format!("start encoder diagnostics: {error}"))?;
 
     let probe = vec![0u8; frame_bytes];
     if let Err(e) = write_pipe(&mut stdin, &probe, Duration::from_secs(2)) {
-        let _ = child.kill();
-        let _ = child.wait();
         return Err(format!("probe write: {e}"));
     }
 
     let probe_deadline = Instant::now() + Duration::from_millis(2000);
     loop {
         if open_failed.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
             let summary = probe_log
                 .lock()
                 .iter()
@@ -327,10 +450,11 @@ fn try_spawn(
     probing.store(false, Ordering::Relaxed);
 
     Ok(LiveH264Encoder {
-        child,
+        child: pending.0.take().unwrap(),
         stdin: Some(stdin),
         stdout: Some(stdout),
         frame_bytes,
+        kind,
     })
 }
 
@@ -339,6 +463,124 @@ mod pipe_tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn live_geometry_validates_rotated_panel_layout_and_allocation_before_spawn() {
+        let screen = ScreenInfo::HYDROSHIFT2_OLED_CURVE;
+        for rotation in [0, 90, 180, 270] {
+            let (width, height) = if rotation % 180 == 0 {
+                (screen.width, screen.height)
+            } else {
+                (screen.height, screen.width)
+            };
+            assert_eq!(
+                live_frame_bytes(width, height, rotation, &screen).unwrap(),
+                screen.width as usize * screen.height as usize * 4
+            );
+        }
+        for (width, height, rotation) in [
+            (0, 0, 0),
+            (screen.height, screen.width, 0),
+            (screen.width, screen.height, 45),
+            (screen.width + 1, screen.height, 0),
+        ] {
+            assert!(live_frame_bytes(width, height, rotation, &screen).is_err());
+        }
+        let unsupported = ScreenInfo {
+            h264: false,
+            ..screen
+        };
+        assert!(live_frame_bytes(screen.width, screen.height, 0, &unsupported).is_err());
+        let excessive = ScreenInfo {
+            width: u32::MAX,
+            height: u32::MAX,
+            ..screen
+        };
+        assert!(live_frame_bytes(excessive.width, excessive.height, 0, &excessive).is_err());
+        let boundary = ScreenInfo {
+            width: 4096,
+            height: 4096,
+            ..screen
+        };
+        assert_eq!(
+            live_frame_bytes(4096, 4096, 0, &boundary).unwrap(),
+            64 * 1024 * 1024
+        );
+        let excessive = ScreenInfo {
+            width: 4097,
+            ..boundary
+        };
+        assert!(live_frame_bytes(4097, 4096, 0, &excessive).is_err());
+    }
+
+    #[test]
+    fn rejected_encoder_is_reaped_and_success_transfers_child_ownership() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        drop(PendingEncoder(Some(child)));
+        let mut status = 0;
+        // The fixture was our child and the guard must already have reaped it.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut pending = PendingEncoder(Some(child));
+        let mut accepted = pending.0.take().unwrap();
+        drop(pending);
+        let running = accepted.try_wait().unwrap().is_none();
+        accepted.kill().unwrap();
+        accepted.wait().unwrap();
+        assert!(running);
+    }
+
+    #[test]
+    fn oversized_lines_are_drained_without_hiding_the_next_error() {
+        let mut input = vec![b'x'; 256 * 1024];
+        input.extend_from_slice(b"\nDevice creation failed\nlast line");
+        let mut reader = BufReader::with_capacity(37, std::io::Cursor::new(input));
+        let mut line = Vec::new();
+        let mut consumed = 0;
+        assert!(read_diagnostic_line(&mut reader, &mut line, &mut consumed).unwrap());
+        assert_eq!(line, vec![b'x'; MAX_DIAGNOSTIC_LINE]);
+        assert!(read_diagnostic_line(&mut reader, &mut line, &mut consumed).unwrap());
+        assert_eq!(line, b"Device creation failed\n");
+        assert!(read_diagnostic_line(&mut reader, &mut line, &mut consumed).unwrap());
+        assert_eq!(line, b"last line");
+        assert!(!read_diagnostic_line(&mut reader, &mut line, &mut consumed).unwrap());
+        assert!(line.is_empty());
+    }
+
+    #[test]
+    fn startup_retention_stays_bounded_and_prioritizes_encoder_failures() {
+        let mut lines = Vec::new();
+        for _ in 0..100 {
+            assert!(!retain_probe_line(&mut lines, "startup detail".into()));
+        }
+        assert_eq!(lines.len(), MAX_PROBE_LINES);
+        assert!(retain_probe_line(
+            &mut lines,
+            "Device creation failed".into()
+        ));
+        assert_eq!(lines, ["Device creation failed"]);
+    }
+
+    #[test]
+    fn runtime_diagnostics_report_suppression_without_per_line_logging() {
+        let now = Instant::now();
+        let mut rate = DiagnosticRate::default();
+        assert_eq!(rate.observe(now), Some(0));
+        for _ in 0..1000 {
+            assert_eq!(rate.observe(now + Duration::from_secs(1)), None);
+        }
+        assert_eq!(rate.observe(now + DIAGNOSTIC_INTERVAL), Some(1000));
+        assert_eq!(rate.observe(now + 2 * DIAGNOSTIC_INTERVAL), Some(0));
+    }
 
     #[test]
     fn stalled_consumer_times_out_and_healthy_consumer_receives_exact_bytes() {

@@ -1245,7 +1245,7 @@ impl FrameSource for NoopFrameSource {}
 // ─── JPEG sources ──────────────────────────────────────────────────────
 
 struct StaticSource {
-    frame: Arc<Vec<u8>>,
+    frame: Arc<lianli_media::Retained<Vec<u8>>>,
     sent: bool,
 }
 impl FrameSource for StaticSource {
@@ -1265,7 +1265,7 @@ impl FrameSource for StaticSource {
 
 struct VideoSource {
     player: Arc<AsyncVideoPlayer>,
-    frames: Arc<Vec<Vec<u8>>>,
+    frames: Arc<lianli_media::Retained<Vec<Vec<u8>>>>,
     sent_index: usize,
 }
 impl FrameSource for VideoSource {
@@ -1488,6 +1488,7 @@ fn make_frame_source(
                     lcd,
                     screen,
                     asset.stream_fps,
+                    asset.hardware_video,
                 ) {
                     Ok(renderer) => {
                         info!("Sensor mode using live h264 pipeline");
@@ -1524,10 +1525,8 @@ fn make_frame_source(
                     Arc::clone(custom_asset),
                     lcd,
                     screen,
-                    custom_asset.canvas_width(),
-                    custom_asset.canvas_height(),
-                    custom_asset.total_rotation_deg(),
                     asset.stream_fps,
+                    asset.hardware_video,
                 ) {
                     Ok(renderer) => {
                         info!("Custom mode using live h264 pipeline");
@@ -1732,6 +1731,7 @@ mod tests {
             kind: MediaAssetKind::Sensor { asset: sensor },
             config_key: "sensor-test".into(),
             stream_fps: 20.0,
+            hardware_video: false,
         });
         let mut target = ActiveTarget::new(
             0,
@@ -1898,10 +1898,11 @@ mod tests {
             })));
             let asset = Arc::new(MediaAsset {
                 kind: MediaAssetKind::Static {
-                    frame: Arc::new(vec![1]),
+                    frame: lianli_media::Retained::frame(vec![1]).unwrap(),
                 },
                 config_key: "shutdown-test".into(),
                 stream_fps: 20.0,
+                hardware_video: false,
             });
             let mut target = ActiveTarget::new(
                 0,
@@ -2223,7 +2224,7 @@ mod tests {
 
     #[test]
     fn static_source_only_yields_frame_until_marked_sent() {
-        let frame = Arc::new(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let frame = lianli_media::Retained::frame(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
         let mut source = StaticSource {
             frame: Arc::clone(&frame),
             sent: false,

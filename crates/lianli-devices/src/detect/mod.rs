@@ -7,7 +7,8 @@ mod enumerate;
 
 pub use backends::{
     hidraw_path_for_usb_topology, open_hid_lcd_by_topology, open_hid_lcd_by_vid_pid,
-    open_hid_lcd_device, open_hid_transient, open_shared_hid, open_usb_bulk_backend,
+    open_hid_lcd_device, open_hid_transient, open_hid_transient_for_device, open_shared_hid,
+    open_usb_bulk_backend,
 };
 pub use binding::ensure_hid_devices_bound;
 pub use controllers::create_hid_lcd_device;

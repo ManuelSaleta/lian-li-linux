@@ -7,7 +7,7 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import { useLcdStore } from "@/stores/lcd";
 import { DONGLE_FAMILIES } from "@/constants";
-import type { DaemonInfo, SensorInfo } from "@/types";
+import type { DaemonInfo, SensorInfo, TelemetrySnapshot } from "@/types";
 
 function findTemp(sensors: SensorInfo[], kind: "cpu" | "gpu"): number | null {
   const match = sensors.find((s) => {
@@ -32,6 +32,7 @@ export const useDaemonStore = defineStore("daemon", () => {
   const connected = ref(false);
   const socketPath = ref("");
   const streamingActive = ref(false);
+  const mediaPreparation = ref<NonNullable<TelemetrySnapshot["media_preparation"]>>({});
   const info = ref<DaemonInfo | null>(null);
   const writeError = ref<string | null>(null);
   const canWrite = computed(() => connected.value && !writeError.value);
@@ -55,6 +56,7 @@ export const useDaemonStore = defineStore("daemon", () => {
       writeError.value = result.write_error ?? null;
       socketPath.value = result.socket_path;
       streamingActive.value = result.telemetry.streaming_active;
+      mediaPreparation.value = result.telemetry.media_preparation ?? {};
       openrgbRunning.value = result.telemetry.openrgb_status.running;
       openrgbError.value = result.telemetry.openrgb_status.error ?? "";
       openrgbPort.value = result.telemetry.openrgb_status.port;
@@ -84,6 +86,7 @@ export const useDaemonStore = defineStore("daemon", () => {
       wasConnected = result.connected;
     } catch (e) {
       connected.value = false;
+      mediaPreparation.value = {};
       info.value = null;
       writeError.value = null;
       wasConnected = false;
@@ -112,6 +115,7 @@ export const useDaemonStore = defineStore("daemon", () => {
     canWrite,
     socketPath,
     streamingActive,
+    mediaPreparation,
     version,
     info,
     openrgbRunning,

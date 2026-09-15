@@ -131,6 +131,11 @@ impl ServiceManager {
         if minutes == 0 {
             return Err("Duration must be positive".into());
         }
+        if self.media_preparation.is_busy() {
+            return Err(
+                "Wait for LCD media preparation to finish before starting pixel cleaning".into(),
+            );
+        }
         if self.pixel_clean_preparation.is_some() {
             return Err("Another pixel cleaner preparation is pending".into());
         }
@@ -260,6 +265,7 @@ impl ServiceManager {
                                 target.index, target.payload_limit
                             ),
                             stream_fps: lianli_media::pixel_cleaner::FPS as f32,
+                            hardware_video: false,
                         });
                         cache.push((
                             target.screen,
@@ -559,10 +565,11 @@ mod tests {
     fn asset(key: &str) -> Arc<MediaAsset> {
         Arc::new(MediaAsset {
             kind: MediaAssetKind::Static {
-                frame: Arc::new(vec![1]),
+                frame: lianli_media::Retained::frame(vec![1]).unwrap(),
             },
             config_key: key.into(),
             stream_fps: 20.0,
+            hardware_video: false,
         })
     }
 

@@ -25,6 +25,7 @@ struct EncoderSettings<'a> {
     fps: f32,
     rotation_deg: u16,
     screen: &'a ScreenInfo,
+    hardware_video: bool,
 }
 
 /// Attempt to respawn the encoder and restart the h264 stream after a write
@@ -80,14 +81,16 @@ fn try_restart_encoder(
         fps,
         rotation_deg,
         screen,
+        hardware_video,
     } = settings;
-    let mut new_encoder = match LiveH264Encoder::spawn(width, height, fps, rotation_deg, screen) {
-        Ok(enc) => enc,
-        Err(e) => {
-            warn!("h264 encoder respawn failed: {e}");
-            return false;
-        }
-    };
+    let mut new_encoder =
+        match LiveH264Encoder::spawn(width, height, fps, rotation_deg, screen, hardware_video) {
+            Ok(enc) => enc,
+            Err(e) => {
+                warn!("h264 encoder respawn failed: {e}");
+                return false;
+            }
+        };
 
     if stop.load(Ordering::Relaxed) {
         return false;
@@ -356,13 +359,21 @@ impl AsyncCustomH264Renderer {
         asset: Arc<CustomAsset>,
         lcd: &LcdBackend,
         screen: &ScreenInfo,
-        canvas_w: u32,
-        canvas_h: u32,
-        rotation_deg: u16,
         fps: f32,
+        hardware_video: bool,
     ) -> anyhow::Result<Self> {
-        let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, rotation_deg, screen)
-            .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
+        let canvas_w = asset.canvas_width();
+        let canvas_h = asset.canvas_height();
+        let rotation_deg = asset.total_rotation_deg();
+        let mut encoder = LiveH264Encoder::spawn(
+            canvas_w,
+            canvas_h,
+            fps,
+            rotation_deg,
+            screen,
+            hardware_video,
+        )
+        .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
         let stdout = encoder
             .take_stdout()
             .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
@@ -418,6 +429,7 @@ impl AsyncCustomH264Renderer {
                                 fps,
                                 rotation_deg,
                                 screen: &screen_clone,
+                                hardware_video,
                             },
                             &mut restart_count,
                             &mut encoder_started_at,
@@ -465,6 +477,7 @@ impl AsyncSensorH264Renderer {
         lcd: &LcdBackend,
         screen: &ScreenInfo,
         fps: f32,
+        hardware_video: bool,
     ) -> anyhow::Result<Self> {
         let initial = match asset.render_frame_rgba(true)? {
             Some(img) => img,
@@ -474,8 +487,9 @@ impl AsyncSensorH264Renderer {
         };
         let canvas_w = initial.width();
         let canvas_h = initial.height();
-        let mut encoder = LiveH264Encoder::spawn(canvas_w, canvas_h, fps, 0, screen)
-            .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
+        let mut encoder =
+            LiveH264Encoder::spawn(canvas_w, canvas_h, fps, 0, screen, hardware_video)
+                .map_err(|e| anyhow::anyhow!("h264 encoder spawn: {e}"))?;
         let stdout = encoder
             .take_stdout()
             .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
@@ -538,6 +552,7 @@ impl AsyncSensorH264Renderer {
                                     fps,
                                     rotation_deg: 0,
                                     screen: &screen_clone,
+                                    hardware_video,
                                 },
                                 &mut restart_count,
                                 &mut encoder_started_at,

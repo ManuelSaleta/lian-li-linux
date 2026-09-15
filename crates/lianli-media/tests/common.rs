@@ -140,7 +140,8 @@ fn prepare_media_asset_image_produces_static_even_when_h264_screen() {
     };
 
     let asset =
-        lianli_media::prepare_media_asset(&cfg, 30.0, &screen, screen.h264, &[], &[]).unwrap();
+        lianli_media::prepare_media_asset(&cfg, 30.0, &screen, screen.h264, &[], &[], false)
+            .unwrap();
     assert!(matches!(asset, lianli_media::MediaAssetKind::Static { .. }));
 }
 
@@ -169,6 +170,7 @@ fn prepare_media_asset_color_produces_static_even_when_h264_screen() {
     };
 
     let asset =
-        lianli_media::prepare_media_asset(&cfg, 30.0, &screen, screen.h264, &[], &[]).unwrap();
+        lianli_media::prepare_media_asset(&cfg, 30.0, &screen, screen.h264, &[], &[], false)
+            .unwrap();
     assert!(matches!(asset, lianli_media::MediaAssetKind::Static { .. }));
 }

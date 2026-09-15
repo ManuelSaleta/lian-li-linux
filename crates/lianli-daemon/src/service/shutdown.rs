@@ -9,6 +9,7 @@ impl ServiceManager {
         };
 
         info!("shutdown: begin");
+        self.media_preparation.cancel();
         lianli_transport::usb::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // The direct-color writer shares this stop flag and is joined below.
@@ -51,6 +52,7 @@ impl ServiceManager {
         // Controllers (fan / AIO / RGB / direct-color writer)
         self.controllers.shutdown();
         mark("controllers", t0);
+        drop(std::mem::take(&mut self.media_preparation));
 
         // Drop RGB controller reference from IPC state before clearing the
         // device registry so device handles are released cleanly.

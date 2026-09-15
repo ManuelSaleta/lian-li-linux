@@ -32,7 +32,7 @@ fn encode_h264_succeeds_with_gif_input() {
         .unwrap();
     drop(encoder);
 
-    let result = encode_h264(&gif_path, 10.0, 0.0, &test_screen());
+    let result = encode_h264(&gif_path, 10.0, 0.0, &test_screen(), false);
     assert!(
         result.is_ok(),
         "encode_h264 must succeed with GIF input, got: {:?}",
@@ -48,7 +48,7 @@ fn encode_h264_succeeds_with_jpeg_input() {
     let img = image::RgbImage::from_pixel(16, 16, image::Rgb([0, 0, 255]));
     img.save(&jpg_path).unwrap();
 
-    let result = encode_h264(&jpg_path, 10.0, 0.0, &test_screen());
+    let result = encode_h264(&jpg_path, 10.0, 0.0, &test_screen(), false);
     assert!(
         result.is_ok(),
         "encode_h264 must succeed with JPEG input, got: {:?}",
@@ -63,7 +63,8 @@ fn encode_h264_jpeg_output_has_multiple_frames() {
     let img = image::RgbImage::from_pixel(16, 16, image::Rgb([0, 255, 0]));
     img.save(&jpg_path).unwrap();
 
-    let (h264_path, _temp_dir, _fps) = encode_h264(&jpg_path, 30.0, 0.0, &test_screen()).unwrap();
+    let (h264_path, _temp_dir, _fps) =
+        encode_h264(&jpg_path, 30.0, 0.0, &test_screen(), false).unwrap();
 
     let output = std::process::Command::new("ffprobe")
         .args([

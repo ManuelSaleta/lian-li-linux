@@ -36,7 +36,13 @@ impl H264Encoder {
     /// `rgb_byte_order` selects the input interpretation: true means the
     /// framebuffer stores red in the first byte of each pixel, as AB24 and
     /// XB24 do, false means blue first, as XR24 and AR24 do.
-    pub fn new(width: u32, height: u32, fps: u32, rgb_byte_order: bool) -> Result<Self> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        rgb_byte_order: bool,
+        hardware_video: bool,
+    ) -> Result<Self> {
         ensure_ffmpeg_initialized();
 
         let src_pixel = if rgb_byte_order {
@@ -46,7 +52,7 @@ impl H264Encoder {
         };
         let gop = (fps / 2).max(1);
         let mut last_err: Option<anyhow::Error> = None;
-        for name in ["h264_nvenc", "h264_amf", "libx264"] {
+        for &name in encoder_names(hardware_video) {
             match try_open_encoder(name, width, height, fps, gop) {
                 Ok(encoder) => {
                     info!("H.264 encoder: {name}");
@@ -128,6 +134,14 @@ impl H264Encoder {
     }
 }
 
+fn encoder_names(hardware_video: bool) -> &'static [&'static str] {
+    if hardware_video {
+        &["h264_nvenc", "h264_amf", "libx264"]
+    } else {
+        &["libx264"]
+    }
+}
+
 fn try_open_encoder(
     name: &str,
     width: u32,
@@ -170,4 +184,16 @@ fn try_open_encoder(
     enc.set_gop(gop);
     enc.set_max_b_frames(0);
     Ok(enc.open_with(opts)?)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn desktop_encoding_respects_software_only_policy() {
+        assert_eq!(super::encoder_names(false), &["libx264"]);
+        assert_eq!(
+            super::encoder_names(true),
+            &["h264_nvenc", "h264_amf", "libx264"]
+        );
+    }
 }

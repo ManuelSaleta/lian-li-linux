@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use text::{draw_sensor_text_fallback, draw_sensor_text_ttf, TextRenderParams};
-use tracing::warn;
 
 pub struct FrameInfo {
     pub data: Vec<u8>,
@@ -52,6 +51,7 @@ pub struct SensorAsset {
     render_height: u32,
     previous_value: Mutex<String>,
     frame_index: AtomicUsize,
+    _retained_budget: crate::resource_budget::RetainedBudget,
 }
 
 impl SensorAsset {
@@ -63,6 +63,18 @@ impl SensorAsset {
         background_image: Option<&Path>,
         update_interval_ms: u64,
     ) -> Result<Arc<Self>, MediaError> {
+        for (field, text, size) in [
+            (
+                "label",
+                descriptor.label.as_str(),
+                descriptor.label_font_size,
+            ),
+            ("unit", descriptor.unit.as_str(), descriptor.unit_font_size),
+            ("value", "", descriptor.value_font_size),
+        ] {
+            crate::text_validation::validate(text, size)
+                .map_err(|error| MediaError::InvalidConfig(format!("Sensor {field}: {error}")))?;
+        }
         let mut ranges = descriptor.gauge_ranges.clone();
         if ranges.is_empty() {
             ranges = vec![
@@ -93,24 +105,27 @@ impl SensorAsset {
         });
 
         let (rw, rh) = render_dimensions(screen, orientation);
+        let mut retained_budget = crate::resource_budget::RetainedBudget::default();
+        let mut limits = crate::image::decode_limits();
+        limits.check_dimensions(rw, rh)?;
+        limits.reserve_buffer(rw, rh, image::ColorType::Rgba8)?;
 
         let template_image: Option<Arc<RgbImage>> = background_image
             .filter(|path| !path.as_os_str().is_empty())
-            .and_then(|path| match ::image::open(path) {
-                Ok(img) => {
-                    let resized = img
-                        .resize_exact(rw, rh, ::image::imageops::FilterType::Lanczos3)
-                        .to_rgb8();
-                    Some(Arc::new(resized))
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load sensor background image '{}': {e}",
+            .map(|path| {
+                retained_budget.reserve(rw as usize * rh as usize * 3)?;
+                let img = crate::image::open_image(path).map_err(|error| {
+                    MediaError::InvalidConfig(format!(
+                        "Sensor background image '{}': {error}",
                         path.display()
-                    );
-                    None
-                }
-            });
+                    ))
+                })?;
+                let resized = img
+                    .resize_exact(rw, rh, ::image::imageops::FilterType::Lanczos3)
+                    .to_rgb8();
+                Ok::<_, MediaError>(Arc::new(resized))
+            })
+            .transpose()?;
 
         if ranges.last().and_then(|r| r.max).is_some() {
             if let Some(last) = ranges.last().cloned() {
@@ -156,12 +171,22 @@ impl SensorAsset {
             .clone()
             .or_else(lianli_shared::fonts::default_font_path);
         let font = if let Some(path) = font_path {
-            let font_data = std::fs::read(&path)
-                .map_err(|e| MediaError::Sensor(format!("Failed to read font file: {e}")))?;
-            Some(
-                FontVec::try_from_vec(font_data)
-                    .map_err(|e| MediaError::Sensor(format!("Failed to parse font file: {e}")))?,
-            )
+            let font = crate::fonts::load(&path)?;
+            for (field, text, size) in [
+                (
+                    "label",
+                    descriptor.label.as_str(),
+                    descriptor.label_font_size,
+                ),
+                ("unit", descriptor.unit.as_str(), descriptor.unit_font_size),
+                ("value", "0123456789.-", descriptor.value_font_size),
+            ] {
+                crate::text_validation::validate_font(&font, text, size).map_err(|error| {
+                    MediaError::InvalidConfig(format!("Sensor {field}: {error}"))
+                })?;
+            }
+            retained_budget.reserve(font.as_slice().len())?;
+            Some(font)
         } else {
             None
         };
@@ -205,6 +230,7 @@ impl SensorAsset {
             render_height: rh,
             previous_value: Mutex::new("N/A".into()),
             frame_index: 1.into(),
+            _retained_budget: retained_budget,
         }))
     }
 
@@ -215,6 +241,7 @@ impl SensorAsset {
     /// Render the next frame. Skips encoding when the value text matches the
     /// previous frame and `force` is false. Returns `Ok(None)` when skipped.
     pub fn render_frame(&self, force: bool) -> Result<Option<FrameInfo>, MediaError> {
+        let text_work = crate::text_work::FrameTextWork::begin();
         let value = self.read_value()?.clamp(0.0, 100.0);
 
         let value_text = if self.decimal_places > 0 {
@@ -272,6 +299,7 @@ impl SensorAsset {
             draw_sensor_text_fallback(&mut image, w, h, text_params);
         }
 
+        text_work.check()?;
         *prev = value_text;
 
         let oriented = apply_orientation(image, self.orientation);
@@ -283,6 +311,7 @@ impl SensorAsset {
     }
 
     pub fn render_frame_rgba(&self, force: bool) -> Result<Option<RgbaImage>, MediaError> {
+        let text_work = crate::text_work::FrameTextWork::begin();
         let value = self.read_value()?.clamp(0.0, 100.0);
 
         let value_text = if self.decimal_places > 0 {
@@ -340,6 +369,7 @@ impl SensorAsset {
             draw_sensor_text_fallback(&mut image, w, h, text_params);
         }
 
+        text_work.check()?;
         *prev = value_text;
 
         let oriented = apply_orientation(image, self.orientation);

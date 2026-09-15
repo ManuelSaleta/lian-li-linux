@@ -4,9 +4,9 @@ use super::super::helpers::{
     fill_rounded_rect, range_color, range_color_blended, render_value_format, unit_interval,
 };
 use crate::common::get_exact_text_metrics;
+use crate::text_raster::draw_text_mut;
 use ab_glyph::{FontVec, PxScale};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::draw_text_mut;
 use lianli_shared::media::SensorRange;
 use std::collections::VecDeque;
 
@@ -144,8 +144,8 @@ pub(in super::super) fn draw(sub: &mut RgbaImage, a: DrawArgs<'_>) {
             } else {
                 plot_x0 - pad_l - tw as f32
             };
-            let draw_x = x.round() as i32 - ox;
-            let draw_y = (y - (th as f32 * 0.5)).round() as i32 - oy;
+            let draw_x = (x.round() as i64).saturating_sub(i64::from(ox));
+            let draw_y = ((y - (th as f32 * 0.5)).round() as i64).saturating_sub(i64::from(oy));
             draw_text_mut(
                 sub,
                 Rgba(color),

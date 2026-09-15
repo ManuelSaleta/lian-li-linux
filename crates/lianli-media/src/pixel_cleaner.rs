@@ -95,7 +95,7 @@ pub fn prepare_asset(
     let (width, height) = crate::common::render_dimensions(&render_screen, orientation);
     let mut frame = RgbImage::new(width, height);
     let frames_dir = if screen.h264 {
-        Some(tempfile::TempDir::new()?)
+        Some(crate::TemporaryMedia::new(MAX_ASSET_BYTES as u64)?)
     } else {
         None
     };
@@ -126,7 +126,7 @@ pub fn prepare_asset(
     }
     cancelled()?;
     if let Some(frames_dir) = frames_dir {
-        let output_dir = tempfile::TempDir::new()?;
+        let mut output_dir = crate::TemporaryMedia::new(MAX_ASSET_BYTES as u64)?;
         let path = output_dir.path().join("cleaner.h264");
         let (max_rate, buffer_bits) = h264_budget(payload_limit);
         tracing::info!(
@@ -175,6 +175,7 @@ pub fn prepare_asset(
                 "h264",
             ])
             .arg(&path);
+        crate::video::h264::limit_output_file(&mut command, MAX_ASSET_BYTES as u64)?;
         let output = crate::video::process::output_cancellable(
             command,
             deadline.saturating_duration_since(Instant::now()),
@@ -193,7 +194,9 @@ pub fn prepare_asset(
         }
         validate_h264(&path, screen, payload_limit, deadline, cancel)?;
         cancelled()?;
+        output_dir.retain_bytes(size)?;
         Ok(MediaAssetKind::H264Stream {
+            encoder: None,
             path,
             looping: true,
             fps: FPS as f32,
@@ -202,7 +205,7 @@ pub fn prepare_asset(
     } else {
         Ok(MediaAssetKind::Video {
             frame_durations: Arc::new(vec![Duration::from_millis(50); frames.len()]),
-            frames: Arc::new(frames),
+            frames: crate::Retained::frames(frames)?,
         })
     }
 }

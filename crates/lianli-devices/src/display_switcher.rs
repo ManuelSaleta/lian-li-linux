@@ -33,36 +33,29 @@ fn is_lancool_pid(pid: u16) -> bool {
     matches!(pid, 0xACD1 | 0xAD11)
 }
 
-/// Switch a device from desktop mode (CH340) to LCD mode.
-///
-/// Opens the CH340 HID device via libusb and sends the mode-switch bytes.
-/// The device will reboot and re-enumerate as VID=0x1CBE on USB.
-pub fn switch_to_lcd_mode(pid: u16, backend: HidBackend) -> Result<()> {
-    let device = rusb::devices()?
-        .iter()
-        .find(|d| {
-            d.device_descriptor()
-                .map(|desc| desc.vendor_id() == SWITCHER_VID && desc.product_id() == pid)
-                .unwrap_or(false)
-        })
-        .context("opening CH340 display-mode device")?;
-
-    let mut hid = crate::detect::open_hid_transient(
-        &device,
-        None,
-        SWITCHER_VID,
-        pid,
-        device.bus_number(),
-        &device.port_numbers().unwrap_or_default(),
-        backend,
-    )?;
+/// The selected device reboots and re-enumerates as VID=0x1CBE.
+pub fn switch_to_lcd_mode(
+    device: &rusb::Device<rusb::GlobalContext>,
+    backend: HidBackend,
+) -> Result<()> {
+    let desc = device
+        .device_descriptor()
+        .context("reading selected display identity")?;
+    anyhow::ensure!(
+        desc.vendor_id() == SWITCHER_VID,
+        "selected device is not in desktop mode"
+    );
+    let pid = desc.product_id();
+    let mut hid = crate::detect::open_hid_transient_for_device(device, None, backend)?;
     let payload = if is_lancool_pid(pid) {
         SWITCH_TO_LCD_LANCOOL
     } else {
         SWITCH_TO_LCD
     };
-    hid.write(payload)
+    let written = hid
+        .write(payload)
         .context("sending LCD mode switch bytes")?;
+    anyhow::ensure!(written == payload.len(), "short LCD mode switch write");
 
     info!("Sent LCD mode switch to {SWITCHER_VID:#06x}:{pid:#06x} — device will reboot");
     Ok(())

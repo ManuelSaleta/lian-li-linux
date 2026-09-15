@@ -392,6 +392,11 @@ Then enable the other unit and disable the current one (the shared lock refuses 
 
 The daemon reads its config from `~/.config/lianli/config.json` (per-user service) or `/var/lib/lianli/config.json` (system service) — see [Service modes](#service-modes). The GUI edits this file via the daemon's IPC socket. LCD targets, fan curves, and speed modes are all configured through the GUI.
 
+**Hardware video acceleration** in Settings is disabled by default. Save the setting to
+reconfigure active video streams without restarting the daemon. It replaces the
+`LIANLI_ENABLE_HW_VIDEO` environment variable, which is no longer read. See
+[Hardware video](docs/hardware-video.md) for scope and troubleshooting.
+
 ## Pixel conditioning
 
 Each LCD card has a pixel-conditioning control with 15, 30, 60, and 120-minute presets. The daemon generates a five-second pattern of alternating black/white, changing grayscale noise, and solid color phases. JPEG-only displays use native-sized frames within their payload limits. H.264 displays use noise generated at reduced resolution and upscaled to the panel's native dimensions before encoding; bitrate and frame bursts follow the negotiated block size, or the driver's fallback when negotiation is unavailable. There is no bundled video or download. Preparation finishes before the display changes; use Cancel to abandon preparation or Stop to restore the previous display.

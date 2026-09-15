@@ -78,17 +78,19 @@ pub(in super::super) fn draw(
         }
     }
 
-    if show_numbers && numbers_color[3] > 0 {
+    if let Some((box_w, box_h)) = (show_numbers && numbers_color[3] > 0)
+        .then(|| super::super::geometry::clock_number_size(numbers_font_size).ok())
+        .flatten()
+    {
         let num_radius = r_outer * (1.0 - hour_tick_length_pct.clamp(0.0, 0.5) - 0.08).max(0.1);
-        let box_w = (numbers_font_size * 2.0).max(16.0) as u32;
-        let box_h = (numbers_font_size * 1.4).max(16.0) as u32;
+        let mut glyph_canvas = RgbaImage::from_pixel(box_w, box_h, Rgba([0, 0, 0, 0]));
         for i in 1..=12 {
             let angle = hour_mark_to_angle_rad(i as f32);
             let nx = center.0 + num_radius * angle.cos();
             let ny = center.1 + num_radius * angle.sin();
             let tl_x = (nx - box_w as f32 / 2.0).round() as i32;
             let tl_y = (ny - box_h as f32 / 2.0).round() as i32;
-            let mut glyph_canvas = RgbaImage::from_pixel(box_w, box_h, Rgba([0, 0, 0, 0]));
+            glyph_canvas.as_mut().fill(0);
             draw_text_widget(
                 &mut glyph_canvas,
                 &format!("{i}"),

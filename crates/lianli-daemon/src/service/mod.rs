@@ -20,6 +20,7 @@ mod aio_lcd_firmware;
 mod display_mode;
 mod init;
 mod media;
+mod media_preparation;
 mod pixel_cleaner;
 mod renderers;
 mod runtime;
@@ -45,6 +46,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::Unbind { .. } => "Unbind",
         DaemonEvent::SetEne6k77FanQuantity { .. } => "SetEne6k77FanQuantity",
         DaemonEvent::FrameFinished => "FrameFinished",
+        DaemonEvent::MediaPrepared => "MediaPrepared",
         DaemonEvent::RecreateMedia { .. } => "RecreateMedia",
         DaemonEvent::ResyncWirelessRgb => "ResyncWirelessRgb",
         DaemonEvent::LcdInitComplete { .. } => "LcdInitComplete",
@@ -122,6 +124,7 @@ pub enum DaemonEvent {
         quantity: u8,
     },
     FrameFinished,
+    MediaPrepared,
     RecreateMedia {
         target_index: usize,
         device_id: String,
@@ -166,6 +169,12 @@ pub struct ServiceManager {
     socket_path: PathBuf,
     config: Option<AppConfig>,
     media_assets: HashMap<usize, Arc<lianli_media::MediaAsset>>,
+    media_settings: HashMap<usize, lianli_shared::config::LcdConfig>,
+    media_requested_keys: Vec<lianli_shared::config::ConfigKey>,
+    media_targets: HashMap<usize, media_preparation::MediaTarget>,
+    media_asset_targets: HashMap<usize, media_preparation::MediaTarget>,
+    media_reload_pending: bool,
+    media_preparation: media_preparation::MediaPreparation,
     targets: Arc<Mutex<HashMap<usize, ActiveTarget>>>,
     wireless: WirelessController,
     packet_builder: PacketBuilder,
@@ -214,6 +223,12 @@ impl ServiceManager {
             socket_path,
             config: None,
             media_assets: HashMap::new(),
+            media_settings: HashMap::new(),
+            media_requested_keys: Vec::new(),
+            media_targets: HashMap::new(),
+            media_asset_targets: HashMap::new(),
+            media_reload_pending: false,
+            media_preparation: Default::default(),
             targets: Arc::new(Mutex::new(HashMap::new())),
             wireless: WirelessController::new(),
             packet_builder: PacketBuilder::new(),
@@ -299,6 +314,7 @@ impl ServiceManager {
     }
 
     pub fn device_poll(&mut self) {
+        self.poll_prepared_media();
         if self.cleaner_reload_pending {
             if let Some(tx) = &self.tx {
                 let _ = tx.send(DaemonEvent::IpcUpdate);
@@ -485,7 +501,6 @@ impl ServiceManager {
 
         suspend::spawn(tx.clone());
 
-        // We need to send these two events to ourselves before load_config, as load_config sets up the assets and already sends FrameFinished-Events
         tx.send(DaemonEvent::USBCheck).ok();
         tx.send(DaemonEvent::DevicePoll).ok();
 
@@ -770,6 +785,9 @@ impl ServiceManager {
                 }
                 DaemonEvent::FrameFinished => {
                     // Handled by the polling streaming thread — no action needed.
+                }
+                DaemonEvent::MediaPrepared => {
+                    self.poll_prepared_media();
                 }
                 DaemonEvent::ResyncWirelessRgb => {
                     if let Some(ref rgb) = self.controllers.rgb {

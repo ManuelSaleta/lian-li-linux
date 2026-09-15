@@ -35,8 +35,7 @@ fn make_hidraw_reopener(
     })
 }
 
-/// Recovery only accepts the exact saved topology so a replug or sibling
-/// device with the same VID PID usage page can never be opened instead
+/// Fail instead of opening a sibling when the requested topology is unavailable.
 fn open_hidraw_device_strict(
     vid: u16,
     pid: u16,
@@ -47,7 +46,7 @@ fn open_hidraw_device_strict(
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
     let expected = hidraw_path_for_usb_topology(bus, port_numbers).ok_or_else(|| {
         anyhow::anyhow!(
-            "hidraw topology {bus}-{:?} for {vid:04x}:{pid:04x} not present on reopen",
+            "hidraw topology {bus}-{:?} for {vid:04x}:{pid:04x} not present",
             port_numbers
         )
     })?;
@@ -71,7 +70,7 @@ fn open_hidraw_device_strict(
     };
     info.open_device(&api)
         .map(|d| (d, Some(path)))
-        .map_err(|e| anyhow::anyhow!("hidraw reopen {vid:04x}:{pid:04x}: {e}"))
+        .map_err(|e| anyhow::anyhow!("hidraw open at requested topology {vid:04x}:{pid:04x}: {e}"))
 }
 
 fn make_rusb_reopener(
@@ -289,6 +288,30 @@ pub fn open_shared_hid(
             })?;
             Ok(Arc::new(Mutex::new(Box::new(transport))))
         }
+    }
+}
+
+pub fn open_hid_transient_for_device(
+    device: &Device<GlobalContext>,
+    usage_page: Option<u16>,
+    backend: HidBackend,
+) -> Result<Box<dyn HidTransport>> {
+    match backend {
+        HidBackend::Hidraw => {
+            let descriptor = device.device_descriptor()?;
+            let (dev, path) = open_hidraw_device_strict(
+                descriptor.vendor_id(),
+                descriptor.product_id(),
+                device.bus_number(),
+                &device.port_numbers()?,
+                usage_page,
+            )?;
+            Ok(Box::new(HidrawTransport::new(dev, path)))
+        }
+        HidBackend::Rusb => Ok(Box::new(RusbHid::open_by_usage(
+            device.clone(),
+            usage_page,
+        )?)),
     }
 }
 

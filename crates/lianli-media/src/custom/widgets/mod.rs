@@ -120,28 +120,18 @@ pub(super) fn draw_widget(
         return;
     }
 
-    let (ww_i, wh_i) = (ww as i32, wh as i32);
-    let tl_x = offset_x + (widget.x * uniform_scale).round() as i32 - ww_i / 2;
-    let tl_y = offset_y + (widget.y * uniform_scale).round() as i32 - wh_i / 2;
+    let (tl_x, tl_y) =
+        super::geometry::widget_origin(widget, uniform_scale, (offset_x, offset_y), (ww, wh));
 
     let key = render_key(&widget.kind, state);
     if state.cached_render_key == Some(key) {
         if let Some(cached) = &state.cached_render {
-            fast_overlay(frame, cached, tl_x as i64, tl_y as i64);
+            fast_overlay(frame, cached, tl_x, tl_y);
             return;
         }
     }
 
-    let supersamples = match &widget.kind {
-        WidgetKind::RadialGauge { .. }
-        | WidgetKind::Speedometer { .. }
-        | WidgetKind::Sparkline { .. }
-        | WidgetKind::ClockAnalog { .. } => true,
-        WidgetKind::VerticalBar { corner_radius, .. }
-        | WidgetKind::HorizontalBar { corner_radius, .. } => *corner_radius > 0.1,
-        _ => false,
-    };
-    let ss_factor: u32 = if smooth_edges && supersamples { 2 } else { 1 };
+    let ss_factor = super::geometry::supersampling(&widget.kind, smooth_edges);
     let ss = ss_factor as f32;
     let draw_w = ww * ss_factor;
     let draw_h = wh * ss_factor;
@@ -497,7 +487,7 @@ pub(super) fn draw_widget(
         sub
     };
 
-    fast_overlay(frame, &final_overlay, tl_x as i64, tl_y as i64);
+    fast_overlay(frame, &final_overlay, tl_x, tl_y);
     state.cached_render = Some(final_overlay);
     state.cached_render_key = Some(key);
 }

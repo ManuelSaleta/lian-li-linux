@@ -15,7 +15,11 @@ pub struct DeviceProfile {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgb: Option<RgbDeviceConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::serde_limits::lcds"
+    )]
     pub lcds: Vec<LcdConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aio: Option<AioConfig>,

@@ -1,9 +1,10 @@
 //! Per-CPU-core usage bars.
 
 use super::super::helpers::range_color;
+use crate::text_raster::draw_text_mut;
 use ab_glyph::{FontVec, PxScale};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
+use imageproc::drawing::draw_filled_rect_mut;
 use imageproc::rect::Rect;
 use lianli_shared::media::SensorRange;
 use lianli_shared::template::BarOrientation;

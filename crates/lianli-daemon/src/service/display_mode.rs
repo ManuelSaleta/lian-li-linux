@@ -74,11 +74,32 @@ impl ServiceManager {
     }
 
     pub(super) fn handle_display_switch_to_lcd(&mut self, device_id: &str, pid: u16) {
-        self.desktop_displays.stop_for_pid(pid);
+        let selected = lianli_devices::detect::enumerate_devices().and_then(|devices| {
+            devices
+                .into_iter()
+                .find(|device| {
+                    device.vid == lianli_devices::display_switcher::SWITCHER_VID
+                        && device.pid == pid
+                        && device.device_id() == device_id
+                })
+                .ok_or_else(|| anyhow::anyhow!("selected desktop display is no longer attached"))
+        });
+        let selected = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                warn!("Cannot switch {device_id} to LCD mode: {error:#}");
+                return;
+            }
+        };
+        self.desktop_displays
+            .stop_for_device((selected.bus, selected.address));
         self.mark_mode_switch(device_id);
         thread::sleep(Duration::from_millis(300));
 
-        match lianli_devices::display_switcher::switch_to_lcd_mode(pid, self.hid_backend()) {
+        match lianli_devices::display_switcher::switch_to_lcd_mode(
+            &selected.device,
+            self.hid_backend(),
+        ) {
             Ok(()) => info!("Switched {device_id} to LCD mode"),
             Err(e) => warn!("Failed to switch {device_id} to LCD mode: {e:#}"),
         }

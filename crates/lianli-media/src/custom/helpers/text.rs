@@ -1,7 +1,7 @@
 use crate::common::get_exact_text_metrics;
+use crate::text_raster::draw_text_mut;
 use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::draw_text_mut;
 use lianli_shared::template::TextAlign;
 
 #[allow(clippy::too_many_arguments)]
@@ -16,7 +16,10 @@ pub fn draw_text_widget(
     wh: u32,
     letter_spacing: f32,
 ) {
-    if text.is_empty() || color[3] == 0 {
+    if !crate::text_work::text(text) {
+        return;
+    }
+    if text.is_empty() || color[3] == 0 || !size.is_finite() || !letter_spacing.is_finite() {
         return;
     }
     let scale = PxScale::from(size.max(1.0));
@@ -28,10 +31,10 @@ pub fn draw_text_widget(
         }
         let x = match align {
             TextAlign::Left => 0,
-            TextAlign::Center => ((ww as i32) - tw) / 2,
-            TextAlign::Right => (ww as i32) - tw,
-        } - ox;
-        let y = ((wh as i32) - th) / 2 - oy;
+            TextAlign::Center => (i64::from(ww) - i64::from(tw)) / 2,
+            TextAlign::Right => i64::from(ww) - i64::from(tw),
+        } - i64::from(ox);
+        let y = (i64::from(wh) - i64::from(th)) / 2 - i64::from(oy);
         draw_text_mut(sub, Rgba(color), x, y, scale, font, text);
         return;
     }
@@ -39,35 +42,50 @@ pub fn draw_text_widget(
     let scaled = font.as_scaled(scale);
     let ascent = scaled.ascent();
     let mut cursor_x = 0.0_f32;
-    let mut positioned: Vec<(f32, ab_glyph::Glyph)> = Vec::new();
     for ch in text.chars() {
         let glyph_id = scaled.glyph_id(ch);
         let advance = scaled.h_advance(glyph_id);
-        let glyph = glyph_id.with_scale_and_position(scale, point(cursor_x, ascent));
-        positioned.push((cursor_x, glyph));
         cursor_x += advance + letter_spacing;
     }
     let total_w = (cursor_x - letter_spacing).max(0.0);
-    let th = (ascent - scaled.descent()) as i32;
+    let th = (ascent - scaled.descent()) as i64;
 
     let base_x = match align {
         TextAlign::Left => 0.0,
         TextAlign::Center => (ww as f32 - total_w) / 2.0,
         TextAlign::Right => ww as f32 - total_w,
     };
-    let base_y = ((wh as i32) - th) / 2;
+    let base_y = i64::from(wh).saturating_sub(th) / 2;
 
     let rgba = Rgba(color);
-    let (iw, ih) = (sub.width() as i32, sub.height() as i32);
-    for (_start_x, glyph) in positioned {
+    let (iw, ih) = (i64::from(sub.width()), i64::from(sub.height()));
+    cursor_x = 0.0;
+    for ch in text.chars() {
+        let glyph_id = scaled.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(scale, point(cursor_x, ascent));
+        cursor_x += scaled.h_advance(glyph_id) + letter_spacing;
         if let Some(outlined) = scaled.outline_glyph(glyph) {
             let bb = outlined.px_bounds();
+            let Some((left, top)) = crate::text_raster::visible_bounds(
+                bb,
+                (base_x.round() as i64, base_y),
+                sub.dimensions(),
+            ) else {
+                continue;
+            };
+            let bounds = outlined.px_bounds();
+            if !crate::text_work::raster(
+                (bounds.max.x - bounds.min.x) as u64,
+                (bounds.max.y - bounds.min.y) as u64,
+            ) {
+                return;
+            }
             outlined.draw(|gx, gy, gv| {
                 if gv <= 0.0 {
                     return;
                 }
-                let px = base_x.round() as i32 + bb.min.x as i32 + gx as i32;
-                let py = base_y + bb.min.y as i32 + gy as i32;
+                let px = left.saturating_add(i64::from(gx));
+                let py = top.saturating_add(i64::from(gy));
                 if px < 0 || py < 0 || px >= iw || py >= ih {
                     return;
                 }
@@ -80,5 +98,58 @@ pub fn draw_text_widget(
                 pix[3] = (alpha_out * 255.0).round().min(255.0) as u8;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_alignment_and_spacing_preserve_raster_pixels() {
+        let font = crate::fonts::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../templates/assets/neon-us88/JetBrainsMonoNL-Medium.ttf"),
+        )
+        .unwrap();
+        let mut hashes = Vec::new();
+        for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+            for spacing in [0.0, 1.5, -0.5] {
+                let mut image = RgbaImage::from_pixel(80, 32, Rgba([3, 7, 11, 128]));
+                draw_text_widget(
+                    &mut image,
+                    "42.5 °C abc",
+                    &font,
+                    18.0,
+                    [240, 220, 180, 192],
+                    align,
+                    80,
+                    32,
+                    spacing,
+                );
+                hashes.push(
+                    image
+                        .as_raw()
+                        .iter()
+                        .fold(0xcbf29ce484222325u64, |hash, byte| {
+                            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                        }),
+                );
+            }
+        }
+        assert_eq!(
+            hashes,
+            vec![
+                2534332138333932455,
+                30300932541907825,
+                3873579789861976303,
+                17064109230767084441,
+                5226475748987678912,
+                1100984886348822106,
+                146056972139753317,
+                4604477247474879946,
+                5565780027399916257
+            ]
+        );
     }
 }

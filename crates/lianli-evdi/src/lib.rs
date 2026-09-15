@@ -13,18 +13,14 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, trace, warn};
-
-/// Tracks whether we've ever called `evdi_add_device` successfully so the
-/// daemon can ask the kernel to remove all evdi nodes on shutdown.
-static ADDED_ANY_DEVICE: AtomicBool = AtomicBool::new(false);
+use tracing::{debug, trace};
 
 pub use ffi::evdi_mode;
 
 pub const MAX_DIRTY_RECTS: usize = 16;
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum EvdiError {
@@ -180,6 +176,7 @@ pub struct EvdiHandle {
     ctx: Box<ffi::evdi_event_context>,
     connected: bool,
     cached_event_fd: Option<c_int>,
+    buffer: Option<EvdiBuffer>,
     _not_send: PhantomData<*mut ()>,
 }
 
@@ -206,7 +203,6 @@ impl EvdiHandle {
         if added <= 0 {
             return Err(explain_add_failure());
         }
-        ADDED_ANY_DEVICE.store(true, Ordering::SeqCst);
         for n in 0..16 {
             let status = unsafe { ffi::evdi_check_device(n) };
             if status == ffi::AVAILABLE {
@@ -237,6 +233,7 @@ impl EvdiHandle {
             ctx,
             connected: false,
             cached_event_fd: None,
+            buffer: None,
             _not_send: PhantomData,
         })
     }
@@ -283,9 +280,11 @@ impl EvdiHandle {
         self.sink.handle_raw = std::ptr::null_mut();
     }
 
-    pub fn register_buffer(&mut self, buf: &mut EvdiBuffer) {
+    pub fn set_buffer(&mut self, width: i32, height: i32) -> Result<()> {
+        let mut buf = EvdiBuffer::new(width, height)?;
+        self.unregister_buffer();
         let raw = ffi::evdi_buffer {
-            id: buf.id,
+            id: 1,
             buffer: buf.pixels.as_mut_ptr() as *mut c_void,
             width: buf.width,
             height: buf.height,
@@ -294,23 +293,32 @@ impl EvdiHandle {
             rect_count: MAX_DIRTY_RECTS as c_int,
         };
         unsafe { ffi::evdi_register_buffer(self.raw.as_ptr(), raw) };
-        buf.registered_by = Some(self.raw.as_ptr() as usize);
+        self.buffer = Some(buf);
+        Ok(())
     }
 
-    pub fn unregister_buffer(&mut self, buf: &mut EvdiBuffer) {
-        if buf.registered_by == Some(self.raw.as_ptr() as usize) {
-            unsafe { ffi::evdi_unregister_buffer(self.raw.as_ptr(), buf.id) };
-            buf.registered_by = None;
+    fn unregister_buffer(&mut self) {
+        if self.buffer.is_some() {
+            // libevdi must release its pointers before the backing storage is freed.
+            unsafe { ffi::evdi_unregister_buffer(self.raw.as_ptr(), 1) };
+            self.buffer = None;
         }
+    }
+
+    pub fn pixels(&self) -> Option<&[u8]> {
+        self.buffer.as_ref().map(|buffer| buffer.pixels.as_slice())
     }
 
     /// Returns true when evdi has an update ready for the buffer immediately
     /// (no need to await the eventfd before calling `grab_pixels`).
-    pub fn request_update(&mut self, buffer_id: i32) -> bool {
-        unsafe { ffi::evdi_request_update(self.raw.as_ptr(), buffer_id) }
+    pub fn request_update(&mut self) -> bool {
+        self.buffer.is_some() && unsafe { ffi::evdi_request_update(self.raw.as_ptr(), 1) }
     }
 
     pub fn grab_pixels(&mut self) -> Vec<Rect> {
+        if self.buffer.is_none() {
+            return Vec::new();
+        }
         let mut rects = [ffi::evdi_rect::default(); MAX_DIRTY_RECTS];
         let mut n: c_int = MAX_DIRTY_RECTS as c_int;
         unsafe {
@@ -363,97 +371,47 @@ impl EvdiHandle {
     }
 }
 
-/// Best-effort teardown of every evdi card this process created. Requires
-/// root to write `/sys/devices/evdi/remove_all`; logs a hint and returns
-/// `Ok(false)` when not permitted.
-pub fn remove_all_devices() -> Result<bool> {
-    if !ADDED_ANY_DEVICE.load(Ordering::SeqCst) {
-        return Ok(false);
-    }
-    const PATH: &str = "/sys/devices/evdi/remove_all";
-    match std::fs::OpenOptions::new().write(true).open(PATH) {
-        Ok(mut f) => {
-            use std::io::Write;
-            match f.write_all(b"1") {
-                Ok(()) => {
-                    debug!("wrote '1' to {PATH} — all evdi nodes removed");
-                    Ok(true)
-                }
-                Err(e) => {
-                    warn!("writing to {PATH} failed: {e}");
-                    Ok(false)
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            warn!(
-                "could not remove evdi nodes on shutdown: {PATH} is root-only. \
-                 Run `sudo sh -c 'echo 1 > {PATH}'` manually if you need to \
-                 free them before next boot"
-            );
-            Ok(false)
-        }
-        Err(e) => {
-            warn!("opening {PATH} failed: {e}");
-            Ok(false)
-        }
-    }
-}
-
 impl Drop for EvdiHandle {
     fn drop(&mut self) {
         self.disconnect();
+        self.unregister_buffer();
         unsafe { ffi::evdi_close(self.raw.as_ptr()) };
         debug!("EvdiHandle dropped");
     }
 }
 
-/// A pixel buffer registered with an `EvdiHandle`. Must outlive the
-/// registration; use `EvdiHandle::unregister_buffer` before dropping.
-pub struct EvdiBuffer {
-    pub id: i32,
-    pub width: i32,
-    pub height: i32,
-    pub stride: i32,
+struct EvdiBuffer {
+    width: i32,
+    height: i32,
+    stride: i32,
     pixels: Vec<u8>,
     rects: Vec<ffi::evdi_rect>,
-    registered_by: Option<usize>,
 }
 
 impl EvdiBuffer {
-    /// Allocate an XRGB8888 buffer matching the given dimensions.
-    pub fn new(id: i32, width: i32, height: i32) -> Self {
-        let stride = width * 4;
-        let pixels = vec![0u8; (stride * height) as usize];
-        let rects = vec![ffi::evdi_rect::default(); MAX_DIRTY_RECTS];
-        Self {
-            id,
+    fn new(width: i32, height: i32) -> Result<Self> {
+        if width <= 0 || height <= 0 {
+            bail!("EVDI buffer dimensions must be positive: {width}x{height}");
+        }
+        let stride = width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow!("EVDI stride overflow"))?;
+        let bytes = (stride as usize)
+            .checked_mul(height as usize)
+            .filter(|bytes| *bytes <= MAX_FRAME_BYTES)
+            .ok_or_else(|| {
+                anyhow!("EVDI buffer {width}x{height} exceeds {MAX_FRAME_BYTES} bytes")
+            })?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(bytes)?;
+        pixels.resize(bytes, 0);
+        Ok(Self {
             width,
             height,
             stride,
             pixels,
-            rects,
-            registered_by: None,
-        }
-    }
-
-    pub fn pixels(&self) -> &[u8] {
-        &self.pixels
-    }
-
-    pub fn pixels_mut(&mut self) -> &mut [u8] {
-        &mut self.pixels
-    }
-}
-
-impl Drop for EvdiBuffer {
-    fn drop(&mut self) {
-        if self.registered_by.is_some() {
-            // Registration was never cleaned up — the handle is gone but we
-            // still have memory evdi may touch. Zero the buffer so stale
-            // pixels don't leak on reuse.
-            self.pixels.fill(0);
-        }
+            rects: vec![ffi::evdi_rect::default(); MAX_DIRTY_RECTS],
+        })
     }
 }
 
@@ -487,9 +445,37 @@ fn explain_add_failure() -> anyhow::Error {
         );
     }
     anyhow!(
-        "evdi_add_device failed: writing to {ADD_SYSFS} is root-only. Run the \
-         daemon as root (systemd does this by default), or pre-create an evdi \
-         device once with `sudo sh -c 'echo 1 > {ADD_SYSFS}'` and then the \
-         daemon can open it unprivileged"
+        "evdi_add_device failed: {ADD_SYSFS} is not writable. Install the \
+         packaged EVDI udev rules and reload the module when no displays \
+         use it, or pre-create a device with `sudo sh -c 'echo 1 > {ADD_SYSFS}'` \
+         and ensure the daemon can access its DRM card"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framebuffer_preserves_visible_dimensions_and_four_byte_stride() {
+        let buffer = EvdiBuffer::new(464, 1920).unwrap();
+        assert_eq!((buffer.width, buffer.height), (464, 1920));
+        assert_eq!(buffer.stride, 1856);
+        assert_eq!(buffer.pixels.len(), 3_563_520);
+        assert!(buffer.pixels.iter().all(|pixel| *pixel == 0));
+    }
+
+    #[test]
+    fn invalid_or_excessive_framebuffers_fail_before_allocation() {
+        for (width, height) in [
+            (0, 1),
+            (1, 0),
+            (-1, 1),
+            (1, -1),
+            (i32::MAX, 2),
+            (8192, 8192),
+        ] {
+            assert!(EvdiBuffer::new(width, height).is_err(), "{width}x{height}");
+        }
+    }
 }

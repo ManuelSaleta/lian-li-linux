@@ -268,8 +268,8 @@ pub fn fast_overlay(dst: &mut RgbaImage, src: &RgbaImage, tl_x: i64, tl_y: i64) 
 
     let dx0 = tl_x.max(0);
     let dy0 = tl_y.max(0);
-    let dx1 = (tl_x + sw).min(dw);
-    let dy1 = (tl_y + sh).min(dh);
+    let dx1 = tl_x.saturating_add(sw).min(dw);
+    let dy1 = tl_y.saturating_add(sh).min(dh);
     if dx0 >= dx1 || dy0 >= dy1 {
         return;
     }

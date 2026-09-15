@@ -109,7 +109,7 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="ad26", MODE="06
 
 # --- EVDI virtual display (for desktop-mode LCDs) ---
 ACTION=="add", SUBSYSTEM=="module", KERNEL=="evdi", \
-  RUN+="/bin/chmod 0666 /sys/devices/evdi/add /sys/devices/evdi/remove_all"
+  RUN+="/bin/chmod 0666 /sys/devices/evdi/add"
 
 # evdi DRM cards accessible to users
 SUBSYSTEM=="drm", KERNEL=="card*", SUBSYSTEMS=="platform", DRIVERS=="evdi", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"

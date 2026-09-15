@@ -6,6 +6,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MediaError {
+    #[error("Media preparation cancelled")]
+    Cancelled,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Image error: {0}")]
@@ -163,17 +165,15 @@ pub fn apply_orientation(image: RgbImage, orientation: f32) -> RgbImage {
     }
 }
 
-/// Calculates how much space the text needs
-/// Returns the width (tw) and height (th) of the space the text will need.
-/// Additionally it returns the offsetX (ox) and offsetY (oy): If you want to fit the text into a box starting at (x/y) and extending by (tw,th), then you need to draw the text at x-ox, y-oy
-///
-/// But if you want the baseline of the text at box_y, you'll need to draw the text at y=box_y-ascent: So if you want to draw several characters each after another, you need to keep the baseline constant.
-/// If you draw a text at x/y, then the baseline will be at y+ascent. The topmost coord will be at y+oy and the bottommost coord will be y+oy+th-1. The text will NOT appear at x/y, as this coord is only the top left coord of the glyph (which in almost all cases starts with an offset).
+/// Returns width, height, drawing offsets and ascent. Unrepresentable bounds return zeros.
 pub fn get_exact_text_metrics(
     font: &FontVec,
     text: &str,
     scale: PxScale,
 ) -> (i32, i32, i32, i32, f32) {
+    if !scale.x.is_finite() || !scale.y.is_finite() || scale.x <= 0.0 || scale.y <= 0.0 {
+        return (0, 0, 0, 0, 0.0);
+    }
     let scaled = font.as_scaled(scale);
 
     let mut min_x = i32::MAX;
@@ -207,11 +207,15 @@ pub fn get_exact_text_metrics(
         return (0, 0, 0, 0, 0.0);
     }
 
-    let width = max_x - min_x;
-    let height = max_y - min_y;
     let ascent = scaled.ascent();
-
-    (width, height, min_x, (ascent as i32) + min_y, ascent)
+    match (
+        max_x.checked_sub(min_x),
+        max_y.checked_sub(min_y),
+        (ascent as i32).checked_add(min_y),
+    ) {
+        (Some(width), Some(height), Some(offset_y)) => (width, height, min_x, offset_y, ascent),
+        _ => (0, 0, 0, 0, 0.0),
+    }
 }
 
 pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {

@@ -410,9 +410,34 @@ pub struct PixelCleanStatus {
     pub remaining_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaPreparationState {
+    WaitingForDevice,
+    Preparing,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaPreparationStatus {
+    pub generation: u64,
+    pub device_id: String,
+    pub state: MediaPreparationState,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaEncoderStatus {
+    pub name: String,
+    pub software_fallback: bool,
+}
+
 /// Snapshot of live telemetry data, returned by GetTelemetry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
+    #[serde(default)]
+    pub media_preparation: HashMap<usize, MediaPreparationStatus>,
     /// Fan RPMs keyed by device_id.
     pub fan_rpms: HashMap<String, Vec<u16>>,
     /// Coolant temperatures keyed by device_id.

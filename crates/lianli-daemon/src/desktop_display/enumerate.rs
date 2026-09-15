@@ -3,8 +3,9 @@ use anyhow::{Context, Result};
 use lianli_devices::turzx;
 
 /// A single detected TURZX device from a bus scan.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TurzxDeviceMatch {
+    pub device: rusb::Device<rusb::GlobalContext>,
     pub pid: u16,
     pub key: DeviceKey,
 }
@@ -26,6 +27,7 @@ pub fn enumerate_turzx() -> Result<Vec<TurzxDeviceMatch>> {
         out.push(TurzxDeviceMatch {
             pid,
             key: (device.bus_number(), device.address()),
+            device,
         });
     }
     Ok(out)

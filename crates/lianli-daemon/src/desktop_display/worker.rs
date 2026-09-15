@@ -1,8 +1,8 @@
 use super::ensure_ffmpeg_initialized;
-use super::DesktopDisplayHandle;
+use super::{DesktopDisplayHandle, TurzxDeviceMatch, HEALTHY_UPTIME};
 use anyhow::{bail, Context, Result};
 use lianli_devices::turzx::{self, Mode as TurzxMode, TurzxDisplay, FMT_H264, FMT_MJPEG};
-use lianli_evdi::{EvdiBuffer, EvdiHandle, Event as EvdiEvent};
+use lianli_evdi::{EvdiHandle, Event as EvdiEvent};
 use lianli_media::video::H264Encoder;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,27 +15,53 @@ use tracing::{debug, error, info, warn};
 /// Vision 9.2" (0xAD26) ACKs H264 chunks but never renders them.
 const JPEG_FORCE_PIDS: &[u16] = &[0xACD1, 0xAD11, 0xAD26];
 
-pub(super) fn spawn_worker(pid: u16) -> Result<DesktopDisplayHandle> {
+pub(super) fn spawn_worker(
+    target: TurzxDeviceMatch,
+    hardware_video: Arc<AtomicBool>,
+) -> Result<DesktopDisplayHandle> {
+    let pid = target.pid;
+    let key = target.key;
     ensure_ffmpeg_initialized();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
+    let healthy = Arc::new(AtomicBool::new(false));
+    let healthy_clone = Arc::clone(&healthy);
     let join = thread::Builder::new()
         .name(format!("turzx-bridge-{pid:04x}"))
         .spawn(move || {
-            if let Err(e) = run_worker(pid, stop_clone) {
-                error!("TURZX {:04x}:{pid:04x} worker exited: {e:#}", turzx::VID);
+            if let Err(e) = run_worker(
+                target,
+                Arc::clone(&stop_clone),
+                healthy_clone,
+                hardware_video,
+            ) {
+                if stop_clone.load(Ordering::Relaxed) {
+                    debug!("TURZX {pid:04x} at {key:?} worker stopped: {e:#}");
+                } else {
+                    error!(
+                        "TURZX {:04x}:{pid:04x} at {key:?} worker exited: {e:#}",
+                        turzx::VID
+                    );
+                }
             }
         })
         .context("spawning worker thread")?;
     Ok(DesktopDisplayHandle {
         stop,
+        healthy,
         join: Some(join),
         pid,
     })
 }
 
-fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
-    let mut display = TurzxDisplay::open(pid)
+fn run_worker(
+    target: TurzxDeviceMatch,
+    stop: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
+    hardware_video: Arc<AtomicBool>,
+) -> Result<()> {
+    let pid = target.pid;
+    let mut display = TurzxDisplay::open_device(target.device, || stop.load(Ordering::Relaxed))
         .with_context(|| format!("opening TURZX {:04x}:{pid:04x}", turzx::VID))?;
     let caps = display.caps().clone();
     let edid = *display.edid();
@@ -70,14 +96,10 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
         refresh_hz: preferred.refresh_hz as u32,
         pixel_format: DRM_FORMAT_XRGB8888,
     };
-    let mut buffer: Option<EvdiBuffer> = Some(EvdiBuffer::new(
-        1,
+    evdi.set_buffer(
         preferred_resolved.width as i32,
         preferred_resolved.height as i32,
-    ));
-    if let Some(buf) = buffer.as_mut() {
-        evdi.register_buffer(buf);
-    }
+    )?;
 
     let pixel_per_sec_limit = 80_000_000u32;
     evdi.connect_with_rate(&edid, sku_area_limit, pixel_per_sec_limit)
@@ -99,8 +121,28 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
     let mut send_us: u64 = 0;
     let mut timing_frames: u32 = 0;
     let mut timing_bytes: u64 = 0;
+    let mut first_frame_at = None;
+    let mut encoder_hardware_video = hardware_video.load(Ordering::Acquire);
 
     while !stop.load(Ordering::SeqCst) {
+        let requested_hardware_video = hardware_video.load(Ordering::Acquire);
+        if requested_hardware_video != encoder_hardware_video {
+            if let Some(mode) = current_mode.filter(|_| !use_jpeg) {
+                drop(encoder.take());
+                encoder = Some(
+                    H264Encoder::new(
+                        mode.width,
+                        mode.height,
+                        mode.refresh_hz,
+                        mode.rgb_byte_order(),
+                        requested_hardware_video,
+                    )
+                    .context("reconfiguring desktop video encoder")?,
+                );
+                update_pending = true;
+            }
+            encoder_hardware_video = requested_hardware_video;
+        }
         let timeout = current_mode
             .as_ref()
             .map(|m| Duration::from_millis((1000 / m.refresh_hz.max(1)) as u64))
@@ -128,14 +170,7 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
                     );
                     let resolved =
                         ResolvedMode::from_evdi(mode).context("negotiated mode unsupported")?;
-                    if let Some(mut old) = buffer.take() {
-                        evdi.unregister_buffer(&mut old);
-                    }
-
-                    let mut new_buf =
-                        EvdiBuffer::new(1, resolved.width as i32, resolved.height as i32);
-                    evdi.register_buffer(&mut new_buf);
-                    buffer = Some(new_buf);
+                    evdi.set_buffer(resolved.width as i32, resolved.height as i32)?;
                     if !use_jpeg {
                         encoder = Some(
                             H264Encoder::new(
@@ -143,6 +178,7 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
                                 resolved.height,
                                 resolved.refresh_hz,
                                 resolved.rgb_byte_order(),
+                                encoder_hardware_video,
                             )
                             .context("building H264Encoder")?,
                         );
@@ -169,7 +205,10 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
                 EvdiEvent::DpmsChanged(mode) => {
                     debug!("TURZX {pid:04x} DPMS changed: {mode}");
                     if mode != 0 && streaming {
-                        if let Err(e) = display.send_power_off() {
+                        if let Err(e) = lianli_transport::usb::with_teardown_io(
+                            Duration::from_millis(200),
+                            || display.send_power_off(),
+                        ) {
                             warn!("TURZX {pid:04x} power_off (DPMS) failed: {e:#}");
                         }
                         streaming = false;
@@ -200,20 +239,17 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
             continue;
         }
 
-        let Some(buf) = buffer.as_mut() else {
-            continue;
-        };
-
         if update_pending {
             update_pending = false;
             let t0 = Instant::now();
             let _rects = evdi.grab_pixels();
             let t1 = Instant::now();
+            let pixels = evdi.pixels().context("EVDI framebuffer unavailable")?;
 
             let encode_and_send = if use_jpeg {
                 let m = current_mode.unwrap();
                 let tj_image = turbojpeg::Image {
-                    pixels: buf.pixels(),
+                    pixels,
                     width: m.width as usize,
                     height: m.height as usize,
                     pitch: m.width as usize * 4,
@@ -241,7 +277,7 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
                 let Some(enc) = encoder.as_mut() else {
                     continue;
                 };
-                match enc.encode(buf.pixels()) {
+                match enc.encode(pixels) {
                     Ok(packet) if !packet.is_empty() => {
                         let t2 = Instant::now();
                         let packet_len = packet.len() as u64;
@@ -259,11 +295,17 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
 
             if let Some((packet_len, t2, t3, send_result)) = encode_and_send {
                 if let Err(e) = &send_result {
+                    first_frame_at = None;
                     if is_device_gone(e) {
                         info!("TURZX {pid:04x} disconnected mid-stream, stopping worker");
                         break;
                     }
                     warn!("TURZX {pid:04x} send failed: {e:#}");
+                } else if !healthy.load(Ordering::Relaxed) {
+                    let first = first_frame_at.get_or_insert_with(Instant::now);
+                    if first.elapsed() >= HEALTHY_UPTIME {
+                        healthy.store(true, Ordering::Relaxed);
+                    }
                 }
                 grab_us += (t1 - t0).as_micros() as u64;
                 encode_us += (t2 - t1).as_micros() as u64;
@@ -290,7 +332,7 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
         }
 
         if !request_in_flight {
-            if evdi.request_update(buf.id) {
+            if evdi.request_update() {
                 update_pending = true;
             } else {
                 request_in_flight = true;
@@ -298,7 +340,9 @@ fn run_worker(pid: u16, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
 
-    if let Err(e) = display.send_power_off() {
+    if let Err(e) = lianli_transport::usb::with_teardown_io(Duration::from_millis(200), || {
+        display.send_power_off()
+    }) {
         debug!("TURZX {pid:04x} final power_off ignored: {e:#}");
     }
     Ok(())

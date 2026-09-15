@@ -73,6 +73,8 @@ impl DaemonState {
                 capabilities: vec![
                     lianli_shared::daemon::GUARDED_WRITES.into(),
                     "daemon_info".into(),
+                    "hardware_video".into(),
+                    "media_preparation".into(),
                 ],
             },
             config: None,
@@ -428,7 +430,14 @@ fn handle_request(
             template,
             width,
             height,
-        } => super::lcd::render_template_preview(template, width, height),
+        } => {
+            let hardware_video = state
+                .lock()
+                .config
+                .as_ref()
+                .is_some_and(|config| config.hardware_video);
+            super::lcd::render_template_preview(template, width, height, hardware_video)
+        }
 
         IpcRequest::SetLedColor {
             device_id,

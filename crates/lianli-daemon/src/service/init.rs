@@ -860,6 +860,7 @@ impl ServiceManager {
                     return false;
                 }
                 self.cleaner_reload_pending = false;
+                self.desktop_displays.set_hardware_video(cfg.hardware_video);
                 self.config = Some(cfg);
                 self.packet_builder = PacketBuilder::new();
                 self.prepare_media_assets(tx);

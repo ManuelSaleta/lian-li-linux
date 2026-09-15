@@ -1,13 +1,13 @@
+use super::media_preparation::{MediaJob, MediaTarget, PreparationRequest};
 use super::runtime::{ActiveTarget, LcdBackend, ThreadedWinUsbSender};
 use super::{DaemonEvent, ServiceManager};
 use lianli_devices::detect::{create_hid_lcd_device, enumerate_devices, open_hid_lcd_device};
 use lianli_devices::slv3_lcd::Slv3LcdDevice;
-use lianli_media::{prepare_media_asset, MediaAsset};
 use lianli_shared::config::{config_identity, ConfigKey, LcdConfig};
 use lianli_shared::device_id::DeviceFamily;
+use lianli_shared::ipc::{MediaPreparationState, MediaPreparationStatus};
 use lianli_shared::media::MediaType;
 use lianli_shared::screen::{screen_info_for, ScreenInfo};
-use lianli_shared::sensors::SensorInfo;
 use lianli_shared::template::LcdTemplate;
 use rusb::Device;
 use std::collections::{HashMap, HashSet};
@@ -21,10 +21,13 @@ const SERIAL_REWRITE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::
 fn asset_cache_key(
     device: &LcdConfig,
     user_templates: &[LcdTemplate],
-    _sensors: &[SensorInfo],
     default_fps: f32,
+    hardware_video: bool,
 ) -> ConfigKey {
-    let base = format!("{}|fps:{default_fps}", config_identity(device));
+    let base = format!(
+        "{}|fps:{default_fps}|hw:{hardware_video}",
+        config_identity(device)
+    );
     if device.media_type != MediaType::Custom {
         return base;
     }
@@ -40,87 +43,191 @@ fn asset_cache_key(
 
 impl ServiceManager {
     pub(super) fn prepare_media_assets(&mut self, tx: Sender<DaemonEvent>) {
-        let screen_map: HashMap<String, ScreenInfo> = enumerate_devices()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|det| {
-                let screen = screen_info_for(det.family)?;
-                let id = hid_id_norm(&det.device_id()).to_string();
-                Some((id, screen))
+        if !self.pixel_clean_sessions.is_empty() || self.pixel_clean_preparation.is_some() {
+            self.media_reload_pending = true;
+            return;
+        }
+        self.media_reload_pending = false;
+        let Some(cfg) = &self.config else {
+            return;
+        };
+        let templates = self.ipc.state.lock().user_templates.clone();
+        let targets: HashMap<_, _> = self
+            .media_targets
+            .iter()
+            .filter(|(index, target)| {
+                cfg.lcds
+                    .get(**index)
+                    .is_some_and(|cfg| target.selection == selection_key(cfg))
+            })
+            .map(|(index, target)| (*index, target.clone()))
+            .collect();
+        let keys: Vec<_> = cfg
+            .lcds
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let base = asset_cache_key(device, &templates, cfg.default_fps, cfg.hardware_video);
+                format!("{base}|target:{:?}", targets.get(&index))
             })
             .collect();
+        if self.media_preparation.is_busy() && self.media_requested_keys == keys {
+            return;
+        }
+        self.media_requested_keys = keys;
+        self.media_assets.retain(|index, _| {
+            self.media_settings
+                .get(index)
+                .zip(cfg.lcds.get(*index))
+                .is_some_and(|(old, new)| same_selection(old, new))
+                && self
+                    .media_asset_targets
+                    .get(index)
+                    .zip(targets.get(index))
+                    .is_some_and(|(old, new)| old == new)
+        });
+        self.media_settings
+            .retain(|index, _| self.media_assets.contains_key(index));
+        self.media_asset_targets
+            .retain(|index, _| self.media_assets.contains_key(index));
+        let jobs: Vec<_> = cfg
+            .lcds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, device)| {
+                let target = targets.get(&index)?.clone();
+                let key = self.media_requested_keys[index].clone();
+                if self
+                    .media_assets
+                    .get(&index)
+                    .is_some_and(|asset| asset.config_key == key)
+                {
+                    return None;
+                }
+                Some(MediaJob {
+                    index,
+                    config: device.clone(),
+                    key,
+                    target,
+                })
+            })
+            .collect();
+        let preparing: HashSet<_> = jobs.iter().map(|job| job.index).collect();
+        let generation = self.media_preparation.submit(PreparationRequest {
+            generation: 0,
+            jobs,
+            templates,
+            default_fps: cfg.default_fps,
+            hardware_video: cfg.hardware_video,
+        });
+        self.ipc.state.lock().telemetry.media_preparation = cfg
+            .lcds
+            .iter()
+            .enumerate()
+            .map(|(index, cfg)| {
+                (
+                    index,
+                    MediaPreparationStatus {
+                        generation,
+                        device_id: cfg.device_id(),
+                        state: if !targets.contains_key(&index) {
+                            MediaPreparationState::WaitingForDevice
+                        } else if preparing.contains(&index) {
+                            MediaPreparationState::Preparing
+                        } else {
+                            MediaPreparationState::Ready
+                        },
+                        error: None,
+                    },
+                )
+            })
+            .collect();
+        let results = self.media_preparation.poll(&tx);
+        self.apply_prepared_results(results);
+    }
 
-        let all_sensors = lianli_shared::sensors::enumerate_sensors();
-        let user_templates = self.ipc.state.lock().user_templates.clone();
-
-        self.media_assets.clear();
-
-        if let Some(cfg) = &self.config {
-            for (idx, device) in cfg.lcds.iter().enumerate() {
-                let screen = device
-                    .serial
-                    .as_ref()
-                    .and_then(|s| screen_map.get(hid_id_norm(s)).copied())
-                    .unwrap_or(ScreenInfo::WIRELESS_LCD);
-                let cfg_key =
-                    asset_cache_key(device, &user_templates, &all_sensors, cfg.default_fps);
-                let device_id = device.device_id();
-
-                match prepare_media_asset(
-                    device,
-                    cfg.default_fps,
-                    &screen,
-                    screen.h264,
-                    &all_sensors,
-                    &user_templates,
-                ) {
-                    Ok(asset_kind) => {
-                        let stream_fps = match &asset_kind {
-                            lianli_media::MediaAssetKind::Custom { asset } => asset.render_fps(),
-                            _ => device
-                                .fps
-                                .unwrap_or(cfg.default_fps)
-                                .min(cfg.default_fps)
-                                .min(screen.max_fps as f32)
-                                .max(1.0),
-                        };
-                        let asset = MediaAsset {
-                            kind: asset_kind,
-                            config_key: cfg_key,
-                            stream_fps,
-                        };
-                        let asset_arc = Arc::new(asset);
-                        self.media_assets.insert(idx, Arc::clone(&asset_arc));
-
-                        match device.media_type {
-                            MediaType::Image => info!("Prepared image for LCD[{device_id}]"),
-                            MediaType::Video => info!("Prepared video for LCD[{device_id}]"),
-                            MediaType::Gif => info!("Prepared GIF for LCD[{device_id}]"),
-                            MediaType::Color => info!("Prepared color frame for LCD[{device_id}]"),
-                            MediaType::Sensor => info!(
-                                "Prepared sensor for LCD[{device_id}]: {}",
-                                device
-                                    .sensor
-                                    .as_ref()
-                                    .map(|s| s.label.as_str())
-                                    .unwrap_or("<unknown>")
-                            ),
-                            MediaType::Custom => info!(
-                                "Prepared custom template for LCD[{device_id}]: {}",
-                                device.template_id.as_deref().unwrap_or("<none>")
-                            ),
-                            MediaType::Doublegauge | MediaType::Cooler => {}
-                        }
-                        tx.send(DaemonEvent::FrameFinished).ok();
-                    }
-                    Err(err) => warn!("Skipping LCD[{device_id}] media: {err}"),
+    pub(super) fn poll_prepared_media(&mut self) {
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        if self.media_reload_pending
+            && self.pixel_clean_sessions.is_empty()
+            && self.pixel_clean_preparation.is_none()
+        {
+            self.prepare_media_assets(tx.clone());
+        }
+        let results = self.media_preparation.poll(&tx);
+        self.apply_prepared_results(results);
+        if !self.media_preparation.is_busy() {
+            for status in self
+                .ipc
+                .state
+                .lock()
+                .telemetry
+                .media_preparation
+                .values_mut()
+            {
+                if status.state == MediaPreparationState::Preparing {
+                    status.state = MediaPreparationState::Failed;
+                    status.error = Some(
+                        "Media preparation stopped before producing a result. Save again to retry."
+                            .into(),
+                    );
                 }
             }
         }
     }
 
+    fn apply_prepared_results(&mut self, results: Vec<super::media_preparation::PreparedMedia>) {
+        for result in results {
+            let current = self
+                .ipc
+                .state
+                .lock()
+                .telemetry
+                .media_preparation
+                .get(&result.index)
+                .is_some_and(|status| status.generation == result.generation);
+            if !current {
+                continue;
+            }
+            let (new_state, error) = match result.result {
+                Ok(asset) => {
+                    self.media_assets.insert(result.index, asset);
+                    self.media_settings.insert(result.index, result.config);
+                    self.media_asset_targets.insert(result.index, result.target);
+                    (MediaPreparationState::Ready, None)
+                }
+                Err(error) => {
+                    warn!(
+                        "LCD[{}] media preparation failed: {error}",
+                        result.config.device_id()
+                    );
+                    (MediaPreparationState::Failed, Some(error))
+                }
+            };
+            if let Some(status) = self
+                .ipc
+                .state
+                .lock()
+                .telemetry
+                .media_preparation
+                .get_mut(&result.index)
+            {
+                status.state = new_state;
+                status.error = error;
+            }
+        }
+    }
+
+    fn take_target(&self, index: usize) -> Option<ActiveTarget> {
+        self.targets.lock().remove(&index)
+    }
+
     pub(super) fn refresh_targets(&mut self) {
-        if self.media_assets.is_empty() {
+        if self.config.as_ref().is_none_or(|cfg| cfg.lcds.is_empty())
+            && self.targets.lock().is_empty()
+        {
             return;
         }
 
@@ -139,53 +246,49 @@ impl ServiceManager {
         self.mode_switch_suppression
             .retain(|_, until| Instant::now() < *until);
 
-        if let Ok(usb_devs) = enumerate_devices() {
-            for det in usb_devs {
-                if !is_streamable_lcd(det.family) {
-                    continue;
-                }
-                let device_id = det.device_id();
-                if self.mode_switch_suppressed(&device_id) {
-                    debug!("LCD candidate skipped (recent mode switch): {device_id}");
-                    continue;
-                }
-                let transport = if lianli_shared::device_id::uses_hid(det.family) {
-                    "HID"
-                } else {
-                    "USB bulk"
-                };
-                debug!(
-                    "LCD candidate: {} ({:04x}:{:04x}) id={device_id} ({transport})",
-                    det.name, det.vid, det.pid
-                );
-                candidates.push(LcdCandidate {
-                    family: det.family,
-                    device_id,
-                    usb_device: Some(det.device),
-                    vid: det.vid,
-                    pid: det.pid,
-                    bus: det.bus,
-                    address: det.address,
-                });
+        let usb_devs = match enumerate_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                debug!("LCD enumeration unavailable: {error}");
+                return;
             }
+        };
+        for det in usb_devs {
+            if !is_streamable_lcd(det.family) {
+                continue;
+            }
+            let device_id = det.device_id();
+            if self.mode_switch_suppressed(&device_id) {
+                debug!("LCD candidate skipped (recent mode switch): {device_id}");
+                continue;
+            }
+            let transport = if lianli_shared::device_id::uses_hid(det.family) {
+                "HID"
+            } else {
+                "USB bulk"
+            };
+            debug!(
+                "LCD candidate: {} ({:04x}:{:04x}) id={device_id} ({transport})",
+                det.name, det.vid, det.pid
+            );
+            candidates.push(LcdCandidate {
+                family: det.family,
+                device_id,
+                usb_device: Some(det.device),
+                vid: det.vid,
+                pid: det.pid,
+                bus: det.bus,
+                address: det.address,
+            });
         }
 
         let mut new_targets = HashMap::new();
+        let mut new_media_targets = HashMap::new();
         let mut canonicalize: Vec<(String, String)> = Vec::new();
 
         if let Some(cfg) = &self.config {
             let mut claimed: HashSet<usize> = HashSet::new();
             for (cfg_idx, device_cfg) in cfg.lcds.iter().enumerate() {
-                let asset = match self.media_assets.get(&cfg_idx) {
-                    Some(asset_arc) => Arc::clone(asset_arc),
-                    None => {
-                        if let Some(mut existing) = self.targets.lock().remove(&cfg_idx) {
-                            existing.stop();
-                        }
-                        continue;
-                    }
-                };
-
                 let matched = if let Some(serial) = &device_cfg.serial {
                     // Exact match first
                     let exact = candidates.iter().enumerate().find(|(idx, c)| {
@@ -224,13 +327,37 @@ impl ServiceManager {
                 let candidate = match matched {
                     Some(c) => c,
                     None => {
-                        if let Some(mut existing) = self.targets.lock().remove(&cfg_idx) {
+                        if let Some(mut existing) = self.take_target(cfg_idx) {
                             info!("[devices] LCD[{}] detached", device_cfg.device_id());
                             existing.stop();
                         }
                         continue;
                     }
                 };
+
+                let Some(screen) = screen_info_for(candidate.family) else {
+                    continue;
+                };
+                let media_target = MediaTarget {
+                    selection: selection_key(device_cfg),
+                    device_id: candidate.device_id.clone(),
+                    screen,
+                };
+                new_media_targets.insert(cfg_idx, media_target.clone());
+                let asset = match self
+                    .media_assets
+                    .get(&cfg_idx)
+                    .filter(|_| self.media_asset_targets.get(&cfg_idx) == Some(&media_target))
+                {
+                    Some(asset) => Arc::clone(asset),
+                    None => {
+                        if let Some(mut existing) = self.take_target(cfg_idx) {
+                            existing.stop();
+                        }
+                        continue;
+                    }
+                };
+                let applied_cfg = self.media_settings.get(&cfg_idx).unwrap_or(device_cfg);
 
                 // Form rewrites only: the alias fallback may have matched a
                 // different physical device, which must not be persisted.
@@ -243,12 +370,12 @@ impl ServiceManager {
                 }
 
                 let cfg_key = asset.config_key.clone();
-                if let Some(mut existing) = self.targets.lock().remove(&cfg_idx) {
+                if let Some(mut existing) = self.take_target(cfg_idx) {
                     if existing.matches(&candidate.device_id, &cfg_key) {
                         // Media is unchanged, but the custom_h264 toggle may have
                         // flipped — rebuild the frame source so the H.264 pipeline
                         // engages/disengages without a daemon restart.
-                        existing.update_custom_h264(device_cfg.custom_h264(), self.tx.clone());
+                        existing.update_custom_h264(applied_cfg.custom_h264(), self.tx.clone());
                         new_targets.insert(cfg_idx, existing);
                         continue;
                     } else if existing.device_identity == candidate.device_id {
@@ -257,7 +384,7 @@ impl ServiceManager {
                         // some firmware in a bad state.
                         existing.swap_media(
                             Arc::clone(&asset),
-                            device_cfg.custom_h264(),
+                            applied_cfg.custom_h264(),
                             self.tx.clone(),
                         );
                         existing.key = cfg_key;
@@ -435,7 +562,7 @@ impl ServiceManager {
                             lcd,
                             Arc::clone(&asset),
                             screen,
-                            device_cfg.custom_h264(),
+                            applied_cfg.custom_h264(),
                             self.tx.clone(),
                         );
                         new_targets.insert(cfg_idx, target);
@@ -497,12 +624,17 @@ impl ServiceManager {
             }
         }
 
-        let mut targets = self.targets.lock();
-        for (_, mut target) in targets.drain() {
+        let old_targets = std::mem::take(&mut *self.targets.lock());
+        for (_, mut target) in old_targets {
             target.stop();
         }
-
-        targets.extend(new_targets);
+        self.targets.lock().extend(new_targets);
+        if new_media_targets != self.media_targets {
+            self.media_targets = new_media_targets;
+            if let Some(tx) = self.tx.clone() {
+                self.prepare_media_assets(tx);
+            }
+        }
     }
 }
 
@@ -542,6 +674,22 @@ fn hid_id_norm(s: &str) -> &str {
     s.strip_prefix("hid:").unwrap_or(s)
 }
 
+fn same_selection(old: &LcdConfig, new: &LcdConfig) -> bool {
+    match (&old.serial, &new.serial) {
+        (Some(old), Some(new)) => lcd_id_matches(old, new),
+        (None, None) => old.index == new.index,
+        _ => false,
+    }
+}
+
+fn selection_key(config: &LcdConfig) -> String {
+    config
+        .serial
+        .as_deref()
+        .map(|serial| format!("serial:{}", hid_id_norm(serial)))
+        .unwrap_or_else(|| config.device_id())
+}
+
 pub(super) fn lcd_id_matches(serial: &str, device_id: &str) -> bool {
     hid_id_norm(serial) == hid_id_norm(device_id)
 }
@@ -559,7 +707,176 @@ fn is_wired_aio_lcd(family: DeviceFamily) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use lianli_media::{MediaAsset, MediaAssetKind};
     use lianli_shared::device_id::KNOWN_DEVICES;
+
+    fn config(serial: &str, rgb: [u8; 3]) -> LcdConfig {
+        serde_json::from_value(serde_json::json!({ "type": "color", "serial": serial, "rgb": rgb }))
+            .unwrap()
+    }
+
+    fn asset(key: &str) -> Arc<MediaAsset> {
+        Arc::new(MediaAsset {
+            config_key: key.into(),
+            kind: MediaAssetKind::Static {
+                frame: lianli_media::Retained::frame(vec![1]).unwrap(),
+            },
+            stream_fps: 30.0,
+            hardware_video: false,
+        })
+    }
+
+    fn target() -> MediaTarget {
+        MediaTarget {
+            selection: "serial:panel-a".into(),
+            device_id: "hid:panel-a".into(),
+            screen: ScreenInfo::AIO_LCD_480,
+        }
+    }
+
+    #[test]
+    fn stale_or_failed_preparation_preserves_the_working_asset() {
+        let root = tempfile::tempdir().unwrap();
+        let mut service = ServiceManager::new(
+            root.path().join("config.json"),
+            root.path().join("daemon.sock"),
+            lianli_shared::daemon::DaemonMode::User,
+        )
+        .unwrap();
+        let old = asset("old");
+        let old_config = config("hid:panel-a", [0, 0, 0]);
+        let new_config = config("hid:panel-a", [255, 0, 0]);
+        service.media_assets.insert(0, old.clone());
+        service.media_settings.insert(0, old_config);
+        service.ipc.state.lock().telemetry.media_preparation.insert(
+            0,
+            MediaPreparationStatus {
+                generation: 2,
+                device_id: "hid:panel-a".into(),
+                state: MediaPreparationState::Preparing,
+                error: None,
+            },
+        );
+        service.apply_prepared_results(vec![super::super::media_preparation::PreparedMedia {
+            generation: 1,
+            index: 0,
+            config: new_config.clone(),
+            result: Ok(asset("stale")),
+            target: target(),
+        }]);
+        assert!(Arc::ptr_eq(&service.media_assets[&0], &old));
+        service.apply_prepared_results(vec![super::super::media_preparation::PreparedMedia {
+            generation: 2,
+            index: 0,
+            config: new_config.clone(),
+            result: Err("unreadable child video".into()),
+            target: target(),
+        }]);
+        assert!(Arc::ptr_eq(&service.media_assets[&0], &old));
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0].state,
+            MediaPreparationState::Failed
+        );
+        let new = asset("new");
+        service.apply_prepared_results(vec![super::super::media_preparation::PreparedMedia {
+            generation: 2,
+            index: 0,
+            config: new_config,
+            result: Ok(new.clone()),
+            target: target(),
+        }]);
+        assert!(Arc::ptr_eq(&service.media_assets[&0], &new));
+        assert_eq!(service.media_settings[&0].rgb, Some([255, 0, 0]));
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0].state,
+            MediaPreparationState::Ready
+        );
+    }
+
+    #[test]
+    fn retention_requires_the_same_physical_selection() {
+        let old = config("hid:panel-a", [0, 0, 0]);
+        assert!(same_selection(&old, &config("panel-a", [255, 0, 0])));
+        assert!(!same_selection(&old, &config("hid:panel-b", [0, 0, 0])));
+    }
+
+    #[test]
+    fn offline_media_waits_and_then_uses_the_resolved_panel_dimensions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut service = ServiceManager::new(
+            root.path().join("config.json"),
+            root.path().join("daemon.sock"),
+            lianli_shared::daemon::DaemonMode::User,
+        )
+        .unwrap();
+        let config: LcdConfig = serde_json::from_value(
+            serde_json::json!({ "type": "color", "index": 0, "rgb": [255, 0, 0] }),
+        )
+        .unwrap();
+        service.config = Some(lianli_shared::config::AppConfig {
+            lcds: vec![config],
+            ..Default::default()
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        service.tx = Some(tx.clone());
+        service.prepare_media_assets(tx.clone());
+        assert!(!service.media_preparation.is_busy());
+        assert!(service.media_assets.is_empty());
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0].state,
+            MediaPreparationState::WaitingForDevice
+        );
+
+        service.media_targets.insert(
+            0,
+            MediaTarget {
+                selection: "index:0".into(),
+                ..target()
+            },
+        );
+        service
+            .pixel_clean_sessions
+            .push(crate::pixel_cleaner::PixelCleanSession {
+                session_id: 1,
+                duration_minutes: 1,
+                original_targets: Vec::new(),
+                clean_until: Instant::now() + std::time::Duration::from_secs(60),
+            });
+        service.prepare_media_assets(tx);
+        assert!(!service.media_preparation.is_busy());
+        assert!(service.media_reload_pending);
+        service.pixel_clean_sessions.clear();
+        service.poll_prepared_media();
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        while service.media_preparation.is_busy() && Instant::now() < deadline {
+            service.poll_prepared_media();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!service.media_preparation.is_busy());
+        let MediaAssetKind::Static { frame } = &service.media_assets[&0].kind else {
+            panic!("expected static frame");
+        };
+        let image = image::load_from_memory(frame).unwrap();
+        assert_eq!((image.width(), image.height()), (480, 480));
+        assert_eq!(service.media_assets[&0].stream_fps, 24.0);
+        assert_eq!(
+            service.media_asset_targets[&0].screen,
+            ScreenInfo::AIO_LCD_480
+        );
+    }
+
+    #[test]
+    fn hardware_video_changes_media_identity_in_both_directions() {
+        let device = serde_json::from_value(serde_json::json!({
+            "type": "video", "path": "/example/video.mp4"
+        }))
+        .unwrap();
+        let software = super::asset_cache_key(&device, &[], 30.0, false);
+        let hardware = super::asset_cache_key(&device, &[], 30.0, true);
+        assert_ne!(software, hardware);
+        assert_eq!(software, super::asset_cache_key(&device, &[], 30.0, false));
+    }
 
     #[test]
     fn all_streamable_lcds_have_backends() {
@@ -569,6 +886,7 @@ mod tests {
                 continue;
             }
             if super::is_streamable_lcd(entry.family) {
+                assert!(screen_info_for(entry.family).is_some());
                 assert!(
                     super::lcd_backend_kind(entry.family).is_some(),
                     "{:?} is streamable but lcd_backend_kind returns None",
