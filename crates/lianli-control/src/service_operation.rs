@@ -18,14 +18,24 @@ pub fn execute(
         !matches!(context, InstallationContext::UnsupportedContainer),
         "Host service actions are unavailable in this container"
     );
-    ensure!(request.scope != ServiceScope::System || context == InstallationContext::Native,
-        "Manage the system service from the native application. Distrobox uses the host user service");
     let mut backend = Native {
         operation: ServiceOperationLock::acquire(&context)?,
         route: Route::detect(&context)?,
         context,
         began: Instant::now(),
     };
+    if request.scope == ServiceScope::System
+        && matches!(backend.context, InstallationContext::Distrobox { .. })
+    {
+        crate::container_change::verify_services()?;
+        if request.action != ServiceAction::Stop {
+            crate::lingering::require(&backend.route, unsafe { libc::geteuid() })?;
+        }
+    } else if request.scope == ServiceScope::System && request.action != ServiceAction::Stop {
+        if let Some(deployment) = crate::container_deployment::load()? {
+            crate::lingering::require(&backend.route, deployment.owner_uid)?;
+        }
+    }
     run(&mut backend, request, progress)
 }
 
@@ -110,10 +120,8 @@ fn verify_owner(snapshot: &OwnershipSnapshot, scope: ServiceScope) -> Result<()>
 
 fn preflight(report: &ServiceReport, request: ServiceActionRequest, user_uid: u32) -> Result<()> {
     let target = unit(report, request.scope)?;
-    if matches!(report.context, InstallationContext::Distrobox { .. })
-        && request.scope == ServiceScope::User
-    {
-        ensure!(target.distrobox_name.is_some(), "Install the current Distrobox service recipe with its invocation ID and guarded ExecStop command, then reload the host user manager");
+    if let InstallationContext::Distrobox { name } = &report.context {
+        ensure!(target.distrobox_name.as_deref() == Some(name.as_str()), "Install the current Distrobox service recipe for this box with its invocation ID and guarded ExecStop command, then reload the host service manager");
     }
     ensure!(
         target.load_state == "loaded",
@@ -510,6 +518,35 @@ mod tests {
             }),
         });
         assert!(preflight(&report, request, unsafe { libc::geteuid() }).is_err());
+    }
+
+    #[test]
+    fn container_actions_require_the_exact_box_for_both_service_modes() {
+        for scope in [ServiceScope::User, ServiceScope::System] {
+            let mut report = report(false);
+            report.context = InstallationContext::Distrobox {
+                name: "fixture-box".into(),
+            };
+            let request = ServiceActionRequest {
+                scope,
+                action: ServiceAction::Start,
+            };
+            for name in [Some("fixture-box"), Some("other-box"), None] {
+                let target = match scope {
+                    ServiceScope::User => &mut report.user,
+                    ServiceScope::System => &mut report.system,
+                };
+                let ServiceProbe::Known { value } = target else {
+                    unreachable!()
+                };
+                value.distrobox_name = name.map(str::to_owned);
+                value.kill_mode = Some("control-group".into());
+                assert_eq!(
+                    preflight(&report, request, 1000).is_ok(),
+                    name == Some("fixture-box")
+                );
+            }
+        }
     }
 
     #[test]

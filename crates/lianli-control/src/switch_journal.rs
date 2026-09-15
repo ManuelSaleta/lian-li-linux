@@ -26,6 +26,8 @@ pub enum Startup {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Intent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<crate::container_destination::Route>,
     pub id: String,
     pub caller_name: String,
     pub source: ServiceSelection,
@@ -259,10 +261,39 @@ impl Record {
         ensure!(
             self.intent.source.scope != self.intent.destination.scope
                 && self.intent.source.uid != 0
-                && self.intent.destination.uid != 0
-                && self.intent.source.uid != self.intent.destination.uid,
-            "Switch journal must identify two distinct unprivileged service accounts"
+                && self.intent.destination.uid != 0,
+            "Switch journal must identify opposite modes under unprivileged accounts"
         );
+        if let Some(route) = &self.intent.container {
+            route.validate()?;
+            ensure!(
+                self.intent.source.uid == self.intent.destination.uid,
+                "Container service modes must belong to the same host owner"
+            );
+            for (selection, config, working) in [
+                (
+                    self.intent.source,
+                    &self.intent.source_config,
+                    &self.intent.source_working_directory,
+                ),
+                (
+                    self.intent.destination,
+                    &self.intent.destination_config,
+                    &self.intent.destination_working_directory,
+                ),
+            ] {
+                let (expected_config, expected_working) = route.paths(selection.scope);
+                ensure!(
+                    config == expected_config && working.as_deref() == Some(expected_working),
+                    "Container route differs from the recorded service destination"
+                );
+            }
+        } else {
+            ensure!(
+                self.intent.source.uid != self.intent.destination.uid,
+                "Native switching requires distinct unprivileged service accounts"
+            );
+        }
         ensure!(
             !self.intent.caller_name.is_empty()
                 && self.intent.caller_name.len() <= 256
@@ -274,12 +305,12 @@ impl Record {
                 config.is_absolute()
                     && config.as_os_str().len() <= 4096
                     && !config.as_os_str().as_encoded_bytes().contains(&0)
-                    && config.extension() == Some(std::ffi::OsStr::new("json"))
                     && !config
                         .components()
                         .any(|part| matches!(part, std::path::Component::ParentDir)),
                 "Invalid switch configuration path"
             );
+            crate::container_destination::validate_config(config)?;
         }
         ensure!(
             self.intent.source_config != self.intent.destination_config,
@@ -970,6 +1001,7 @@ mod tests {
 
     fn intent(root: &Path) -> Intent {
         Intent {
+            container: None,
             id: "0123456789abcdef0123456789abcdef".into(),
             caller_name: "fixture".into(),
             source: ServiceSelection {
@@ -997,10 +1029,58 @@ mod tests {
     }
 
     #[test]
+    fn container_journals_require_one_owner_and_exact_mode_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let mut intent = intent(root.path());
+        intent.source_config = root.path().join("source/settings");
+        intent.destination_config = root.path().join("destination/settings.conf");
+        intent.destination.uid = intent.source.uid;
+        assert!(Record::new(intent.clone()).is_err());
+        intent.container = Some(crate::container_destination::Route {
+            launch: crate::container_destination::Launch {
+                name: "release-box".into(),
+                host_enter: "/usr/bin/distrobox-enter".into(),
+                binaries: "/opt/lianli".into(),
+            },
+            user_config: intent.source_config.clone(),
+            system_config: intent.destination_config.clone(),
+            user_working_directory: intent.source_working_directory.clone().unwrap(),
+            system_working_directory: intent.destination_working_directory.clone().unwrap(),
+        });
+        let record = Record::new(intent.clone()).unwrap();
+        let restored: Record =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(record.intent, restored.intent);
+        for change in 0..5 {
+            let mut changed = intent.clone();
+            match change {
+                0 => changed.destination.uid += 1,
+                1 => changed.destination.scope = changed.source.scope,
+                2 => changed.destination_working_directory = None,
+                3 => changed.source_config = root.path().join("elsewhere/config.json"),
+                _ => {
+                    changed.container.as_mut().unwrap().system_config =
+                        changed.source_config.clone()
+                }
+            }
+            assert!(Record::new(changed).is_err(), "change {change}");
+        }
+        std::mem::swap(&mut intent.source, &mut intent.destination);
+        std::mem::swap(&mut intent.source_config, &mut intent.destination_config);
+        std::mem::swap(
+            &mut intent.source_working_directory,
+            &mut intent.destination_working_directory,
+        );
+        Record::new(intent).unwrap();
+    }
+
+    #[test]
     fn older_journals_without_boot_identity_preserve_state_but_cannot_restore_runtime_startup() {
         let root = tempfile::tempdir().unwrap();
         let record = Record::new(intent(root.path())).unwrap();
         let mut value = serde_json::to_value(&record).unwrap();
+        assert!(value["intent"].get("container").is_none());
         value.as_object_mut().unwrap().remove("boot_id");
         let older: Record = serde_json::from_value(value).unwrap();
         older.validate().unwrap();

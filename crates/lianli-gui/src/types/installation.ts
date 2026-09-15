@@ -76,3 +76,15 @@ export const INSTALLATION_GUIDES: Record<InstallationGuide, string> = {
   distrobox: "https://github.com/sgtaziz/lian-li-linux/blob/main/docs/distrobox.md",
   troubleshooting: "https://github.com/sgtaziz/lian-li-linux/blob/main/docs/troubleshooting.md",
 };
+export interface ContainerDeployment {
+  version: number;
+  owner_uid: number;
+  owner_name: string;
+  route: {
+    launch: { name: string; host_enter: string; binaries: string };
+    user_config: string;
+    system_config: string;
+    user_working_directory: string;
+    system_working_directory: string;
+  };
+}

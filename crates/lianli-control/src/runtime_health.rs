@@ -168,6 +168,8 @@ pub fn inspect(hid_backend: Option<HidBackend>) -> Result<Report> {
     let mut findings = findings(&context, uid, &groups, configured, access);
     if let Some(backend) = hid_backend {
         findings.push(crate::usb_permissions::inspect(&context, backend));
+    } else if let Some(finding) = hermes_access(uid) {
+        findings.push(finding);
     }
     Ok(Report {
         version: env!("CARGO_PKG_VERSION").into(),
@@ -176,6 +178,97 @@ pub fn inspect(hid_backend: Option<HidBackend>) -> Result<Report> {
         groups_fingerprint: group_fingerprint(&groups),
         hid_backend,
         findings,
+    })
+}
+
+fn hermes_access(uid: u32) -> Option<InstallationFinding> {
+    hermes_access_at(Path::new("/sys/class/drm"), Path::new("/dev/dri"), uid)
+}
+
+fn hermes_access_at(sysfs: &Path, nodes: &Path, uid: u32) -> Option<InstallationFinding> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let entries = std::fs::read_dir(sysfs).ok()?;
+    let mut denied = Vec::new();
+    let mut checked = 0;
+    let mut unknown = Vec::new();
+    for entry in entries.take(256).flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.strip_prefix("renderD").is_some_and(|index| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            continue;
+        }
+        let role = std::fs::read_to_string(entry.path().join("device/hermes_kms_role"));
+        if !role.is_ok_and(|role| role.trim() == "host") {
+            continue;
+        }
+        let path = nodes.join(name.as_ref());
+        match std::fs::read_to_string(entry.path().join("device/hermes_kms_access_uid")) {
+            Ok(owner) if !owner.trim().is_empty() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                unknown.push(format!(
+                    "{}: cannot verify Hermes ownership: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        }
+        let access = (|| -> Result<bool> {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)?;
+            ensure!(
+                file.metadata()?.file_type().is_char_device(),
+                "Not a DRM device node"
+            );
+            effective_access(&file)
+        })();
+        match access {
+            Ok(true) => checked += 1,
+            Ok(false) => denied.push(path.display().to_string()),
+            Err(error) => unknown.push(format!("{}: {error:#}", path.display())),
+        }
+    }
+    if checked == 0 && denied.is_empty() && unknown.is_empty() {
+        return None;
+    }
+    denied.sort();
+    unknown.sort();
+    let (state, evidence) = if !denied.is_empty() {
+        (
+            CheckState::Failed,
+            format!(
+                "Read/write access denied: {}. Effective UID {uid}, including ACL masks.",
+                denied.join(", ")
+            ),
+        )
+    } else if !unknown.is_empty() {
+        (CheckState::Unavailable, unknown.join(". "))
+    } else {
+        (CheckState::Passed, format!("Read/write permission granted for {checked} host render node(s). Capture compatibility is checked at startup."))
+    };
+    Some(InstallationFinding {
+        code: "runtime.hermes_access".into(),
+        state,
+        severity: if state == CheckState::Passed {
+            FindingSeverity::Info
+        } else {
+            FindingSeverity::Warning
+        },
+        feature: "Hermes desktop capture".into(),
+        context: format!("Process UID {uid}"),
+        title: "Hermes host render access".into(),
+        evidence,
+        remediation: if state == CheckState::Passed {
+            String::new()
+        } else {
+            "Install the current 60-lianli.rules on the host, run sudo udevadm control --reload-rules, then reboot. It includes the Hermes host ACL fix. Distrobox-only installation is insufficient. If access still fails, follow the Hermes permissions section in the setup guide.".into()
+        },
+        guide: InstallationGuide::Troubleshooting,
     })
 }
 
@@ -314,6 +407,31 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(run_check(|| Ok(()), Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn hermes_access_excludes_private_sessions_and_rejects_missing_or_replaced_nodes() {
+        let root = tempfile::tempdir().unwrap();
+        let sysfs = root.path().join("sys");
+        let nodes = root.path().join("dev");
+        let device = sysfs.join("renderD130/device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::create_dir(&nodes).unwrap();
+        let role = device.join("hermes_kms_role");
+        let owner = device.join("hermes_kms_access_uid");
+        std::fs::write(&owner, "").unwrap();
+        std::fs::write(&role, "session\n").unwrap();
+        assert!(hermes_access_at(&sysfs, &nodes, 1000).is_none());
+        std::fs::write(&role, "host\n").unwrap();
+        let missing = hermes_access_at(&sysfs, &nodes, 1000).unwrap();
+        assert_eq!(missing.state, CheckState::Unavailable);
+        assert!(missing.evidence.contains("renderD130"));
+        std::fs::write(nodes.join("renderD130"), "replacement").unwrap();
+        let replaced = hermes_access_at(&sysfs, &nodes, 1000).unwrap();
+        assert_eq!(replaced.state, CheckState::Unavailable);
+        assert!(replaced.evidence.contains("Not a DRM device node"));
+        std::fs::write(&owner, "2000\n").unwrap();
+        assert!(hermes_access_at(&sysfs, &nodes, 1000).is_none());
     }
 
     #[test]

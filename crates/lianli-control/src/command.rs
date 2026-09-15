@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_OUTPUT: usize = 64 * 1024;
@@ -66,10 +67,28 @@ pub fn run_with_stdin(command: Command, stdin: Stdio, timeout: Duration) -> Resu
 }
 
 pub fn run_with_stdin_limit(
+    command: Command,
+    stdin: Stdio,
+    timeout: Duration,
+    stdout_limit: usize,
+) -> Result<Output> {
+    run_inner(command, stdin, timeout, stdout_limit, None)
+}
+
+pub(crate) fn run_cancelable(
+    command: Command,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output> {
+    run_inner(command, Stdio::null(), timeout, MAX_OUTPUT, Some(cancel))
+}
+
+fn run_inner(
     mut command: Command,
     stdin: Stdio,
     timeout: Duration,
     stdout_limit: usize,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Output> {
     ensure!(
         (1..=16 * 1024 * 1024).contains(&stdout_limit),
@@ -114,6 +133,10 @@ pub fn run_with_stdin_limit(
     let mut errors = Vec::new();
     let mut status = None;
     loop {
+        ensure!(
+            !cancel.is_some_and(|value| value.load(Ordering::Acquire)),
+            "Diagnostic command cancelled"
+        );
         ensure!(Instant::now() < deadline, "Diagnostic command timed out");
         let output_done = drain(&mut stdout, &mut output, stdout_limit)?;
         let errors_done = drain(&mut stderr, &mut errors, MAX_OUTPUT)?;

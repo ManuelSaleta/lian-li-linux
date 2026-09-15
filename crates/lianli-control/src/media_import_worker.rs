@@ -15,16 +15,19 @@ pub fn start(
     lcds: Vec<lianli_shared::config::LcdConfig>,
     templates: Vec<lianli_shared::template::LcdTemplate>,
     config: &Path,
+    instance: &str,
 ) -> Result<String> {
+    let context = InstallationContext::detect();
     ensure!(
-        InstallationContext::detect() == InstallationContext::Native,
-        "Start managed imports from the native application"
+        context != InstallationContext::UnsupportedContainer,
+        "Managed imports require a native installation or supported Distrobox"
     );
     ensure!(
         !read()?.is_some_and(|status| status.active),
         "A managed import is already active"
     );
     crate::media_import::selection_dependencies(&lcds, &templates)?;
+    let route = crate::services::Route::detect(&context)?;
     let path = runtime_path()?;
     match fs::DirBuilder::new().mode(0o700).create(&path) {
         Ok(()) => {}
@@ -40,7 +43,7 @@ pub fn start(
         entry?;
         ensure!(
             index < 33,
-            "Too many retained import request files; inspect pending imports before retrying"
+            "Too many retained import request files. Inspect pending imports before retrying"
         );
     }
     let mut random = [0; 16];
@@ -48,7 +51,7 @@ pub fn start(
     let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let name = format!("selection-{id}.json");
     let selection = path.join(&name);
-    let arguments = launch_arguments(scope, &selection, config, &id)?;
+    let arguments = launch_for(&context, scope, &selection, config, &id, instance)?;
     let mut request = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -58,16 +61,71 @@ pub fn start(
     request.write_all(&serde_json::to_vec(&(lcds, templates))?)?;
     request.sync_all()?;
     directory.0.sync_all()?;
-    let mut command = Command::new("/usr/bin/systemd-run");
-    command.args(arguments);
-    let output = crate::command::run(command, Duration::from_secs(10))
-        .context("Import submission was not confirmed; check progress before retrying. The request was retained")?;
+    let output = match &context {
+        InstallationContext::Native => {
+            let mut command = Command::new("/usr/bin/systemd-run");
+            command.args(arguments);
+            crate::command::run(command, Duration::from_secs(10))
+        }
+        _ => route.output("/usr/bin/systemd-run", &arguments.iter().map(String::as_str).collect::<Vec<_>>()),
+    }
+        .context("Import submission was not confirmed. Check progress before retrying. The request was retained")?;
     ensure!(
         output.status.success(),
-        "Cannot submit import worker: {}. Check progress before retrying; the request was retained",
+        "Cannot submit import worker: {}. Check progress before retrying. The request was retained",
         output.stderr.chars().take(2048).collect::<String>()
     );
     Ok(id)
+}
+
+fn launch_for(
+    context: &InstallationContext,
+    scope: ServiceScope,
+    selection: &Path,
+    config: &Path,
+    id: &str,
+    instance: &str,
+) -> Result<Vec<String>> {
+    let mut arguments = launch_arguments(scope, selection, config, id)?;
+    match context {
+        InstallationContext::Native => {}
+        InstallationContext::Distrobox { name } => {
+            ensure!(
+                crate::distrobox_unit::valid_name(name),
+                "Distrobox imports require the selected box"
+            );
+            ensure!(
+                !instance.is_empty()
+                    && instance.len() <= 256
+                    && !instance.chars().any(char::is_control),
+                "Invalid selected daemon instance"
+            );
+            let position = arguments
+                .iter()
+                .position(|argument| argument == "--")
+                .context("Missing worker command")?
+                + 1;
+            arguments.splice(
+                position..position,
+                [
+                    "/usr/bin/env".into(),
+                    "--unset=INVOCATION_ID".into(),
+                    "/usr/bin/distrobox-enter".into(),
+                    "--name".into(),
+                    name.clone(),
+                    "--".into(),
+                ],
+            );
+            arguments.extend([
+                "--expected-instance".into(),
+                instance.replace('$', "$$").replace('%', "%%"),
+            ]);
+        }
+        InstallationContext::UnsupportedContainer => {
+            anyhow::bail!("Unsupported container import context")
+        }
+    }
+    Ok(arguments)
 }
 
 fn launch_arguments(
@@ -129,13 +187,29 @@ pub fn read() -> Result<Option<Status>> {
     media_import_job::read(&runtime_path()?)
 }
 
-pub fn run(scope: ServiceScope, selection: &Path, expected_config: &Path, id: &str) -> Result<()> {
+pub fn run(
+    scope: ServiceScope,
+    selection: &Path,
+    expected_config: &Path,
+    id: &str,
+    instance: Option<&str>,
+) -> Result<()> {
+    let context = InstallationContext::detect();
     ensure!(
-        InstallationContext::detect() == InstallationContext::Native,
-        "Run managed import workers in the native desktop session"
+        context != InstallationContext::UnsupportedContainer,
+        "Managed import worker requires a native installation or supported Distrobox"
     );
     let job = Job::begin(&runtime_path()?, id)?;
     let result = (|| -> Result<PublishedSelection> {
+        if matches!(context, InstallationContext::Distrobox { .. }) {
+            return crate::distrobox_import::copy(
+                scope,
+                selection,
+                expected_config,
+                instance.context("Distrobox import requires the reviewed daemon instance")?,
+                id,
+            );
+        }
         let command = authorization_command(scope, selection, expected_config, id)?;
         let output = crate::command::run_with_stdin_limit(
             command,
@@ -144,12 +218,12 @@ pub fn run(scope: ServiceScope, selection: &Path, expected_config: &Path, id: &s
             16 * 1024 * 1024,
         )
         .context(
-            "Import authorization or execution did not finish; inspect storage before retrying",
+            "Import authorization or execution did not finish. Inspect storage before retrying",
         )?;
         ensure!(output.status.success(), "Managed import failed: {}. Check the desktop authentication agent and installed helper, then inspect storage before retrying",
             output.stderr.chars().take(2048).collect::<String>());
         let result: PublishedSelection = serde_json::from_str(&output.stdout).context(
-            "Managed import returned an invalid result; inspect storage before retrying",
+            "Managed import returned an invalid result. Inspect storage before retrying",
         )?;
         crate::media_import_launch::validate_result(&result, expected_config, id)?;
         Ok(result)
@@ -164,7 +238,7 @@ pub fn run(scope: ServiceScope, selection: &Path, expected_config: &Path, id: &s
             metadata.is_file()
                 && metadata.uid() == unsafe { libc::geteuid() }
                 && metadata.mode() & 0o077 == 0,
-            "Import outcome was saved, but its request file changed; preserve it for inspection"
+            "Import outcome was saved, but its request file changed. Preserve it for inspection"
         );
         fs::remove_file(directory.path().join(name))?;
         directory.0.sync_all()?;
@@ -213,6 +287,62 @@ fn authorization_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distrobox_submission_uses_the_host_job_and_the_reviewed_instance() {
+        let context = InstallationContext::Distrobox {
+            name: "my box".into(),
+        };
+        let selection = Path::new("/tmp/$request%u.json");
+        let config = Path::new("/home/user/config.json");
+        let id = "1234567890abcdef1234567890abcdef";
+        let args = launch_for(
+            &context,
+            ServiceScope::User,
+            selection,
+            config,
+            id,
+            "instance$1%u",
+        )
+        .unwrap();
+        let position = args.iter().position(|argument| argument == "--").unwrap();
+        assert_eq!(
+            &args[position + 1..position + 9],
+            &[
+                "/usr/bin/env",
+                "--unset=INVOCATION_ID",
+                "/usr/bin/distrobox-enter",
+                "--name",
+                "my box",
+                "--",
+                "/usr/bin/lianli-control",
+                "run-selected-media-import"
+            ]
+        );
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--expected-instance", "instance$$1%%u"]
+        );
+        assert!(args
+            .iter()
+            .any(|argument| argument == "/tmp/$$request%%u.json"));
+        assert!(!args.iter().any(|argument| argument.contains("pkexec")));
+        let system_args = launch_for(
+            &context,
+            ServiceScope::System,
+            selection,
+            config,
+            id,
+            "instance",
+        )
+        .unwrap();
+        assert!(system_args
+            .windows(2)
+            .any(|args| args == ["--scope", "system"]));
+        assert!(!system_args
+            .iter()
+            .any(|argument| argument.contains("pkexec")));
+        assert!(launch_for(&context, ServiceScope::User, selection, config, id, "").is_err());
+    }
     #[test]
     fn service_submission_bounds_lifetime_and_escapes_systemd_expansions() {
         let args = launch_arguments(

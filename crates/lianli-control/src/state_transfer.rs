@@ -142,10 +142,8 @@ fn prepare_inner(
     );
     validate_id(id)?;
     ensure!(
-        source.uid == source_state.uid
-            && destination.uid == destination_state.uid
-            && source.group_fingerprint() == source_state.groups_fingerprint
-            && destination.group_fingerprint() == destination_state.groups_fingerprint
+        source.matches_destination(source_state)
+            && destination.matches_destination(destination_state)
             && source_state.mount_namespace == destination_state.mount_namespace,
         "State transfer accounts or namespaces differ from preflight"
     );
@@ -277,6 +275,7 @@ pub(crate) fn validate_preparation(
 }
 
 pub fn send(config: &Path, working: &Path, generation: &str) -> Result<StateSummary> {
+    crate::container_destination::verify_config(config)?;
     ensure!(
         unsafe { libc::geteuid() } != 0,
         "Source files must be opened under an unprivileged account"
@@ -840,6 +839,7 @@ pub fn discard_as(account: &Account, config: &Path, id: &str) -> Result<()> {
 }
 
 pub fn discard(config: &Path, id: &str) -> Result<()> {
+    crate::container_destination::verify_config(config)?;
     ensure!(
         unsafe { libc::geteuid() } != 0,
         "Discard preparation under its unprivileged destination account"
@@ -931,7 +931,7 @@ fn discard_at(config: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_config_name(name: &str) -> Result<()> {
+pub(crate) fn validate_config_name(name: &str) -> Result<()> {
     ensure!(
         Path::new(name).file_name() == Some(OsStr::new(name))
             && !matches!(name, "lcd_templates.json" | "rgb_presets.json" | "profiles")
@@ -1018,6 +1018,7 @@ mod tests {
     fn destination(root: &Path) -> Destination {
         let config = root.join("config.json");
         Destination {
+            state_directory: None,
             scope: ServiceScope::User,
             uid: unsafe { libc::geteuid() },
             gid: unsafe { libc::getegid() },
@@ -1301,6 +1302,7 @@ mod tests {
             groups.dedup();
             Account {
                 uid,
+                container: None,
                 gid,
                 groups,
                 name: "fixture".into(),

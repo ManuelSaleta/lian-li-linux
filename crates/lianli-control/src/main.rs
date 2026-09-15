@@ -1,15 +1,118 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use lianli_shared::installation::InstallationContext;
+
+mod worker_limits;
 
 #[derive(Parser)]
 #[command(version, about = "Lian Li installation and service management")]
 struct Cli {
+    #[arg(long, hide = true, requires = "transfer_channel")]
+    worker_destination: Option<String>,
+    #[arg(long, hide = true, requires = "transfer_token")]
+    transfer_channel: Option<std::path::PathBuf>,
+    #[arg(long, hide = true, requires = "transfer_channel", value_parser = lianli_shared::daemon::parse_service_invocation)]
+    transfer_token: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    ReadContainerDeployment {
+        #[arg(long)]
+        expected_box: String,
+    },
+    #[command(hide = true)]
+    InstallContainerServices {
+        #[arg(long)]
+        deployment: String,
+    },
+    #[command(hide = true)]
+    InstallContainerUserUnits {
+        #[arg(long)]
+        deployment: String,
+        #[arg(long)]
+        previous: String,
+    },
+    #[command(hide = true)]
+    CheckContainerServices {
+        #[arg(long)]
+        expected_box: String,
+    },
+    #[command(hide = true)]
+    RequestSwitch {
+        #[arg(long)]
+        expected_box: String,
+        #[command(flatten)]
+        change: ChangeArgs,
+    },
+    #[command(hide = true)]
+    SwitchStatus {
+        #[arg(long)]
+        expected_box: String,
+    },
+    #[command(hide = true)]
+    InspectContainerDeployment {
+        #[arg(long)]
+        deployment: String,
+    },
+    #[command(hide = true)]
+    BoxWorker {
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(long = "box")]
+        box_name: String,
+        #[arg(long, default_value = "/usr/bin/distrobox-enter")]
+        distrobox_enter: std::path::PathBuf,
+        #[arg(long, default_value = "/usr/bin")]
+        binaries: std::path::PathBuf,
+        #[arg(last = true, required = true)]
+        arguments: Vec<std::ffi::OsString>,
+    },
+    #[command(hide = true)]
+    InspectContainerDestination {
+        #[arg(long = "box")]
+        box_name: String,
+        #[arg(long, value_enum)]
+        scope: Scope,
+        #[arg(long)]
+        config: std::path::PathBuf,
+        #[arg(long)]
+        working_directory: std::path::PathBuf,
+        #[arg(long)]
+        prepare_directory: bool,
+    },
+    #[command(hide = true)]
+    InspectContainerIdentity {
+        #[arg(long = "box")]
+        box_name: String,
+        #[arg(long, value_enum)]
+        scope: Scope,
+        #[arg(long)]
+        config: std::path::PathBuf,
+        #[arg(long)]
+        working_directory: std::path::PathBuf,
+    },
+    /// Print a host service unit without installing it or starting a daemon.
+    DistroboxServiceUnit {
+        /// Generate the desktop capture unit instead of the hardware daemon unit.
+        #[arg(long)]
+        desktop_session: bool,
+        /// Generate a system unit running as the unprivileged host owner of the box.
+        #[arg(long, requires = "system_config", conflicts_with = "desktop_session")]
+        system_uid: Option<u32>,
+        /// Separate, writable system-mode configuration path inside the box.
+        #[arg(long, requires = "system_uid")]
+        system_config: Option<std::path::PathBuf>,
+        #[arg(long = "box")]
+        box_name: Option<String>,
+        #[arg(long, default_value = "/usr/bin/distrobox-enter")]
+        distrobox_enter: std::path::PathBuf,
+        #[arg(long, default_value = "/usr/bin")]
+        binaries: std::path::PathBuf,
+    },
     /// Inspect credentials, host-lock and USB node permissions without device I/O.
     DiagnoseRuntime {
         #[arg(long, default_value = "hidraw", value_parser = parse_hid_backend)]
@@ -19,6 +122,10 @@ enum Command {
     InspectRuntime {
         #[arg(long, value_parser = parse_hid_backend)]
         hid_backend: Option<lianli_shared::config::HidBackend>,
+        #[arg(long)]
+        media_tools: bool,
+        #[arg(long, allow_hyphen_values = true)]
+        state_directory: Option<std::path::PathBuf>,
     },
     #[command(hide = true)]
     CheckRecoveryAccess {
@@ -122,6 +229,8 @@ enum Command {
     },
     #[command(hide = true)]
     RunSelectedMediaImport {
+        #[arg(long)]
+        expected_instance: Option<String>,
         #[arg(long, value_enum)]
         scope: Scope,
         #[arg(long)]
@@ -169,8 +278,10 @@ enum Command {
         #[arg(long)]
         user_uid: Option<u32>,
     },
-    /// Stop only the user daemon belonging to this host service invocation
+    /// Stop only the daemon belonging to this host service mode and invocation
     StopService {
+        #[arg(long, value_enum, default_value = "user")]
+        scope: Scope,
         #[arg(long, value_parser = lianli_shared::daemon::parse_service_invocation)]
         invocation_id: String,
     },
@@ -238,11 +349,216 @@ fn parse_hid_backend(value: &str) -> Result<lianli_shared::config::HidBackend, S
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::InspectRuntime { hid_backend } => println!(
-            "{}",
-            serde_json::to_string(&lianli_control::runtime_health::inspect(hid_backend)?)?
-        ),
+    let cli = Cli::parse();
+    let command = cli.command;
+    let _channel_guard =
+        if let (Some(path), Some(token)) = (cli.transfer_channel, cli.transfer_token) {
+            let packet = match &command {
+                Command::SendState { .. }
+                | Command::ReceiveState { .. }
+                | Command::PublishState => true,
+                Command::InspectContainerDestination { .. }
+                | Command::InspectContainerIdentity { .. }
+                | Command::InspectDestination { .. }
+                | Command::CheckSavedState { .. }
+                | Command::CheckRecoveryAccess { .. }
+                | Command::DiscardTransfer { .. }
+                | Command::FinishTransfer => false,
+                _ => anyhow::bail!("Only state workers may receive a container channel"),
+            };
+            Some(lianli_control::container_channel::attach(
+                &path, &token, packet,
+            )?)
+        } else {
+            None
+        };
+    if let Some(destination) = cli.worker_destination {
+        lianli_control::container_destination::initialize_worker(&destination)?;
+    }
+    if matches!(
+        command,
+        Command::SendState { .. } | Command::ReceiveState { .. }
+    ) {
+        worker_limits::apply().context("Cannot set the state-transfer memory limit")?;
+    }
+    match command {
+        Command::ReadContainerDeployment { expected_box } => {
+            lianli_control::container_change::verify_host_request(&expected_box)?;
+            println!(
+                "{}",
+                serde_json::to_string(&lianli_control::container_deployment::load()?)?
+            );
+        }
+        Command::InstallContainerServices { deployment } => {
+            anyhow::ensure!(
+                deployment.len() <= 32 * 1024,
+                "Deployment record exceeds 32 KiB"
+            );
+            lianli_control::container_setup::install(&serde_json::from_str(&deployment)?)?;
+        }
+        Command::InstallContainerUserUnits {
+            deployment,
+            previous,
+        } => {
+            anyhow::ensure!(
+                deployment.len() <= 32 * 1024 && previous.len() <= 32 * 1024,
+                "Deployment record exceeds 32 KiB"
+            );
+            let previous: Option<lianli_control::container_deployment::Deployment> =
+                serde_json::from_str(&previous)?;
+            lianli_control::container_setup::install_user(
+                &serde_json::from_str(&deployment)?,
+                previous.as_ref(),
+            )?;
+        }
+        Command::CheckContainerServices { expected_box } => {
+            lianli_control::container_change::verify_host_request(&expected_box)?;
+            lianli_control::container_deployment::load()?
+                .context("The protected deployment is missing")?
+                .inspect_installed()?;
+        }
+        Command::RequestSwitch {
+            expected_box,
+            change,
+        } => {
+            lianli_control::container_change::verify_host_request(&expected_box)?;
+            let id = lianli_control::switch_job::start(change.request()?)?;
+            println!("{}", serde_json::to_string(&id)?);
+        }
+        Command::SwitchStatus { expected_box } => {
+            lianli_control::container_change::verify_host_request(&expected_box)?;
+            println!(
+                "{}",
+                serde_json::to_string(&lianli_control::switch_job::read()?)?
+            );
+        }
+        Command::InspectContainerDeployment { deployment } => {
+            anyhow::ensure!(
+                deployment.len() <= 32 * 1024,
+                "Deployment record exceeds 32 KiB"
+            );
+            let deployment: lianli_control::container_deployment::Deployment =
+                serde_json::from_str(&deployment)?;
+            deployment.inspect_installed()?;
+        }
+        Command::BoxWorker {
+            destination,
+            box_name,
+            distrobox_enter,
+            binaries,
+            arguments,
+        } => {
+            let output = lianli_control::container_channel::run(
+                &box_name,
+                &distrobox_enter,
+                &binaries,
+                &arguments,
+                destination.as_deref(),
+            )?;
+            print!("{}", output.stdout);
+            if !output.status.success() {
+                if output.stderr.trim().is_empty() {
+                    anyhow::bail!("Container state worker exited unsuccessfully");
+                }
+                anyhow::bail!("Container launcher failed: {}", output.stderr.trim());
+            }
+        }
+        Command::InspectContainerDestination {
+            box_name,
+            scope,
+            config,
+            working_directory,
+            prepare_directory,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            let result = lianli_control::destination::inspect_container(
+                &box_name,
+                scope,
+                &config,
+                &working_directory,
+                prepare_directory,
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::InspectContainerIdentity {
+            box_name,
+            scope,
+            config,
+            working_directory,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            let result = lianli_control::container_destination::inspect_identity(
+                &box_name,
+                scope,
+                &config,
+                &working_directory,
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::DistroboxServiceUnit {
+            desktop_session,
+            system_uid,
+            system_config,
+            box_name,
+            distrobox_enter,
+            binaries,
+        } => {
+            let name = match (box_name, InstallationContext::detect()) {
+                (Some(name), _) | (None, InstallationContext::Distrobox { name }) => name,
+                _ => anyhow::bail!(
+                    "Run inside the intended Distrobox or specify --box with its name"
+                ),
+            };
+            if let (Some(uid), Some(config)) = (system_uid, system_config) {
+                print!(
+                    "{}",
+                    lianli_control::distrobox_unit::generate_system(
+                        &name,
+                        &distrobox_enter,
+                        &binaries,
+                        uid,
+                        &config
+                    )?
+                );
+                return Ok(());
+            }
+            let generate = if desktop_session {
+                lianli_control::distrobox_unit::generate_session
+            } else {
+                lianli_control::distrobox_unit::generate
+            };
+            print!("{}", generate(&name, &distrobox_enter, &binaries)?);
+        }
+        Command::InspectRuntime {
+            hid_backend,
+            media_tools,
+            state_directory,
+        } => {
+            let mut report = lianli_control::runtime_health::inspect(hid_backend)?;
+            if media_tools {
+                report
+                    .findings
+                    .extend(lianli_control::media_health::inspect());
+                report
+                    .findings
+                    .push(lianli_control::storage_health::inspect(
+                        &std::env::temp_dir(),
+                        true,
+                    ));
+            }
+            if let Some(path) = state_directory {
+                report
+                    .findings
+                    .push(lianli_control::storage_health::inspect(&path, false));
+            }
+            println!("{}", serde_json::to_string(&report)?);
+        }
         Command::DiagnoseRuntime { hid_backend } => println!(
             "{}",
             serde_json::to_string(&lianli_control::runtime_health::collect_report(
@@ -392,6 +708,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::RunSelectedMediaImport {
+            expected_instance,
             scope,
             selection,
             expected_config,
@@ -406,6 +723,7 @@ fn main() -> anyhow::Result<()> {
                 &selection,
                 &expected_config,
                 &operation_id,
+                expected_instance.as_deref(),
             )?;
         }
         Command::ReceiveState {
@@ -495,8 +813,19 @@ fn main() -> anyhow::Result<()> {
             let selection = lianli_control::service_selection::select(scope, user_uid)?;
             println!("{}", serde_json::to_string_pretty(&selection)?);
         }
-        Command::StopService { invocation_id } => {
-            lianli_control::service_stop::stop(&InstallationContext::detect(), &invocation_id)?;
+        Command::StopService {
+            scope,
+            invocation_id,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            lianli_control::service_stop::stop_in_scope(
+                &InstallationContext::detect(),
+                scope,
+                &invocation_id,
+            )?;
             println!("The service daemon exited.");
         }
         Command::Diagnose => {
@@ -523,7 +852,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 anyhow::ensure!(
                     snapshot.summary.issue_count == 0 && access.failed == 0,
-                    "Saved state or asset access failed validation; see the JSON report"
+                    "Saved state or asset access failed validation. See the JSON report"
                 );
             } else {
                 println!("{}", serde_json::to_string_pretty(&snapshot.summary)?);
@@ -536,6 +865,41 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod switch_cli_tests {
     use super::*;
+
+    #[test]
+    fn system_box_unit_requires_an_owner_and_configuration_without_a_desktop_helper() {
+        let base = [
+            "lianli-control",
+            "distrobox-service-unit",
+            "--box",
+            "fixture",
+        ];
+        for args in [
+            &[][..],
+            &["--desktop-session"],
+            &[
+                "--system-uid",
+                "1000",
+                "--system-config",
+                "/state/config.json",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(args.iter().copied())).is_ok());
+        }
+        for args in [
+            &["--system-uid", "1000"][..],
+            &["--system-config", "/state/config.json"],
+            &[
+                "--system-uid",
+                "1000",
+                "--system-config",
+                "/state/config.json",
+                "--desktop-session",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(args.iter().copied())).is_err());
+        }
+    }
 
     #[test]
     fn switch_submission_accepts_one_mode_or_recovery_without_executing_it() {

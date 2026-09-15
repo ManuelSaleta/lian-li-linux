@@ -24,12 +24,31 @@ pub fn native(
         "Invalid managed import ID"
     );
     let caller = Account::authorized_caller()?;
-    let destination = match scope {
-        ServiceScope::User => caller.clone(),
-        ServiceScope::System => Account::system()?,
+    let destination = match crate::container_deployment::load()? {
+        Some(deployment) => {
+            deployment.verify_installed(&caller)?;
+            let (config, working) = deployment.route.paths(scope);
+            ensure!(
+                config == expected_config,
+                "The selected configuration differs from the installed Distrobox destination"
+            );
+            let (execution, _) = crate::container_destination::Execution::discover(
+                &caller,
+                deployment.route.launch.clone(),
+                scope,
+                config,
+                working,
+                false,
+            )?;
+            caller.clone().with_container(execution)?
+        }
+        None => match scope {
+            ServiceScope::User => caller.clone(),
+            ServiceScope::System => Account::system()?,
+        },
     };
     let state = crate::destination::preflight(&destination, scope)?;
-    ensure!(state.config_path == expected_config, "The selected daemon configuration differs from the destination service; reconnect to the intended daemon");
+    ensure!(state.config_path == expected_config, "The selected daemon configuration differs from the destination service. Reconnect to the intended daemon");
     let source_command = caller.control_command(&[
         OsStr::new("send-selected-media"),
         OsStr::new("--selection"),
@@ -71,17 +90,19 @@ pub fn native(
         )
     });
     let source =
-        source.context("Source import helper failed; inspect the destination before retrying")?;
-    let destination = destination.context("Destination import helper failed; files may have been published, inspect storage before retrying")?;
+        source.context("Source import failed. Inspect destination storage before retrying")?;
+    let destination = destination.context(
+        "Destination import failed. Files may have been copied. Inspect storage before retrying",
+    )?;
     ensure!(
         source.status.success() && destination.status.success(),
-        "Managed import failed; inspect storage before retrying. Source: {}. Destination: {}",
+        "Managed import failed. Inspect storage before retrying. Source: {}. Destination: {}",
         source.stderr.chars().take(2048).collect::<String>(),
         destination.stderr.chars().take(2048).collect::<String>()
     );
     ensure!(source.stdout.is_empty(), "Unexpected source import output");
     let published: PublishedSelection = serde_json::from_str(&destination.stdout)
-        .context("Invalid destination import result; inspect storage before retrying")?;
+        .context("Invalid destination import result. Inspect storage before retrying")?;
     validate_result(&published, expected_config, id)?;
     Ok(published)
 }
@@ -94,7 +115,20 @@ pub fn validate_result(result: &PublishedSelection, config: &Path, id: &str) -> 
     let parent = config
         .parent()
         .context("Destination configuration has no parent")?;
-    let expected = parent.canonicalize()?.join("media/imports").join(id);
+    crate::media_ownership::validate_id(id)?;
+    let directory = match &result.destination {
+        Some(destination) => {
+            // The publishing worker resolves this path in the daemon's filesystem namespace.
+            ensure!(
+                destination.config_path == config,
+                "Import result belongs to another configuration"
+            );
+            crate::container_destination::absolute(&destination.state_directory)?;
+            destination.state_directory.clone()
+        }
+        None => parent.canonicalize()?,
+    };
+    let expected = directory.join("media/imports").join(id);
     let dependencies = crate::media_import::selection_dependencies_with_limit(
         &result.lcds,
         &result.templates,
@@ -114,6 +148,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guest_result_validation_does_not_require_host_visibility() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("guest-only/state");
+        let config = root.path().join("guest-alias/config.json");
+        let id = "1234567890abcdef1234567890abcdef";
+        let path = directory.join("media/imports").join(id).join("asset.png");
+        let mut result = PublishedSelection {
+            import_id: id.into(),
+            lcds: vec![
+                serde_json::from_value(serde_json::json!({"type":"image", "path":path})).unwrap(),
+            ],
+            templates: vec![],
+            destination: Some(crate::media_import::PublishedDestination {
+                config_path: config.clone(),
+                state_directory: directory.clone(),
+            }),
+        };
+        assert!(!directory.exists());
+        result = serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
+        validate_result(&result, &config, id).unwrap();
+        assert!(validate_result(&result, &directory.join("other.json"), id).is_err());
+        result.lcds[0].path = Some(directory.join("private.png"));
+        assert!(validate_result(&result, &config, id).is_err());
+        result.lcds[0].path = Some(path);
+        result.destination.as_mut().unwrap().state_directory = directory.join("../outside");
+        assert!(validate_result(&result, &config, id).is_err());
+        let legacy: PublishedSelection = serde_json::from_value(serde_json::json!({
+            "import_id": id, "lcds": [], "templates": []
+        }))
+        .unwrap();
+        assert!(legacy.destination.is_none());
+    }
+
+    #[test]
     fn result_must_match_the_requested_import_and_destination() {
         let root = tempfile::tempdir().unwrap();
         let config = root.path().join("config.json");
@@ -131,6 +199,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"type":"image", "path":path})).unwrap(),
             ],
             templates: vec![],
+            destination: None,
         };
         validate_result(&result, &config, id).unwrap();
         assert!(validate_result(&result, &config, "abcdef1234567890abcdef1234567890").is_err());

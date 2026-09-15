@@ -1,10 +1,10 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { ServiceReport } from "@/types/installation";
+import type { ServiceReport, InstallationFinding } from "@/types/installation";
 
 export const useInstallationStore = defineStore("installation", () => {
-  const report = ref<{ services: ServiceReport } | null>(null);
+  const report = ref<{ services: ServiceReport; findings: InstallationFinding[] } | null>(null);
   const checking = ref(false);
   const error = ref("");
   let pending: Promise<void> | null = null;
@@ -13,8 +13,8 @@ export const useInstallationStore = defineStore("installation", () => {
     if (pending) return pending;
     checking.value = true;
     error.value = "";
-    pending = invoke<ServiceReport>("service_report")
-      .then((services) => { report.value = { services }; })
+    pending = invoke<{ services: ServiceReport; findings: InstallationFinding[] }>("service_report")
+      .then((result) => { report.value = result; })
       .catch((reason: unknown) => { error.value = String(reason); })
       .finally(() => {
         checking.value = false;

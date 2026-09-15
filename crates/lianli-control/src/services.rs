@@ -45,7 +45,7 @@ impl Route {
                         fs::metadata(&path).is_ok_and(
                             |metadata| metadata.is_file() && metadata.mode() & 0o111 != 0
                         ),
-                        "Host /usr/bin/{name} is unavailable; service checks cannot run safely"
+                        "Host /usr/bin/{name} is unavailable. Service checks cannot run safely"
                     );
                 }
                 Ok(Self::Host { executable, bus })
@@ -129,6 +129,27 @@ impl Route {
         Ok(output)
     }
 
+    pub(crate) fn diagnostic_output(&self, program: &str, args: &[&str]) -> Result<Output> {
+        command::run(
+            self.command_with_timeout(program, args, Duration::from_secs(1)),
+            Duration::from_secs(2),
+        )
+    }
+
+    pub(crate) fn bounded_output(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<Output> {
+        command::run_with_stdin_limit(
+            self.command_with_timeout(program, args, timeout),
+            std::process::Stdio::null(),
+            timeout + Duration::from_secs(3),
+            64 * 1024,
+        )
+    }
+
     pub(crate) fn service_action(
         &self,
         request: lianli_shared::services::ServiceActionRequest,
@@ -201,14 +222,18 @@ pub fn inspect(context: &InstallationContext) -> ServiceReport {
             let output = route.query(&[scope, "show", "--all", "--property", PROPERTIES, name])?;
             ensure!(output.status.success(), "{}", command_error(&output));
             let mut state = parse_unit(&output.stdout, name)?;
-            if name == USER_UNIT
-                && state.graceful_shutdown == Some(false)
+            if state.graceful_shutdown == Some(false)
                 && output.stdout.lines().any(|line| {
                     line.strip_prefix("ExecStop=")
                         .is_some_and(|value| !value.is_empty())
                 })
             {
-                if let Some(box_name) = crate::distrobox_service::inspect(route)? {
+                let service_scope = if name == USER_UNIT {
+                    lianli_shared::services::ServiceScope::User
+                } else {
+                    lianli_shared::services::ServiceScope::System
+                };
+                if let Some(box_name) = crate::distrobox_service::inspect(route, service_scope)? {
                     state = parse_unit_with_stop(&output.stdout, name, true)?;
                     state.distrobox_name =
                         (state.graceful_shutdown == Some(true)).then_some(box_name);
@@ -236,32 +261,47 @@ pub fn inspect(context: &InstallationContext) -> ServiceReport {
             value.process = Some(probe(|| {
                 let mut process =
                     crate::process_owner::inspect(route, pid, &report.user, &report.system)?;
-                if let ServiceProbe::Known { value: user } = &report.user {
+                for (scope, unit) in [
+                    (lianli_shared::services::ServiceScope::User, &report.user),
+                    (
+                        lianli_shared::services::ServiceScope::System,
+                        &report.system,
+                    ),
+                ] {
+                    let ServiceProbe::Known { value: wrapped } = unit else {
+                        continue;
+                    };
                     if process.service.is_none()
-                        && process.effective_uid == unsafe { libc::geteuid() }
-                        && user.active_state == "active"
-                        && user.sub_state == "running"
-                        && user.distrobox_name.is_some()
-                        && user.invocation_id.is_some()
+                        && wrapped.active_state == "active"
+                        && wrapped.sub_state == "running"
+                        && wrapped.distrobox_name.is_some()
+                        && wrapped.invocation_id.is_some()
                     {
+                        let expected_uid = match scope {
+                            lianli_shared::services::ServiceScope::User => unsafe {
+                                libc::geteuid()
+                            },
+                            lianli_shared::services::ServiceScope::System => {
+                                crate::distrobox_service::system_owner_uid(route)?
+                            }
+                        };
+                        if process.effective_uid != expected_uid {
+                            continue;
+                        }
                         let mut candidate = value.clone();
                         candidate.process = Some(ServiceProbe::Known {
                             value: process.clone(),
                         });
-                        let info = crate::daemon_probe::inspect(
-                            context,
-                            lianli_shared::services::ServiceScope::User,
-                            &candidate,
-                        )?;
-                        if wrapper_matches(&info, user) {
-                            process.service = Some(lianli_shared::services::ServiceScope::User);
+                        let info = crate::daemon_probe::inspect(context, scope, &candidate)?;
+                        if wrapper_matches(&info, wrapped) {
+                            process.service = Some(scope);
                         }
                     }
                 }
                 let current = crate::ownership::inspect(context, route)?;
                 ensure!(
                     current.identity == value.identity && current.owner_pid == Some(pid),
-                    "Hardware owner changed during process inspection; Recheck services"
+                    "Hardware owner changed during process inspection. Recheck services"
                 );
                 Ok(process)
             }));
@@ -288,8 +328,8 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
             findings.push(InstallationFinding {
                 code: "service.switch_prerequisites".into(), state: CheckState::Unavailable,
                 severity: FindingSeverity::Warning, feature: "Service switching".into(), context: "Host".into(),
-                title: "Service mode switching needs native setup".into(), evidence: format!("{error:#}"),
-                remediation: "Install the matching native application in /usr/bin, systemd-run and your distribution's Polkit/pkexec package. Run a desktop authentication agent, then Recheck. See the Service modes guide.".into(),
+                title: "Service switching needs host support".into(), evidence: format!("{error:#}"),
+                remediation: "Install the matching host control helper, systemd-run and Polkit. For Distrobox, use Set up host support in Settings. Run a desktop authentication agent, then Recheck.".into(),
                 guide: InstallationGuide::ServiceModes,
             });
         }
@@ -309,17 +349,32 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
             code: "service.selection".into(), state: CheckState::Unavailable,
             severity: FindingSeverity::Error, feature: "Service startup".into(), context: context.into(),
             title: "Host service selection is unverified".into(), evidence: reason.clone(),
-            remediation: "Resolve any unfinished service switch before starting a daemon. For invalid or hidden selection records, follow the Service modes guide and preserve recovery files; do not create a private container selection file.".into(), guide,
+            remediation: "Resolve any unfinished service switch before starting a daemon. For invalid or hidden selection records, follow the Service modes guide and preserve recovery files. Do not create a private container selection file.".into(), guide,
         });
     }
     if let ServiceProbe::Known { value } = &report.user {
-        if !native && value.load_state == "loaded" && value.distrobox_name.is_none() {
+        let needs_recipe = match &report.context {
+            InstallationContext::Distrobox { name } => {
+                value.load_state == "not-found"
+                    || (value.load_state == "loaded" && value.distrobox_name.as_ref() != Some(name))
+            }
+            InstallationContext::UnsupportedContainer => {
+                value.load_state == "loaded" && value.distrobox_name.is_none()
+            }
+            InstallationContext::Native => false,
+        };
+        if needs_recipe {
+            let remediation = match &report.context {
+                InstallationContext::Distrobox { name } => crate::distrobox_unit::guidance(name)
+                    .unwrap_or_else(|error| format!("{error:#}. Follow the Distrobox guide to select an existing box and update the host user unit.")),
+                _ => "Follow the Distrobox guide to update the host user unit, then reload the user manager. Keep both application binaries installed inside the same box. Stop an older daemon cleanly before changing its unit.".into(),
+            };
             findings.push(InstallationFinding {
                 code: "service.distrobox_recipe".into(), state: CheckState::Failed,
                 severity: FindingSeverity::Warning, feature: "Service management".into(), context: context.into(),
                 title: "Distrobox service controls need the current service recipe".into(),
-                evidence: "The host user service does not have a verified matching invocation-aware start and stop command.".into(),
-                remediation: "Follow the Distrobox guide to update the host user unit, then reload the user manager. Keep both application binaries installed inside the same box. Stop an older daemon cleanly before changing its unit.".into(), guide,
+                evidence: "The host user service is missing or does not have verified invocation-aware start and stop commands for this box.".into(),
+                remediation, guide,
             });
         }
     }
@@ -346,7 +401,7 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
                 severity: FindingSeverity::Warning, feature: "Daemon ownership".into(),
                 context: context.into(), title: "Hardware owner's service is unverified".into(),
                 evidence: reason.clone(),
-                remediation: "Recheck after startup or shutdown finishes. Service switching requires host process and service cgroup access; do not stop a PID based on its number alone.".into(), guide,
+                remediation: "Recheck after startup or shutdown finishes. Service switching requires host process and service cgroup access. Do not stop a PID based on its number alone.".into(), guide,
             });
         }
     }
@@ -366,8 +421,7 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
                 (
                     CheckState::NotApplicable,
                     FindingSeverity::Info,
-                    "No native system service is installed. Distrobox uses the host user service."
-                        .into(),
+                    "System mode is not set up. Use Set up host support in Settings.".into(),
                 )
             }
             ServiceProbe::Known { value } if value.load_state == "not-found" => (
@@ -379,7 +433,7 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
                 CheckState::Failed,
                 FindingSeverity::Error,
                 format!(
-                    "{} failed; startup state is {}",
+                    "{} failed. Startup state is {}",
                     value.name, value.unit_file_state
                 ),
             ),
@@ -456,7 +510,7 @@ pub fn findings(report: &ServiceReport) -> Vec<InstallationFinding> {
             code: "service.conflict".into(), state: CheckState::Failed, severity: FindingSeverity::Error,
             feature: "Daemon ownership".into(), context: context.into(), title: "Competing hardware service selections".into(),
             evidence: "Both hardware modes are active or selected for startup. The ownership lock prevents concurrent access, but competing services may keep retrying.".into(),
-            remediation: "Choose one hardware service mode. Resolve global user enablement and manually launched owners before switching; do not stop another user's daemon.".into(), guide,
+            remediation: "Choose one hardware service mode. Resolve global user enablement and manually launched owners before switching. Do not stop another user's daemon.".into(), guide,
         });
     } else if global_enabled {
         findings.push(InstallationFinding {
@@ -490,7 +544,8 @@ fn command_error(output: &Output) -> String {
 fn parse_enablement(output: &Output) -> Result<String> {
     let value = output.stdout.trim();
     ensure!(
-        matches!(output.status.code(), Some(0 | 1)),
+        matches!(output.status.code(), Some(0 | 1))
+            || (output.status.code() == Some(4) && value == "not-found"),
         "{}",
         command_error(output)
     );
@@ -523,10 +578,17 @@ fn parse_unit(text: &str, name: &str) -> Result<UnitState> {
 
 fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<UnitState> {
     let mut properties = HashMap::new();
+    let mut nonempty_stop_hooks = std::collections::HashSet::new();
     for line in text.lines() {
         let (key, value) = line
             .split_once('=')
             .context("Malformed systemctl property")?;
+        if matches!(key, "ExecStopPre" | "ExecStop" | "ExecStopPost") {
+            if !value.is_empty() {
+                nonempty_stop_hooks.insert(key);
+            }
+            continue;
+        }
         ensure!(
             properties.insert(key, value).is_none(),
             "Duplicate systemctl property {key}"
@@ -580,7 +642,7 @@ fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<U
                 _ => anyhow::bail!("Invalid service kill policy"),
             })
             .transpose()?,
-        // systemctl omits empty Exec* arrays even with --all.
+        // systemctl omits empty Exec* arrays and repeats properties for multiple commands.
         graceful_shutdown: ["KillSignal", "RestartKillSignal", "TimeoutStopFailureMode"]
             .iter()
             .all(|key| properties.contains_key(key))
@@ -592,7 +654,7 @@ fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<U
                         .iter()
                         .all(|key| {
                             (*key == "ExecStop" && verified_stop)
-                                || properties.get(key).is_none_or(|value| value.is_empty())
+                                || !nonempty_stop_hooks.contains(key)
                         })
             }),
     })
@@ -601,6 +663,36 @@ fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<U
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_stop_commands_preserve_shutdown_validation() {
+        let base = format!(
+            "Id={USER_UNIT}\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nKillSignal=15\nRestartKillSignal=15\nTimeoutStopFailureMode=terminate\n"
+        );
+        let wrapper = format!("{base}ExecStop=stop daemon\nExecStop=wait for wrapper\n");
+        assert_eq!(
+            parse_unit(&wrapper, USER_UNIT).unwrap().graceful_shutdown,
+            Some(false)
+        );
+        assert_eq!(
+            parse_unit_with_stop(&wrapper, USER_UNIT, true)
+                .unwrap()
+                .graceful_shutdown,
+            Some(true)
+        );
+        for hooks in [
+            "ExecStopPost=custom\nExecStopPost=\n",
+            "ExecStopPost=\nExecStopPost=custom\n",
+        ] {
+            assert_eq!(
+                parse_unit_with_stop(&(wrapper.clone() + hooks), USER_UNIT, true)
+                    .unwrap()
+                    .graceful_shutdown,
+                Some(false)
+            );
+        }
+        assert!(parse_unit(&(base + "MainPID=1\n"), USER_UNIT).is_err());
+    }
     use std::os::unix::process::ExitStatusExt;
 
     #[test]
@@ -726,6 +818,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_global_unit_is_known_only_with_a_valid_missing_result() {
+        let mut output = Output {
+            status: std::process::ExitStatus::from_raw(4 << 8),
+            stdout: "not-found\n".into(),
+            stderr: String::new(),
+        };
+        assert_eq!(parse_enablement(&output).unwrap(), "not-found");
+        output.stdout = "disabled\n".into();
+        assert!(parse_enablement(&output).is_err());
+        output.stdout = "not-found\n".into();
+        output.status = std::process::ExitStatus::from_raw(127 << 8);
+        assert!(parse_enablement(&output).is_err());
+    }
+
+    #[test]
     fn bridge_rejects_installation_wrappers_and_symlinks_without_execution() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let root = tempfile::tempdir().unwrap();
@@ -736,6 +843,37 @@ mod tests {
         fs::remove_file(&path).unwrap();
         symlink("/bin/true", &path).unwrap();
         assert!(existing_bridge(&path).is_err());
+    }
+
+    #[test]
+    fn distrobox_setup_guidance_tracks_missing_and_wrong_box_units() {
+        let mut report: ServiceReport = serde_json::from_value(serde_json::json!({
+            "context": {"kind": "distrobox", "name": "my box"},
+            "user": {"state": "known", "value": {
+                "name": USER_UNIT, "load_state": "not-found", "active_state": "inactive",
+                "sub_state": "dead", "unit_file_state": "disabled", "main_pid": 0, "fragment_path": ""
+            }},
+            "system": {"state": "unavailable", "reason": "fixture"},
+            "global_user": {"state": "known", "value": "disabled"}
+        })).unwrap();
+        let finding = findings(&report)
+            .into_iter()
+            .find(|finding| finding.code == "service.distrobox_recipe")
+            .unwrap();
+        assert!(finding.remediation.contains("--box 'my box'"));
+        for (name, expected) in [(None, true), (Some("other"), true), (Some("my box"), false)] {
+            let ServiceProbe::Known { value } = &mut report.user else {
+                unreachable!()
+            };
+            value.load_state = "loaded".into();
+            value.distrobox_name = name.map(str::to_owned);
+            assert_eq!(
+                findings(&report)
+                    .iter()
+                    .any(|finding| finding.code == "service.distrobox_recipe"),
+                expected
+            );
+        }
     }
 
     #[test]

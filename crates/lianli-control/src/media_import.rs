@@ -3,7 +3,7 @@ use anyhow::{ensure, Context, Result};
 use lianli_shared::config::LcdConfig;
 use lianli_shared::media_dependencies::{self, AssetDependency};
 use lianli_shared::template::LcdTemplate;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 struct SelectionSize(usize, usize);
 impl std::io::Write for SelectionSize {
@@ -37,6 +37,14 @@ pub struct PublishedSelection {
     pub import_id: String,
     pub lcds: Vec<LcdConfig>,
     pub templates: Vec<LcdTemplate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PublishedDestination>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PublishedDestination {
+    pub config_path: PathBuf,
+    pub state_directory: PathBuf,
 }
 
 impl ValidatedSelection {
@@ -139,11 +147,12 @@ impl ValidatedSelection {
             imports.0.sync_all()?;
             Ok(())
         })();
-        complete.context("Managed files were moved but completion could not be verified; retain the import and inspect storage before retrying")?;
+        complete.context("Managed files were moved but completion could not be verified. Retain the import and inspect storage before retrying")?;
         Ok(PublishedSelection {
             import_id: import_id.into(),
             lcds,
             templates,
+            destination: None,
         })
     }
 }

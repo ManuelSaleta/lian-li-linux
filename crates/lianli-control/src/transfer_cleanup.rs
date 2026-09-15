@@ -38,6 +38,9 @@ pub(crate) fn finish_as(
     prepared: &PreparedTransfer,
     operation: &ServiceOperationLock,
 ) -> Result<()> {
+    if let Some(execution) = &account.container {
+        execution.destination.check_config(&prepared.config_path)?;
+    }
     ensure!(
         account.uid == prepared.destination_uid,
         "Cleanup account differs from the prepared transfer"
@@ -71,7 +74,9 @@ pub fn serve() -> Result<()> {
         .take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= LIMIT, "Cleanup request exceeds 64 KiB");
-    finish(&serde_json::from_slice(&bytes)?)
+    let prepared: PreparedTransfer = serde_json::from_slice(&bytes)?;
+    crate::container_destination::verify_config(&prepared.config_path)?;
+    finish(&prepared)
 }
 
 fn read_json(path: &Path) -> Result<Option<serde_json::Value>> {

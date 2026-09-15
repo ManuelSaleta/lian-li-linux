@@ -17,6 +17,7 @@ pub struct Checked {
 }
 
 pub fn inspect(config: &Path, working: &Path, decode: bool) -> Result<Checked> {
+    crate::container_destination::verify_config(config)?;
     ensure!(
         unsafe { libc::geteuid() } != 0,
         "Validate saved settings under their unprivileged account"
@@ -31,8 +32,7 @@ pub fn inspect(config: &Path, working: &Path, decode: bool) -> Result<Checked> {
 
 pub fn check(account: &Account, destination: &Destination, decode: bool) -> Result<Checked> {
     ensure!(
-        account.uid == destination.uid
-            && account.group_fingerprint() == destination.groups_fingerprint,
+        account.matches_destination(destination),
         "Saved-state account differs from destination preflight"
     );
     let mut args = vec![

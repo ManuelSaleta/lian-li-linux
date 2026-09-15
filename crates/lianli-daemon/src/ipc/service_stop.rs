@@ -1,4 +1,4 @@
-use lianli_shared::daemon::{parse_service_invocation, DaemonInfo, DaemonMode};
+use lianli_shared::daemon::{parse_service_invocation, DaemonInfo};
 use lianli_shared::ipc::IpcResponse;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -32,10 +32,8 @@ pub(super) fn request(
     daemon_uid: u32,
     stop: impl FnOnce() -> io::Result<()>,
 ) -> IpcResponse {
-    if info.mode != DaemonMode::User || peer_uid != daemon_uid {
-        return IpcResponse::error(
-            "Only the daemon's own account may stop its user service over IPC",
-        );
+    if peer_uid != daemon_uid {
+        return IpcResponse::error("Only the daemon's own account may stop its service over IPC");
     }
     let invocation = match parse_service_invocation(invocation) {
         Ok(value) => value,
@@ -43,7 +41,7 @@ pub(super) fn request(
     };
     if info.service_invocation.as_deref() != Some(&invocation) {
         return IpcResponse::error(
-            "The daemon does not belong to this service invocation; it was not stopped",
+            "The daemon does not belong to this service invocation. It was not stopped",
         );
     }
     match stop() {
@@ -55,6 +53,7 @@ pub(super) fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lianli_shared::daemon::DaemonMode;
 
     const INVOCATION: &str = "abcdef0123456789abcdef0123456789";
 
@@ -74,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_matching_user_invocation_can_request_shutdown() {
+    fn only_the_matching_account_and_invocation_can_request_shutdown() {
         let mut daemon = info();
         for (invocation, uid) in [
             (INVOCATION, 1001),
@@ -90,10 +89,15 @@ mod tests {
         }
         daemon.mode = DaemonMode::System;
         assert!(matches!(
-            request(&daemon, INVOCATION, 1000, 1000, || panic!("system stop")),
+            request(&daemon, INVOCATION, 1001, 1000, || panic!(
+                "foreign account stop"
+            )),
             IpcResponse::Error { .. }
         ));
-        daemon.mode = DaemonMode::User;
+        assert!(matches!(
+            request(&daemon, INVOCATION, 1000, 1000, || Ok(())),
+            IpcResponse::Ok { .. }
+        ));
         daemon.service_invocation = None;
         assert!(matches!(
             request(&daemon, INVOCATION, 1000, 1000, || panic!("manual stop")),

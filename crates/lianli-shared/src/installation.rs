@@ -102,6 +102,13 @@ impl InstallationContext {
         }
     }
 
+    pub fn system_socket_path(&self) -> PathBuf {
+        match self {
+            Self::Distrobox { .. } => "/run/host/run/lianli/lianli-daemon.sock".into(),
+            _ => "/run/lianli/lianli-daemon.sock".into(),
+        }
+    }
+
     pub fn service_operation_lock_path(&self) -> Option<PathBuf> {
         match self {
             Self::Native => Some(SERVICE_OPERATION_LOCK_PATH.into()),
@@ -155,6 +162,14 @@ mod tests {
         assert_eq!(
             InstallationContext::Native.daemon_lock_path(),
             Some(DAEMON_LOCK_PATH.into())
+        );
+        assert_eq!(
+            context.system_socket_path(),
+            PathBuf::from("/run/host/run/lianli/lianli-daemon.sock")
+        );
+        assert_eq!(
+            InstallationContext::Native.system_socket_path(),
+            PathBuf::from("/run/lianli/lianli-daemon.sock")
         );
     }
 

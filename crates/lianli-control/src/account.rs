@@ -7,6 +7,8 @@ use std::process::Command;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Account {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) container: Option<crate::container_destination::Execution>,
     pub uid: u32,
     pub gid: u32,
     pub groups: Vec<u32>,
@@ -103,6 +105,7 @@ impl Account {
         groups.sort_unstable();
         groups.dedup();
         Ok(Self {
+            container: None,
             uid: entry.pw_uid,
             gid,
             groups,
@@ -112,7 +115,39 @@ impl Account {
     }
 
     pub fn control_command(&self, args: &[&OsStr]) -> Result<Command> {
+        if let Some(execution) = &self.container {
+            return execution.command(self, args);
+        }
         self.command("/proc/self/exe", args)
+    }
+
+    pub fn with_container(
+        mut self,
+        execution: crate::container_destination::Execution,
+    ) -> Result<Self> {
+        ensure!(
+            self.container.is_none() && self.uid == execution.destination.uid,
+            "Container execution requires its original host owner account"
+        );
+        execution.launch.validate()?;
+        execution.destination.validate()?;
+        ensure!(
+            execution.launch.name == execution.destination.name,
+            "Container destination belongs to another box"
+        );
+        self.container = Some(execution);
+        Ok(self)
+    }
+
+    pub(crate) fn matches_destination(
+        &self,
+        destination: &crate::destination::Destination,
+    ) -> bool {
+        self.uid == destination.uid
+            && match &self.container {
+                Some(execution) => execution.destination.matches(destination),
+                None => self.group_fingerprint() == destination.groups_fingerprint,
+            }
     }
 
     pub(crate) fn user_service_command(
@@ -150,6 +185,24 @@ impl Account {
     }
 
     pub(crate) fn command(&self, program: &str, args: &[&OsStr]) -> Result<Command> {
+        self.command_with_privilege_policy(program, args, true)
+    }
+
+    pub(crate) fn box_command(&self, args: &[&OsStr]) -> Result<Command> {
+        ensure!(
+            args.first() == Some(&OsStr::new("box-worker")),
+            "Invalid container launcher command"
+        );
+        // Rootless namespace setup needs newuidmap. The guest restricts privileges before receiving descriptors.
+        self.command_with_privilege_policy("/proc/self/exe", args, false)
+    }
+
+    fn command_with_privilege_policy(
+        &self,
+        program: &str,
+        args: &[&OsStr],
+        no_new_privileges: bool,
+    ) -> Result<Command> {
         ensure!(self.uid != 0, "Refusing to run an account helper as root");
         let root = unsafe { libc::geteuid() } == 0;
         if !root {
@@ -187,7 +240,7 @@ impl Account {
                 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                if no_new_privileges && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -308,6 +361,7 @@ mod tests {
             uid,
             gid,
             groups,
+            container: None,
             name: "fixture".into(),
             home: "/fixture".into(),
         };
@@ -350,6 +404,7 @@ mod tests {
             uid,
             gid,
             groups: groups.clone(),
+            container: None,
             name: "fixture".into(),
             home: "/fixture".into(),
         };
@@ -377,6 +432,26 @@ mod tests {
         actual.sort_unstable();
         actual.dedup();
         assert_eq!(actual, groups);
+        let launcher = account
+            .command_with_privilege_policy(
+                "/usr/bin/cat",
+                &[OsStr::new("/proc/self/status")],
+                false,
+            )
+            .unwrap();
+        let result = crate::command::run(launcher, std::time::Duration::from_secs(3)).unwrap();
+        assert!(result.status.success());
+        let launcher_status: std::collections::HashMap<_, _> = result
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .collect();
+        assert_eq!(launcher_status["Uid"], status["Uid"]);
+        assert_eq!(launcher_status["Gid"], status["Gid"]);
+        assert_eq!(launcher_status["Groups"], status["Groups"]);
+        let inherited = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        assert_eq!(launcher_status["NoNewPrivs"].trim(), inherited.to_string());
+        assert!(account.box_command(&[OsStr::new("inspect-state")]).is_err());
         let command = account.command("/usr/bin/env", &[]).unwrap();
         let expected = command.get_envs().count();
         let result = crate::command::run(command, std::time::Duration::from_secs(3)).unwrap();
@@ -391,6 +466,7 @@ mod tests {
         let gid = unsafe { libc::getegid() };
         let account = Account {
             uid: if uid == 0 { 65534 } else { uid },
+            container: None,
             gid,
             groups: current_groups(gid).unwrap(),
             name: "fixture".into(),

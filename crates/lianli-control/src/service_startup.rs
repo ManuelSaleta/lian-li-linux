@@ -19,25 +19,50 @@ pub fn inspect() -> Result<Policy> {
             && unsafe { libc::geteuid() } != 0,
         "Inspect native startup selection under the caller account"
     );
-    for scope in [ServiceScope::User, ServiceScope::System] {
-        crate::destination::verify_service_recipe(scope)?;
+    if let Some(deployment) = crate::container_deployment::load()? {
+        deployment.verify_owner(&Account::user(unsafe { libc::geteuid() })?)?;
+        deployment.inspect_installed()?;
+    } else {
+        for scope in [ServiceScope::User, ServiceScope::System] {
+            crate::destination::verify_service_recipe(scope)?;
+        }
     }
     Policy::from_report(&crate::services::inspect(&InstallationContext::Native))
 }
 
 impl Policy {
     pub fn from_report(report: &ServiceReport) -> Result<Self> {
+        Self::read_report(report, false)
+    }
+
+    pub(crate) fn for_setup(report: &ServiceReport) -> Result<Self> {
+        Self::read_report(report, true)
+    }
+
+    fn read_report(report: &ServiceReport, allow_absent_units: bool) -> Result<Self> {
         ensure!(
             report.context == InstallationContext::Native,
             "Startup selection requires native services"
         );
         match &report.global_user {
-            ServiceProbe::Known { value } if value == "disabled" => {}
+            ServiceProbe::Known { value } if matches!(value.as_str(), "disabled" | "not-found") => {}
             _ => anyhow::bail!("Disable global user-service enablement and verify it before switching. Other users' startup settings will not be changed"),
         }
+        let startup = |probe: &ServiceProbe<lianli_shared::services::UnitState>| {
+            if let ServiceProbe::Known { value } = probe {
+                if allow_absent_units && value.load_state == "not-found" {
+                    ensure!(
+                        crate::native_switch::idle(value),
+                        "Stop the service whose unit is missing before setup"
+                    );
+                    return Ok(Startup::Disabled);
+                }
+            }
+            read_startup(probe)
+        };
         Ok(Self {
-            user: read_startup(&report.user)?,
-            system: read_startup(&report.system)?,
+            user: startup(&report.user)?,
+            system: startup(&report.system)?,
         })
     }
 
@@ -111,7 +136,10 @@ pub(crate) fn restore_system(
         operation.verify()?;
         hardware.verify()?;
         crate::service_selection::require_paused(operation_id)?;
-        crate::destination::verify_service_recipe(ServiceScope::System)
+        match crate::container_deployment::load()? {
+            Some(deployment) => deployment.inspect_system(),
+            None => crate::destination::verify_service_recipe(ServiceScope::System),
+        }
     };
     let inspect = || -> Result<Startup> {
         verify()?;
@@ -588,7 +616,10 @@ mod tests {
             changed["user"] = unit(ServiceScope::User, startup);
             assert!(read(changed).is_err());
         }
-        for global in ["enabled", "enabled-runtime", "not-found"] {
+        let mut no_global_unit = source.clone();
+        no_global_unit["global_user"]["value"] = "not-found".into();
+        assert_eq!(read(no_global_unit).unwrap(), read(source.clone()).unwrap());
+        for global in ["enabled", "enabled-runtime"] {
             let mut changed = source.clone();
             changed["global_user"]["value"] = global.into();
             assert!(read(changed).is_err());
@@ -599,6 +630,47 @@ mod tests {
         let mut changed = source;
         changed["user"] = serde_json::json!({"state":"unavailable", "reason":"no manager"});
         assert!(read(changed).is_err());
+    }
+
+    #[test]
+    fn setup_accepts_missing_inactive_units_without_relaxing_switch_preflight() {
+        let unit = |scope: ServiceScope| {
+            serde_json::json!({"state": "known", "value": {
+                "name": scope.unit(), "load_state": "not-found", "active_state": "inactive",
+                "sub_state": "dead", "unit_file_state": "", "main_pid": 0, "fragment_path": ""
+            }})
+        };
+        let source = serde_json::json!({
+            "context": InstallationContext::Native,
+            "user": unit(ServiceScope::User), "system": unit(ServiceScope::System),
+            "global_user": {"state": "known", "value": "not-found"}
+        });
+        let report = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(
+            Policy::for_setup(&report).unwrap(),
+            Policy {
+                user: Startup::Disabled,
+                system: Startup::Disabled
+            }
+        );
+        assert!(Policy::from_report(&report).is_err());
+        for scope in ["user", "system"] {
+            for (field, value) in [
+                ("active_state", serde_json::json!("active")),
+                ("active_state", serde_json::json!("activating")),
+                ("main_pid", serde_json::json!(42)),
+            ] {
+                let mut changed = source.clone();
+                changed[scope]["value"][field] = value;
+                assert!(Policy::for_setup(&serde_json::from_value(changed).unwrap()).is_err());
+            }
+            let mut changed = source.clone();
+            changed[scope] = serde_json::json!({"state": "unavailable", "reason": "no manager"});
+            assert!(Policy::for_setup(&serde_json::from_value(changed).unwrap()).is_err());
+        }
+        let mut changed = source;
+        changed["global_user"]["value"] = "enabled".into();
+        assert!(Policy::for_setup(&serde_json::from_value(changed).unwrap()).is_err());
     }
 
     #[test]

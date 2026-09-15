@@ -22,7 +22,7 @@ fn connected(expected: &str) -> Result<DaemonInfo> {
     )?;
     ensure!(
         info.instance_id == expected,
-        "The connected daemon changed; review the selection before copying"
+        "The connected daemon changed. Review the selection before copying"
     );
     Ok(info)
 }
@@ -52,10 +52,10 @@ pub fn start(instance: &str, lcds: Vec<LcdConfig>, templates: Vec<LcdTemplate>) 
         DaemonMode::User => ServiceScope::User,
         DaemonMode::System => ServiceScope::System,
         DaemonMode::Unknown => {
-            anyhow::bail!("The daemon mode is unknown; reconnect before importing")
+            anyhow::bail!("The daemon mode is unknown. Reconnect before importing")
         }
     };
-    lianli_control::media_import_worker::start(scope, lcds, templates, &info.config_path)
+    lianli_control::media_import_worker::start(scope, lcds, templates, &info.config_path, instance)
 }
 
 pub fn status() -> Result<Option<lianli_control::media_import_job::Status>> {
@@ -70,7 +70,7 @@ pub fn result(
     let status = status()?.ok_or_else(|| anyhow::anyhow!("No import result is recorded"))?;
     ensure!(
         !status.active && status.id == id,
-        "This import is active or was replaced; check progress again"
+        "This import is active or was replaced. Check progress again"
     );
     let result = status
         .result

@@ -247,6 +247,18 @@ fn classify(
             }
         }
     }
+    if caller_uid == 0 && matches!(user, ServiceProbe::Unavailable { .. }) {
+        if let ServiceProbe::Known { value } = system {
+            if value.distrobox_name.is_some()
+                && value.invocation_id.is_some()
+                && value.active_state == "active"
+                && value.sub_state == "running"
+            {
+                // services::inspect verifies the boxed daemon's IPC invocation before assigning its scope.
+                return Ok(None);
+            }
+        }
+    }
     let user_matches = belongs_to(process, user)?;
     ensure!(
         !user_matches || !system_matches,
@@ -367,6 +379,29 @@ mod tests {
         ] {
             assert!(parse_cgroup(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn root_defers_boxed_ownership_to_ipc_without_a_user_bus() {
+        let user = ServiceProbe::Unavailable {
+            reason: "no root user bus".into(),
+        };
+        let mut system = unit("/system.slice/lianli-daemon-system.service");
+        let process = OwnerProcess {
+            pid: 200,
+            effective_uid: 1000,
+            start_time_ticks: "123".into(),
+            control_group: "/user.slice/container.scope".into(),
+            service: None,
+        };
+        assert!(classify(&process, &user, &system, 0).is_err());
+        let ServiceProbe::Known { value } = &mut system else {
+            unreachable!()
+        };
+        value.distrobox_name = Some("box".into());
+        value.invocation_id = Some("fixture".into());
+        assert_eq!(classify(&process, &user, &system, 0).unwrap(), None);
+        assert!(classify(&process, &user, &system, 1000).is_err());
     }
 
     #[test]

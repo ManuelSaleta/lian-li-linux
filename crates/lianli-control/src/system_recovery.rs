@@ -37,7 +37,10 @@ fn validate_running(report: &ServiceReport, record: &Record, info: &DaemonInfo) 
 
 fn validate_source(report: &ServiceReport, record: &Record, info: &DaemonInfo) -> Result<()> {
     ensure!(
-        known(&report.global_user)? == "disabled",
+        matches!(
+            known(&report.global_user)?.as_str(),
+            "disabled" | "not-found"
+        ),
         "Global user startup changed. Preserve its configuration and recheck recovery"
     );
     let target = unit(report, ServiceScope::System)?;
@@ -52,7 +55,18 @@ fn validate_source(report: &ServiceReport, record: &Record, info: &DaemonInfo) -
         target.active_state == "active"
             && target.sub_state == "running"
             && owner.owner_pid == Some(process.pid)
-            && target.main_pid == process.pid
+            && match &record.intent.container {
+                Some(route) =>
+                    target.main_pid != 0
+                        && target.distrobox_name.as_deref() == Some(route.launch.name.as_str())
+                        && target.invocation_id.is_some()
+                        && target.invocation_id == info.service_invocation
+                        && info
+                            .capabilities
+                            .iter()
+                            .any(|value| value == lianli_shared::daemon::SERVICE_STOP),
+                None => target.main_pid == process.pid,
+            }
             && process.service == Some(ServiceScope::System)
             && process.effective_uid == record.intent.source.uid,
         "The system hardware owner differs from the recorded source"
@@ -207,7 +221,10 @@ pub(crate) fn resume(
         if idle(target) && !submitted {
             ensure!(owner.owner_pid.is_none(), "Another daemon still owns the hardware. It will not be stopped by offline recovery");
             ensure!(
-                known(&report.global_user)? == "disabled",
+                matches!(
+                    known(&report.global_user)?.as_str(),
+                    "disabled" | "not-found"
+                ),
                 "Global user startup must remain disabled during recovery"
             );
             journal.pause_launches()?;
@@ -276,6 +293,27 @@ mod tests {
     }
 
     #[test]
+    fn recovery_accepts_absent_global_units_and_rejects_global_startup() {
+        let (mut report, record, info) = fixture();
+        for value in [
+            "disabled",
+            "not-found",
+            "enabled",
+            "enabled-runtime",
+            "unknown",
+        ] {
+            report.global_user = lianli_shared::services::ServiceProbe::Known {
+                value: value.into(),
+            };
+            assert_eq!(
+                validate_running(&report, &record, &info).is_ok(),
+                matches!(value, "disabled" | "not-found"),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn a_paused_gate_does_not_hide_the_live_sources_identity() {
         let (mut report, record, mut info) = fixture();
         report.selection = Some(lianli_shared::services::ServiceProbe::Unavailable {
@@ -284,6 +322,46 @@ mod tests {
         assert!(validate_running(&report, &record, &info).is_err());
         validate_source(&report, &record, &info).unwrap();
         info.pid += 1;
+        assert!(validate_source(&report, &record, &info).is_err());
+    }
+
+    #[test]
+    fn container_system_recovery_requires_the_recorded_box_and_current_invocation() {
+        let (mut report, mut record, mut info) = fixture();
+        record.intent.destination.uid = record.intent.source.uid;
+        record.intent.source_working_directory = Some("/var/lib/lianli".into());
+        record.intent.destination_working_directory = Some("/home/fixture".into());
+        record.intent.container = Some(crate::container_destination::Route {
+            launch: crate::container_destination::Launch {
+                name: "fixture-box".into(),
+                host_enter: "/usr/bin/distrobox-enter".into(),
+                binaries: "/usr/bin".into(),
+            },
+            user_config: record.intent.destination_config.clone(),
+            system_config: record.intent.source_config.clone(),
+            user_working_directory: "/home/fixture".into(),
+            system_working_directory: "/var/lib/lianli".into(),
+        });
+        let lianli_shared::services::ServiceProbe::Known { value } = &mut report.system else {
+            unreachable!()
+        };
+        value.main_pid = 999;
+        value.distrobox_name = Some("fixture-box".into());
+        value.invocation_id = Some("abcdef0123456789abcdef0123456789".into());
+        info.service_invocation = value.invocation_id.clone();
+        info.capabilities
+            .push(lianli_shared::daemon::SERVICE_STOP.into());
+        validate_source(&report, &record, &info).unwrap();
+        let mut native = record.clone();
+        native.intent.container = None;
+        assert!(validate_source(&report, &native, &info).is_err());
+        info.service_invocation = Some("00000000000000000000000000000001".into());
+        assert!(validate_source(&report, &record, &info).is_err());
+        let lianli_shared::services::ServiceProbe::Known { value } = &mut report.system else {
+            unreachable!()
+        };
+        info.service_invocation = value.invocation_id.clone();
+        value.distrobox_name = Some("another-box".into());
         assert!(validate_source(&report, &record, &info).is_err());
     }
 

@@ -122,6 +122,57 @@ pub fn inspect(context: &InstallationContext) -> Result<Option<ServiceSelection>
     Ok(record.and_then(|record| record.selection))
 }
 
+pub fn system_peer_uid(context: &InstallationContext) -> Result<u32> {
+    let selection = inspect(context)?;
+    let local_uid = unsafe { libc::geteuid() };
+    let host_uid = if matches!(context, InstallationContext::Distrobox { .. }) {
+        let output = Route::detect(context)?.output("/usr/bin/id", &["--user"])?;
+        ensure!(
+            output.status.success(),
+            "Cannot verify the box owner's host UID: {}",
+            output.stderr.trim()
+        );
+        Some(
+            output
+                .stdout
+                .trim()
+                .parse()
+                .context("Invalid host UID response")?,
+        )
+    } else {
+        None
+    };
+    match selected_system_peer(context, selection, local_uid, host_uid)? {
+        Some(uid) => Ok(uid),
+        None => Ok(crate::account::Account::system()?.uid),
+    }
+}
+
+fn selected_system_peer(
+    context: &InstallationContext,
+    selection: Option<ServiceSelection>,
+    local_uid: u32,
+    host_uid: Option<u32>,
+) -> Result<Option<u32>> {
+    ensure!(
+        !matches!(context, InstallationContext::UnsupportedContainer),
+        "System service identity is unavailable in this container"
+    );
+    if let Some(selection) = selection {
+        ensure!(
+            selection.scope == ServiceScope::System && selection.uid != 0,
+            "The host has not selected an unprivileged system daemon"
+        );
+    }
+    if matches!(context, InstallationContext::Distrobox { .. }) {
+        let selected = selection
+            .context("Select the Distrobox system service before registering desktop capture")?;
+        ensure!(host_uid == Some(local_uid) && selected.uid == local_uid,
+            "Distrobox system capture requires the selected box owner's host and container UID to match");
+    }
+    Ok(selection.map(|value| value.uid))
+}
+
 fn inspect_record(context: &InstallationContext) -> Result<Option<Record>> {
     let (path, root_owned) = match context {
         InstallationContext::Native => (PathBuf::from(DIRECTORY), true),
@@ -502,6 +553,61 @@ fn verify_host_metadata(text: &str, local: &fs::Metadata, kind: u32) -> Result<(
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn system_capture_uses_the_host_selection_without_guessing_container_uid_mapping() {
+        let native = InstallationContext::Native;
+        let boxed = InstallationContext::Distrobox {
+            name: "fixture".into(),
+        };
+        let selected = Some(ServiceSelection {
+            scope: ServiceScope::System,
+            uid: 1000,
+        });
+        assert_eq!(
+            selected_system_peer(&native, None, 1000, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            selected_system_peer(&native, selected, 2000, None).unwrap(),
+            Some(1000)
+        );
+        assert_eq!(
+            selected_system_peer(&boxed, selected, 1000, Some(1000)).unwrap(),
+            Some(1000)
+        );
+        for (selection, local, host) in [
+            (None, 1000, Some(1000)),
+            (selected, 1000, Some(2000)),
+            (selected, 2000, Some(2000)),
+            (selected, 1000, None),
+            (
+                Some(ServiceSelection {
+                    scope: ServiceScope::User,
+                    uid: 1000,
+                }),
+                1000,
+                Some(1000),
+            ),
+            (
+                Some(ServiceSelection {
+                    scope: ServiceScope::System,
+                    uid: 0,
+                }),
+                0,
+                Some(0),
+            ),
+        ] {
+            assert!(selected_system_peer(&boxed, selection, local, host).is_err());
+        }
+        assert!(selected_system_peer(
+            &InstallationContext::UnsupportedContainer,
+            selected,
+            1000,
+            Some(1000)
+        )
+        .is_err());
+    }
 
     fn read_fixture(directory: &File) -> Result<Option<Record>> {
         read_owned_record(directory, unsafe { libc::geteuid() })

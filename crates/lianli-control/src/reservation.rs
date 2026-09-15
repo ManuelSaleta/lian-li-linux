@@ -205,6 +205,9 @@ pub(crate) fn operation_identity(
 }
 
 impl ServiceOperationLock {
+    pub(crate) fn identity(&self) -> &FileIdentity {
+        &self.0.identity
+    }
     pub fn acquire(context: &InstallationContext) -> Result<Self> {
         let path = context
             .service_operation_lock_path()
@@ -247,41 +250,70 @@ pub(crate) struct InheritedReservations {
     hardware: File,
     paths: [PathBuf; 2],
     require_root: bool,
+    route: Route,
 }
 
 impl InheritedReservations {
     pub fn new(operation: File, hardware: File) -> Result<Self> {
-        Self::at(
+        let context = InstallationContext::detect();
+        Self::at_with_route(
             operation,
             hardware,
-            [SERVICE_OPERATION_LOCK_PATH.into(), DAEMON_LOCK_PATH.into()],
-            true,
+            [
+                context
+                    .service_operation_lock_path()
+                    .context("Host service operation lock is unavailable")?,
+                context
+                    .daemon_lock_path()
+                    .context("Shared host lock is unavailable")?,
+            ],
+            matches!(context, InstallationContext::Native),
+            Route::detect(&context)?,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn at(
         operation: File,
         hardware: File,
         paths: [PathBuf; 2],
         require_root: bool,
     ) -> Result<Self> {
+        Self::at_with_route(operation, hardware, paths, require_root, Route::Native)
+    }
+
+    fn at_with_route(
+        operation: File,
+        hardware: File,
+        paths: [PathBuf; 2],
+        require_root: bool,
+        route: Route,
+    ) -> Result<Self> {
         let locks = Self {
             operation,
             hardware,
             paths,
             require_root,
+            route,
         };
         locks.verify()?;
         Ok(locks)
     }
 
     pub fn verify(&self) -> Result<()> {
-        for (file, path) in [&self.operation, &self.hardware]
+        for ((file, path), host_path) in [&self.operation, &self.hardware]
             .into_iter()
             .zip(&self.paths)
+            .zip([SERVICE_OPERATION_LOCK_PATH, DAEMON_LOCK_PATH])
         {
             let metadata = file.metadata()?;
             let expected = file_identity(path, self.require_root)?;
+            if matches!(self.route, Route::Host { .. }) {
+                ensure!(
+                    host_identity_at(&self.route, host_path)? == expected,
+                    "Inherited publication reservation no longer matches the host namespace"
+                );
+            }
             ensure!(
                 metadata.is_file()
                     && (!self.require_root || metadata.uid() == 0)

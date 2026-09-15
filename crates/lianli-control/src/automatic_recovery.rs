@@ -36,7 +36,12 @@ pub fn run() -> Result<String> {
 
 pub fn trigger() -> Result<()> {
     if InstallationContext::detect() != InstallationContext::Native
-        || !Path::new("/usr/lib/systemd/system/lianli-control-recovery.service").is_file()
+        || ![
+            "/etc/systemd/system/lianli-control-recovery.service",
+            "/usr/lib/systemd/system/lianli-control-recovery.service",
+        ]
+        .iter()
+        .any(|path| Path::new(path).is_file())
     {
         return Ok(());
     }

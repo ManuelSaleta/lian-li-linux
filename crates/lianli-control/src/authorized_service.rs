@@ -40,6 +40,14 @@ pub fn execute(
     progress: impl FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     let mut backend = Authorized::new(caller, operation)?;
+    if request.scope == ServiceScope::System
+        && request.action != lianli_shared::services::ServiceAction::Stop
+    {
+        if let Some(deployment) = crate::container_deployment::load()? {
+            deployment.verify_owner(caller)?;
+            crate::lingering::require(&Route::Native, caller.uid)?;
+        }
+    }
     crate::service_operation::run(&mut backend, request, progress)
 }
 

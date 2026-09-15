@@ -260,14 +260,12 @@ fn launch_arguments(
         InstallationContext::Native => {}
         InstallationContext::Distrobox { name } => {
             ensure!(
-                request.scope == lianli_shared::services::ServiceScope::User,
-                "Distrobox service jobs support host user mode only"
-            );
-            ensure!(
                 !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control),
                 "Invalid Distrobox name"
             );
             args.extend([
+                "/usr/bin/env".into(),
+                "--unset=INVOCATION_ID".into(),
                 "/usr/bin/distrobox-enter".into(),
                 "--name".into(),
                 name.clone(),
@@ -499,8 +497,10 @@ mod tests {
         };
         let container = launch_arguments(&context, request(), helper, ID).unwrap();
         assert_eq!(
-            &container[command..command + 4],
+            &container[command..command + 6],
             [
+                "/usr/bin/env",
+                "--unset=INVOCATION_ID",
                 "/usr/bin/distrobox-enter",
                 "--name",
                 "box with $$literal",
@@ -508,19 +508,20 @@ mod tests {
             ]
         );
         assert_eq!(
-            container[command + 4],
+            container[command + 6],
             "/a folder/$$literal %value/lianli-control"
         );
-        assert!(launch_arguments(
+        let system = launch_arguments(
             &context,
             ServiceActionRequest {
                 scope: ServiceScope::System,
                 ..request()
             },
             helper,
-            ID
+            ID,
         )
-        .is_err());
+        .unwrap();
+        assert!(system.windows(2).any(|pair| pair == ["--scope", "system"]));
         assert!(launch_arguments(
             &InstallationContext::UnsupportedContainer,
             request(),

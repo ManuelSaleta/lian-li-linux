@@ -25,6 +25,8 @@ pub struct Destination {
     pub gid: u32,
     pub groups_fingerprint: String,
     pub mount_namespace: lianli_shared::daemon::FileIdentity,
+    #[serde(default)]
+    pub state_directory: Option<lianli_shared::daemon::FileIdentity>,
     pub config_path: PathBuf,
     pub working_directory: PathBuf,
     pub state: Option<StateSummary>,
@@ -57,6 +59,7 @@ pub(crate) fn preflight_recovery(account: &Account, config: &Path) -> Result<()>
 }
 
 pub fn check_recovery_access(config: &Path) -> Result<()> {
+    crate::container_destination::verify_config(config)?;
     ensure!(
         unsafe { libc::geteuid() } != 0 && config.is_absolute(),
         "Check recovery access under its unprivileged destination account"
@@ -76,6 +79,35 @@ fn preflight_with_setup(
     scope: ServiceScope,
     prepare_directory: bool,
 ) -> Result<Destination> {
+    if let Some(execution) = &account.container {
+        ensure!(
+            execution.destination.scope == scope,
+            "Container destination has another service mode"
+        );
+        let mut args = vec![
+            OsStr::new("inspect-destination"),
+            OsStr::new("--scope"),
+            OsStr::new(match scope {
+                ServiceScope::User => "user",
+                ServiceScope::System => "system",
+            }),
+        ];
+        if prepare_directory {
+            args.push(OsStr::new("--prepare-directory"));
+        }
+        let output = crate::command::run(account.control_command(&args)?, Duration::from_secs(60))?;
+        ensure!(
+            output.status.success(),
+            "Container destination preflight failed: {}",
+            output.stderr.trim()
+        );
+        let destination: Destination = serde_json::from_str(&output.stdout)?;
+        ensure!(
+            account.matches_destination(&destination) && destination.assets.uid == account.uid,
+            "Container destination changed after discovery"
+        );
+        return Ok(destination);
+    }
     ensure!(
         std::env::current_exe()?.file_name() == Some(OsStr::new("lianli-control")),
         "Run destination preflight through the installed standalone control helper"
@@ -131,6 +163,20 @@ fn preflight_with_setup(
 }
 
 pub fn inspect(scope: ServiceScope, prepare_directory: bool) -> Result<Destination> {
+    if let Some(destination) = crate::container_destination::current() {
+        ensure!(
+            destination.scope == scope,
+            "Container worker was prepared for another service mode"
+        );
+        let account = destination.verify()?;
+        return inspect_container_files(
+            scope,
+            &account,
+            &destination.config_path,
+            &destination.working_directory,
+            prepare_directory,
+        );
+    }
     let uid = unsafe { libc::geteuid() };
     let account = match scope {
         ServiceScope::User => Account::user(uid)?,
@@ -155,6 +201,35 @@ pub fn inspect(scope: ServiceScope, prepare_directory: bool) -> Result<Destinati
         )?;
     }
     inspect_files(scope, &account, config_path, working_directory)
+}
+
+pub fn inspect_container(
+    name: &str,
+    scope: ServiceScope,
+    config: &Path,
+    working: &Path,
+    prepare: bool,
+) -> Result<Destination> {
+    let account = crate::container_destination::current_account(name)?;
+    inspect_container_files(scope, &account, config, working, prepare)
+}
+
+fn inspect_container_files(
+    scope: ServiceScope,
+    account: &Account,
+    config: &Path,
+    working: &Path,
+    prepare: bool,
+) -> Result<Destination> {
+    crate::container_destination::validate_config(config)?;
+    crate::container_destination::absolute(working)?;
+    if prepare {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(config.parent().context("Configuration has no directory")?)?;
+    }
+    inspect_files(scope, account, config.into(), working.into())
 }
 
 pub(crate) fn verify_service_recipe(scope: ServiceScope) -> Result<()> {
@@ -375,6 +450,10 @@ fn inspect_files(
         gid: account.gid,
         groups_fingerprint: account.group_fingerprint(),
         mount_namespace: namespace("self")?,
+        state_directory: Some(lianli_shared::daemon::FileIdentity {
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+        }),
         config_path,
         working_directory,
         assets,
@@ -743,6 +822,7 @@ mod tests {
     fn stale_manager_credentials_cannot_validate_destination_access() {
         let account = Account {
             uid: 1000,
+            container: None,
             gid: 100,
             groups: vec![100, 200],
             name: "fixture".into(),
@@ -766,6 +846,7 @@ mod tests {
     fn account(home: &Path) -> Account {
         Account {
             uid: unsafe { libc::geteuid() },
+            container: None,
             gid: unsafe { libc::getegid() },
             groups: vec![],
             name: "fixture".into(),

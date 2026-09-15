@@ -11,7 +11,15 @@ use tracing::debug;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const SYSTEM_SOCKET: &str = "/run/lianli/lianli-daemon.sock";
+fn system_socket() -> &'static str {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        lianli_shared::installation::InstallationContext::detect()
+            .system_socket_path()
+            .to_string_lossy()
+            .into_owned()
+    })
+}
 
 /// Last socket that accepted a connection
 static ACTIVE_SOCKET: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -34,7 +42,7 @@ fn candidate_paths() -> Vec<String> {
         .clone()
         .into_iter()
         .chain(std::iter::once(user_socket()))
-        .chain(std::iter::once(SYSTEM_SOCKET.to_string()))
+        .chain(std::iter::once(system_socket().to_string()))
     {
         if seen.insert(p.clone()) {
             v.push(p);
@@ -86,7 +94,7 @@ fn send_raw(request: IpcRequest, expected: Option<&str>) -> Result<IpcResponse, 
             }
             Err(e) => {
                 *active_lock().lock().unwrap() = None;
-                return Err(format!("Daemon response failed; the request was not retried because it may have been applied: {e}"));
+                return Err(format!("Daemon response failed. The request was not retried because it may have been applied: {e}"));
             }
         }
     }
@@ -117,7 +125,7 @@ fn prepare_request_for(
     let info: DaemonInfo = serde_json::from_value(response_data(read_info()?)?)
         .map_err(|error| format!("Cannot verify daemon compatibility: {error}"))?;
     if expected.is_some_and(|expected| expected != info.instance_id) {
-        return Err("The daemon changed; review copied settings before saving".into());
+        return Err("The daemon changed. Review copied settings before saving".into());
     }
     if request.is_read_only() {
         return Ok(request);

@@ -49,7 +49,7 @@ pub fn status() -> ServiceOperationStatus {
 
 fn observed_status() -> anyhow::Result<Option<ServiceOperationStatus>> {
     let action = lianli_control::operation_job::read()?;
-    let change = if InstallationContext::detect() == InstallationContext::Native {
+    let change = if InstallationContext::detect() != InstallationContext::UnsupportedContainer {
         lianli_control::switch_job::read()?
     } else {
         None
@@ -146,6 +146,21 @@ impl Operation {
                 );
             }
             Ok(record.status)
+        })
+    }
+
+    pub fn run_setup(
+        self,
+        deployment: lianli_control::container_deployment::Deployment,
+    ) -> Result<(), String> {
+        self.submit(|| {
+            lianli_control::container_bootstrap::install(&deployment)
+                .map_err(|error| format!("{error:#}"))?;
+            Ok(ServiceOperationStatus {
+                active: false,
+                success: Some(true),
+                message: "Host support installed. Choose which service mode to start.".into(),
+            })
         })
     }
 

@@ -136,7 +136,7 @@ impl Job {
             Ok(result) if result.import_id == self.id => status.result = Some(result),
             Ok(_) => {
                 status.error = Some(
-                    "Import helper returned a different identity; inspect storage before retrying"
+                    "Import helper returned a different identity. Inspect storage before retrying"
                         .into(),
                 )
             }
@@ -203,7 +203,7 @@ pub fn read(path: &Path) -> Result<Option<Status>> {
     if inactive {
         if status.active {
             status.active = false;
-            status.error = Some("Import worker stopped without a verified result. Files may have been published; inspect storage before retrying.".into());
+            status.error = Some("Import worker stopped. Files may have been copied. Inspect storage before retrying.".into());
         }
     } else {
         status.active = true;
@@ -234,7 +234,10 @@ mod tests {
         drop(job);
         let stopped = read(&path).unwrap().unwrap();
         assert!(!stopped.active && stopped.result.is_none());
-        assert!(stopped.error.unwrap().contains("without a verified result"));
+        assert!(stopped
+            .error
+            .unwrap()
+            .contains("Files may have been copied"));
         let job = Job::begin(&path, ID).unwrap();
         job.finish(Err(anyhow::anyhow!("x".repeat(4096)))).unwrap();
         assert_eq!(read(&path).unwrap().unwrap().error.unwrap().len(), 2048);
@@ -250,6 +253,7 @@ mod tests {
                 import_id: ID.into(),
                 lcds: vec![],
                 templates: vec![],
+                destination: None,
             }))
             .unwrap();
         let completed = read(&path).unwrap().unwrap();

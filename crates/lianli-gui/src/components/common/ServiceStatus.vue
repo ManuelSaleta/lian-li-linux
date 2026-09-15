@@ -4,10 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useDialog } from "naive-ui";
 import { useConfigStore } from "@/stores/config";
-import type { ServiceAction, ServiceChangeRequest, ServiceOperationStatus, ServiceScope } from "@/types/installation";
+import type { ContainerDeployment, ServiceAction, ServiceChangeRequest, ServiceOperationStatus, ServiceScope } from "@/types/installation";
 import { useInstallationStore } from "@/stores/installation";
 import { useDaemonStore } from "@/stores/daemon";
-import { canSetUpServices } from "@/utils/serviceSetup";
+import { canSetUpServices, canSwitchServices } from "@/utils/serviceSetup";
 
 defineProps<{ setupOnly?: boolean }>();
 
@@ -18,6 +18,12 @@ const dialog = useDialog();
 const operation = ref<ServiceOperationStatus>({ active: false, message: "", success: null });
 const submitting = ref(false);
 const submissionError = ref("");
+const setupOpen = ref(false);
+const setupProposal = ref<ContainerDeployment | null>(null);
+const lastUserConfig = ref<string | null>(null);
+watch(() => daemon.info, (info) => {
+  if (info?.mode === "user") lastUserConfig.value = info.config_path;
+}, { immediate: true });
 const destination = ref<ServiceScope | null>(null);
 const settingsChoice = ref(daemon.connected ? "carry" : "destination");
 const modeOptions = [
@@ -25,6 +31,7 @@ const modeOptions = [
   { label: "System (at boot)", value: "system" },
 ];
 const busy = computed(() => submitting.value || operation.value.active);
+const canSwitch = computed(() => canSwitchServices(report.value));
 let unlisten: UnlistenFn | undefined;
 let disposed = false;
 let progressEvents = 0;
@@ -35,6 +42,29 @@ async function completed() {
   await daemon.refresh();
   if (daemon.connected && !config.dirty) await config.load();
   await installation.recheck();
+}
+
+async function prepareSetup() {
+  submitting.value = true;
+  submissionError.value = "";
+  try {
+    setupProposal.value = await invoke<ContainerDeployment>("container_setup_proposal", { userConfig: lastUserConfig.value });
+    setupOpen.value = true;
+  } catch (error) { submissionError.value = String(error); }
+  finally { submitting.value = false; }
+}
+
+async function installSupport() {
+  if (!setupProposal.value) return;
+  submitting.value = true;
+  submissionError.value = "";
+  const before = progressEvents;
+  try {
+    await invoke<void>("container_setup", { deployment: setupProposal.value });
+    setupOpen.value = false;
+    if (before === progressEvents) await completed();
+  } catch (error) { submissionError.value = String(error); }
+  finally { submitting.value = false; }
 }
 
 async function refreshOperation() {
@@ -141,6 +171,9 @@ function change(request: ServiceChangeRequest) {
   });
 }
 const report = computed(() => installation.report?.services);
+const lingeringIssue = computed(() => installation.report?.findings.find(
+  (finding) => finding.code === "services.distrobox_lingering" && finding.state !== "passed",
+));
 const initialSetup = computed(() => !daemon.connected && canSetUpServices(report.value));
 const currentMode = computed<ServiceScope | null>(() => {
   if (daemon.connected && daemon.info?.mode && daemon.info.mode !== "unknown") return daemon.info.mode;
@@ -186,7 +219,7 @@ const lockMatch = computed(() => {
     <p v-if="initialSetup">User mode starts at login. System mode starts at boot. Choose one to enable.</p>
     <p v-if="!report" class="muted">{{ installation.checking ? "Checking services…" : "Service status unavailable." }}</p>
     <p v-if="report?.operation_lock?.state === 'unavailable'">Controls unavailable: {{ report.operation_lock.reason }}</p>
-    <div v-if="report?.context.kind === 'native' && controlsReady" class="switch-row">
+    <div v-if="canSwitch && controlsReady" class="switch-row">
       <n-select v-model:value="destination" :options="modeOptions" placeholder="Select mode" :disabled="busy || installation.checking" class="mode-select" />
       <n-select v-if="!initialSetup && destination && destination !== currentMode" v-model:value="settingsChoice"
         :options="[{ label: 'Copy current settings & media', value: 'carry' }, { label: 'Use destination settings', value: 'destination' }]"
@@ -194,7 +227,13 @@ const lockMatch = computed(() => {
       <n-button :disabled="busy || installation.checking || !destination || destination === currentMode"
         @click="destination && change({ kind: 'switch', scope: destination, carry_settings: !initialSetup && settingsChoice === 'carry' })">{{ initialSetup ? 'Enable and start' : 'Switch service' }}</n-button>
     </div>
-    <p v-else-if="report?.context.kind === 'distrobox'" class="muted">Distrobox uses the host user service. System mode requires a native installation.</p>
+    <p v-else-if="report?.context.kind === 'distrobox'" class="muted">Set up both host service wrappers to switch modes in this box.</p>
+    <n-alert v-if="destination === 'system' && lingeringIssue" type="warning" title="Manual setup required">{{ lingeringIssue.remediation }}</n-alert>
+    <n-space v-if="report?.context.kind === 'distrobox'" vertical>
+      <n-button size="small" :disabled="busy || installation.checking || daemon.connected || config.dirty" @click="prepareSetup">{{ canSwitch ? 'Repair host support' : 'Set up host support' }}</n-button>
+      <span v-if="daemon.connected" class="muted">Stop the current daemon before setup.</span>
+      <span v-else-if="config.dirty" class="muted">Save or discard pending edits before setup.</span>
+    </n-space>
     <div v-if="!setupOnly" class="units">
       <div v-for="unit in units" :key="unit.scope" class="unit">
         <div class="unit-heading"><strong>{{ unit.label }}</strong>
@@ -202,7 +241,7 @@ const lockMatch = computed(() => {
         </div>
         <template v-if="unit.probe.state === 'known'">
           <p class="muted">Startup: {{ unit.probe.value.unit_file_state }}<span v-if="unit.probe.value.distrobox_name"> · Daemon: Distrobox ({{ unit.probe.value.distrobox_name }})</span></p>
-          <n-space v-if="controlsReady && unit.probe.value.load_state === 'loaded' && (unit.scope === 'user' || report?.context.kind === 'native')">
+          <n-space v-if="controlsReady && unit.probe.value.load_state === 'loaded' && (unit.scope === 'user' || canSwitch)">
             <n-button size="small" :disabled="busy || installation.checking || !['inactive', 'failed'].includes(unit.probe.value.active_state)" @click="act(unit.scope, 'start')">Start</n-button>
             <n-button size="small" :disabled="busy || installation.checking || unit.probe.value.active_state !== 'active'" @click="act(unit.scope, 'stop')">Stop</n-button>
             <n-button size="small" :disabled="busy || installation.checking || unit.probe.value.active_state !== 'active'" @click="act(unit.scope, 'restart')">Restart</n-button>
@@ -229,9 +268,29 @@ const lockMatch = computed(() => {
       <div v-for="unit in units" :key="unit.scope">
         <p v-if="unit.probe.state === 'known'">{{ unit.label }}: {{ unit.probe.value.load_state }} / {{ unit.probe.value.sub_state }} · PID {{ unit.probe.value.main_pid || '—' }}<br />{{ unit.probe.value.fragment_path }}</p>
       </div>
-      <n-button v-if="report.context.kind === 'native' && controlsReady" size="small" :disabled="busy || installation.checking" @click="change({ kind: 'recover' })">Recover interrupted switch</n-button>
+      <n-button v-if="canSwitch && controlsReady" size="small" :disabled="busy || installation.checking" @click="change({ kind: 'recover' })">Recover interrupted switch</n-button>
     </details>
   </n-card>
+  <n-modal v-model:show="setupOpen" preset="card" title="Distrobox host support" style="width: min(620px, 92vw)" :closable="!busy" :mask-closable="!busy">
+    <template v-if="setupProposal">
+      <p>Install service and recovery support for <strong>{{ setupProposal.route.launch.name }}</strong>. Both hardware services must be stopped. Choose a mode after setup.</p>
+      <n-alert v-if="submissionError" type="error">{{ submissionError }}</n-alert>
+      <n-form label-placement="top" size="small">
+        <n-form-item label="User configuration"><n-input v-model:value="setupProposal.route.user_config" :disabled="busy" /></n-form-item>
+        <n-form-item label="System configuration"><n-input v-model:value="setupProposal.route.system_config" :disabled="busy" /></n-form-item>
+        <n-collapse><n-collapse-item title="Launch paths" name="paths">
+          <n-form-item label="Binaries inside the box"><n-input v-model:value="setupProposal.route.launch.binaries" :disabled="busy" /></n-form-item>
+          <n-form-item label="Host distrobox-enter"><n-input v-model:value="setupProposal.route.launch.host_enter" :disabled="busy" /></n-form-item>
+          <n-form-item label="User working directory"><n-input v-model:value="setupProposal.route.user_working_directory" :disabled="busy" /></n-form-item>
+          <n-form-item label="System working directory"><n-input v-model:value="setupProposal.route.system_working_directory" :disabled="busy" /></n-form-item>
+        </n-collapse-item></n-collapse>
+      </n-form>
+      <n-space justify="end">
+        <n-button :disabled="busy" @click="setupOpen = false">Cancel</n-button>
+        <n-button type="primary" :loading="submitting" :disabled="busy || daemon.connected || config.dirty" @click="installSupport">Install host support</n-button>
+      </n-space>
+    </template>
+  </n-modal>
 </template>
 
 <style scoped>

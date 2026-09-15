@@ -7,6 +7,7 @@ description = "Service and installation diagnostics without hardware or GUI libr
 [dependencies]
 lianli-shared = { path = "../lianli-shared" }
 anyhow = { workspace = true }
+tracing = { workspace = true }
 clap = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }

@@ -1,13 +1,26 @@
 use super::*;
 use std::io::Write;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/support/unprivileged.rs"
+));
+
 #[test]
 fn destination_copies_received_descriptors_without_opening_source_labels() {
+    if run_as_desktop_user("media_import_transfer::tests::destination_copies_received_descriptors_without_opening_source_labels") {
+        return;
+    }
     transfer_fixture(false);
 }
 
 #[test]
 fn unexpected_descriptor_path_discards_the_destination_stage() {
+    if run_as_desktop_user(
+        "media_import_transfer::tests::unexpected_descriptor_path_discards_the_destination_stage",
+    ) {
+        return;
+    }
     transfer_fixture(true);
 }
 
@@ -68,6 +81,9 @@ fn transfer_fixture(wrong_path: bool) {
 
 #[test]
 fn selection_sender_and_receiver_complete_with_original_files_preserved() {
+    if run_as_desktop_user("media_import_transfer::tests::selection_sender_and_receiver_complete_with_original_files_preserved") {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("original.png");
     std::fs::write(&source, b"original").unwrap();

@@ -32,6 +32,17 @@ pub enum Action {
     },
 }
 
+impl Action {
+    fn config(&self) -> &std::path::Path {
+        match self {
+            Self::Publish(prepared) => &prepared.config_path,
+            Self::Restore { config, .. }
+            | Self::ResumeRestore { config, .. }
+            | Self::Recover { config } => config,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Request {
     uid: u32,
@@ -57,6 +68,9 @@ pub fn execute(
     hardware: &HardwareReservation,
     record_ready: impl FnOnce(Option<&str>) -> Result<()>,
 ) -> Result<Option<String>> {
+    if let Some(execution) = &account.container {
+        execution.destination.check_config(action.config())?;
+    }
     ensure!(
         std::env::current_exe()?.file_name() == Some(OsStr::new("lianli-control")),
         "Use the standalone control helper for account publication"
@@ -207,6 +221,7 @@ fn serve_channel(
         "Publication account changed"
     );
     reservations.verify()?;
+    crate::container_destination::verify_config(request.action.config())?;
     let transaction = match &request.action {
         Action::Publish(prepared) => Some(crate::state_transfer::begin_publication(prepared)?),
         Action::Restore { config, backup } => {

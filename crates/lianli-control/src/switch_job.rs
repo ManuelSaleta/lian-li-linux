@@ -12,7 +12,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const DIRECTORY: &str = "/run/lianli-switch";
-const HELPER: &str = "/usr/bin/lianli-control";
 const LIMIT: u64 = 16 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -180,6 +179,12 @@ fn try_lock(file: &File, mode: i32) -> Result<bool> {
 }
 
 pub fn read() -> Result<Option<JobStatus>> {
+    if matches!(
+        InstallationContext::detect(),
+        InstallationContext::Distrobox { .. }
+    ) {
+        return crate::container_change::read();
+    }
     read_at(Path::new(DIRECTORY), 0)
 }
 
@@ -206,7 +211,7 @@ fn read_at(path: &Path, uid: u32) -> Result<Option<JobStatus>> {
     Ok(Some(record))
 }
 
-fn request_arguments(request: ServiceChangeRequest) -> Vec<String> {
+pub(crate) fn request_arguments(request: ServiceChangeRequest) -> Vec<String> {
     match request {
         ServiceChangeRequest::Recover {} => vec!["--recover".into()],
         ServiceChangeRequest::Switch {
@@ -225,26 +230,8 @@ fn request_arguments(request: ServiceChangeRequest) -> Vec<String> {
     }
 }
 
-fn installed_helper() -> Result<()> {
-    for path in ["/usr", "/usr/bin", HELPER] {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("Native service helper path is unavailable: {path}"))?;
-        ensure!(
-            metadata.uid() == 0
-                && metadata.mode() & 0o022 == 0
-                && if path == HELPER {
-                    metadata.is_file() && metadata.mode() & 0o111 != 0
-                } else {
-                    metadata.is_dir()
-                },
-            "Install the root-owned native control helper before switching services"
-        );
-    }
-    Ok(())
-}
-
 pub fn prerequisites() -> Result<()> {
-    installed_helper()?;
+    crate::host_helper::installed()?;
     for path in ["/usr/bin/pkexec", "/usr/bin/systemd-run"] {
         let metadata = fs::metadata(path)
             .with_context(|| format!("Required service-switch tool is missing: {path}"))?;
@@ -260,6 +247,12 @@ pub fn prerequisites() -> Result<()> {
 }
 
 pub fn start(request: ServiceChangeRequest) -> Result<String> {
+    if matches!(
+        InstallationContext::detect(),
+        InstallationContext::Distrobox { .. }
+    ) {
+        return crate::container_change::start(request);
+    }
     ensure!(
         InstallationContext::detect() == InstallationContext::Native
             && unsafe { libc::geteuid() } != 0,
@@ -277,10 +270,9 @@ pub fn start(request: ServiceChangeRequest) -> Result<String> {
     let mut random = [0; 16];
     File::open("/dev/urandom")?.read_exact(&mut random)?;
     let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let helper = crate::host_helper::installed()?;
     let mut command = Command::new("/usr/bin/pkexec");
-    command.args([
-        "--disable-internal-agent",
-        HELPER,
+    command.arg("--disable-internal-agent").arg(helper).args([
         "submit-switch",
         "--operation-id",
         &id,
@@ -305,9 +297,15 @@ pub fn start(request: ServiceChangeRequest) -> Result<String> {
     )
 }
 
-fn launch_arguments(uid: u32, id: &str, request: ServiceChangeRequest) -> Result<Vec<String>> {
+fn launch_arguments(
+    helper: &Path,
+    uid: u32,
+    id: &str,
+    request: ServiceChangeRequest,
+) -> Result<Vec<String>> {
     validate_id(id)?;
     ensure!(uid != 0, "A desktop caller account is required");
+    let helper = helper.to_str().context("Host helper path must be UTF-8")?;
     let mut args: Vec<String> = [
         "--system",
         "--quiet",
@@ -324,7 +322,7 @@ fn launch_arguments(uid: u32, id: &str, request: ServiceChangeRequest) -> Result
         "--property=StandardOutput=journal",
         "--property=StandardError=journal",
         "--",
-        HELPER,
+        helper,
         "run-switch",
         "--operation-id",
         id,
@@ -344,13 +342,13 @@ pub fn submit(id: &str, request: ServiceChangeRequest) -> Result<()> {
         InstallationContext::detect() == InstallationContext::Native,
         "Switch workers require a native installation"
     );
-    installed_helper()?;
+    let helper = crate::host_helper::installed()?;
     let mut command = Command::new("/usr/bin/systemd-run");
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C");
-    command.args(launch_arguments(caller.uid, id, request)?);
+    command.args(launch_arguments(&helper, caller.uid, id, request)?);
     let output = crate::command::run(command, Duration::from_secs(30))?;
     ensure!(
         output.status.success(),
@@ -457,12 +455,13 @@ mod tests {
             scope: ServiceScope::System,
             carry_settings: true,
         };
-        let args = launch_arguments(1000, ID, request).unwrap();
+        let helper = Path::new(crate::host_helper::PACKAGED);
+        let args = launch_arguments(helper, 1000, ID, request).unwrap();
         let command = args.iter().position(|arg| arg == "--").unwrap();
         assert_eq!(
             &args[command + 1..],
             &[
-                HELPER,
+                crate::host_helper::PACKAGED,
                 "run-switch",
                 "--operation-id",
                 ID,
@@ -479,8 +478,11 @@ mod tests {
             request_arguments(ServiceChangeRequest::Recover {}),
             ["--recover"]
         );
-        assert!(launch_arguments(0, ID, request).is_err());
-        assert!(launch_arguments(1000, "../../other", request).is_err());
+        assert!(launch_arguments(helper, 0, ID, request).is_err());
+        assert!(launch_arguments(helper, 1000, "../../other", request).is_err());
+        let standalone =
+            launch_arguments(Path::new(crate::host_helper::STANDALONE), 1000, ID, request).unwrap();
+        assert_eq!(standalone[command + 1], crate::host_helper::STANDALONE);
     }
 
     #[test]

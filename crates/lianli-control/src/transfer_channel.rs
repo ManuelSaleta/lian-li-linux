@@ -2,7 +2,7 @@ use anyhow::{ensure, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use socket2::{Domain, Socket, Type};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 const MAX_PACKET: usize = 32 * 1024;
@@ -10,6 +10,12 @@ const MAX_PACKET: usize = 32 * 1024;
 pub(crate) struct Channel {
     socket: Socket,
     deadline: Instant,
+}
+
+impl AsFd for Channel {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
+    }
 }
 
 impl Channel {

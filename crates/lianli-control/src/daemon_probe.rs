@@ -53,7 +53,7 @@ pub fn inspect(
 
 pub(crate) fn socket_path(context: &InstallationContext, scope: ServiceScope) -> Result<PathBuf> {
     Ok(match scope {
-        ServiceScope::System => PathBuf::from("/run/lianli/lianli-daemon.sock"),
+        ServiceScope::System => context.system_socket_path(),
         ServiceScope::User => {
             let runtime = if matches!(context, InstallationContext::Distrobox { .. }) {
                 PathBuf::from(
@@ -79,10 +79,9 @@ pub(crate) fn connect(
     let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
     socket.set_nonblocking(true)?;
     if let Err(error) = socket.connect(&SockAddr::unix(path)?) {
-        ensure!(
-            error.raw_os_error() == Some(libc::EINPROGRESS),
-            "Connecting service IPC: {error}"
-        );
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error).context("Connecting service IPC");
+        }
         wait(socket.as_raw_fd(), libc::POLLOUT, deadline)?;
         if let Some(error) = socket.take_error()? {
             return Err(error.into());
@@ -230,6 +229,20 @@ fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_service_socket_retains_its_io_error_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = connect(
+            &directory.path().join("absent.sock"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn service_stop_transmits_the_guard_and_invocation_in_one_request() {

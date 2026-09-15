@@ -52,7 +52,7 @@ async function check() {
     pending.value = "";
     pendingChecks = 0;
     error.value = value?.error ?? "";
-    notice.value = value?.active ? "Copying and validating media. You can close this page; the worker continues independently."
+    notice.value = value?.active ? "Copying and checking media. You can close this page while it finishes."
       : value?.result ? "Copies are ready. Review and stage them below, then Save to apply."
         : value ? "Import did not complete. Inspect the reported error before retrying." : "No import is recorded for this desktop session.";
     if (value?.active) timer = setTimeout(() => void check(), 1000);
@@ -106,7 +106,7 @@ async function stage() {
 
 <template>
   <n-card title="Managed media copies" size="small">
-    <p>Copy these LCD selections and their template assets into the daemon's managed storage. Originals remain unchanged. Native installation and a desktop authentication agent are required.</p>
+    <p>Copy selected media and template assets into daemon-managed storage. Originals stay unchanged. Native imports require authorization. Distrobox supports either daemon mode under the same account and inside the same box.</p>
     <n-space>
       <n-button :disabled="busy || !daemon.connected || !lcds.length || !!config.imported || !!status?.active || !!pending" @click="start">Copy into managed storage</n-button>
       <n-button :disabled="busy" @click="check">Check import progress</n-button>

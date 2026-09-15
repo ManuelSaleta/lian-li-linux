@@ -32,7 +32,7 @@ fn default_config_path(system: bool) -> PathBuf {
 
 fn default_socket_path(system: bool) -> PathBuf {
     if system {
-        PathBuf::from("/run/lianli/lianli-daemon.sock")
+        lianli_shared::installation::InstallationContext::detect().system_socket_path()
     } else {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
         PathBuf::from(runtime_dir).join("lianli-daemon.sock")
@@ -161,17 +161,13 @@ fn main() -> anyhow::Result<()> {
     } else {
         lianli_shared::services::ServiceScope::User
     };
-    if !lianli_control::service_selection::launch_allowed(&context, scope)? {
-        tracing::info!(
-            "Hardware startup is paused or another service mode/account is selected; this launch is inactive"
-        );
+    if let Some(reason) = lianli_control::service_selection::launch_block_reason(&context, scope)? {
+        tracing::info!("{reason}");
         return Ok(());
     }
     let pidlock = pidlock::PidLock::acquire()?;
-    if !lianli_control::service_selection::launch_allowed(&context, scope)? {
-        tracing::info!(
-            "Hardware service selection changed before startup; this launch is inactive"
-        );
+    if let Some(reason) = lianli_control::service_selection::launch_block_reason(&context, scope)? {
+        tracing::info!("Host selection changed before startup. {reason}");
         return Ok(());
     }
     if let Some(backup) = lianli_control::state_transaction::recover(&config)? {

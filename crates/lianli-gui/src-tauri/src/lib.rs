@@ -249,11 +249,36 @@ async fn service_change(
 
 /// Identity, devices and telemetry from the selected daemon.
 #[tauri::command]
-async fn service_report() -> Result<lianli_shared::services::ServiceReport, String> {
+async fn container_setup_proposal(
+    user_config: Option<std::path::PathBuf>,
+) -> Result<lianli_control::container_deployment::Deployment, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        lianli_control::container_bootstrap::proposal(user_config)
+            .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn container_setup(
+    app: tauri::AppHandle,
+    deployment: lianli_control::container_deployment::Deployment,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run_setup(deployment))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn service_report() -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        lianli_control::services::inspect(
+        let services = lianli_control::services::inspect(
             &lianli_shared::installation::InstallationContext::detect(),
-        )
+        );
+        let findings = lianli_control::lingering::finding(&services);
+        serde_json::json!({ "services": services, "findings": findings })
     })
     .await
     .map_err(|error| format!("Service check failed: {error}"))
@@ -289,6 +314,8 @@ pub fn run() {
             managed_import_status,
             managed_import_result,
             service_change,
+            container_setup_proposal,
+            container_setup,
         ])
         .setup(|app| {
             tauri::async_runtime::spawn_blocking(|| {

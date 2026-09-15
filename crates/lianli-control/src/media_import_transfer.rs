@@ -10,6 +10,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub fn send_file(selection: &Path) -> Result<()> {
+    let (lcds, templates) = read_selection(selection)?;
+    send(
+        std::io::stdin().as_fd().try_clone_to_owned()?,
+        lcds,
+        templates,
+        &CopyControl::new(Duration::from_secs(600)),
+    )
+}
+
+pub(crate) fn read_selection(selection: &Path) -> Result<(Vec<LcdConfig>, Vec<LcdTemplate>)> {
     use std::io::Read;
     ensure!(
         unsafe { libc::geteuid() } != 0,
@@ -20,13 +30,7 @@ pub fn send_file(selection: &Path) -> Result<()> {
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "Selection input exceeds 1 MiB");
-    let (lcds, templates) = serde_json::from_slice(&bytes)?;
-    send(
-        std::io::stdin().as_fd().try_clone_to_owned()?,
-        lcds,
-        templates,
-        &CopyControl::new(Duration::from_secs(600)),
-    )
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub fn receive_published(
@@ -35,6 +39,7 @@ pub fn receive_published(
     expected_config: &Path,
 ) -> Result<media_import::PublishedSelection> {
     use lianli_shared::installation::InstallationContext;
+    crate::container_destination::verify_config(expected_config)?;
     ensure!(
         import_id.len() == 32 && import_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "Invalid import ID"
@@ -68,7 +73,12 @@ pub fn receive_published(
             && current.mount_namespace == destination.mount_namespace,
         "Managed import destination changed after preparation"
     );
-    validated.publish(parent, import_id, &control)
+    let mut published = validated.publish(parent, import_id, &control)?;
+    published.destination = Some(media_import::PublishedDestination {
+        config_path: expected_config.into(),
+        state_directory: parent.canonicalize()?,
+    });
+    Ok(published)
 }
 
 #[derive(Serialize, Deserialize)]

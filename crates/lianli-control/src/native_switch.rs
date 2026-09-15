@@ -255,6 +255,12 @@ pub(crate) fn check_launch(
     config: &Path,
     working: &Path,
 ) -> Result<()> {
+    if let Some(execution) = &account.container {
+        let deployment = crate::container_deployment::load()?
+            .context("The protected Distrobox deployment is missing")?;
+        deployment.verify_execution(execution)?;
+        deployment.verify_installed(&Account::user(account.uid)?)?;
+    }
     let current = crate::destination::preflight_existing(account, scope)?;
     ensure!(
         current.config_path == config && current.working_directory == working,
@@ -286,19 +292,26 @@ pub(crate) fn execute_for(
         InstallationContext::detect() == InstallationContext::Native,
         "Automatic switching requires the native host application"
     );
-    let system = Account::system()?;
     let operation = ServiceOperationLock::acquire(&InstallationContext::Native)?;
     ensure!(
         Journal::load(&operation)?.is_none(),
         "Recover the pending switch before starting another"
     );
     let mut backend = Authorized::new(&caller, &operation)?;
-    let (source, destination) = if destination_scope == ServiceScope::User {
-        (&system, &caller)
-    } else {
-        (&caller, &system)
-    };
     progress("Checking both service accounts, startup selection and saved settings…")?;
+    let deployment = crate::container_deployment::load()?;
+    if deployment.is_some() && destination_scope == ServiceScope::System {
+        crate::lingering::require(&crate::services::Route::Native, caller.uid)?;
+    }
+    let (user_account, system) = match &deployment {
+        Some(deployment) => deployment.switch_accounts(&caller)?,
+        None => (caller.clone(), Account::system()?),
+    };
+    let (source, destination) = if destination_scope == ServiceScope::User {
+        (&system, &user_account)
+    } else {
+        (&user_account, &system)
+    };
     let user_runtime = crate::user_runtime::identity(caller.uid)?
         .context("Log in with a private user runtime directory before switching services")?;
     let before = backend.inspect()?;
@@ -332,6 +345,7 @@ pub(crate) fn execute_for(
     let mut journal = Journal::create(
         &operation,
         Intent {
+            container: deployment.as_ref().map(|value| value.route.clone()),
             id,
             caller_name: caller.name.clone(),
             source: ServiceSelection {
@@ -386,7 +400,8 @@ pub(crate) fn execute_for(
             "The desktop runtime changed during preparation. Prepare the switch again"
         );
         ensure!(
-            Account::user(caller.uid)? == caller && Account::system()? == system,
+            Account::user(caller.uid)? == caller
+                && (system.container.is_some() || Account::system()? == system),
             "A service account changed during preparation. Prepare the switch again"
         );
         check_launch(
@@ -664,7 +679,6 @@ pub(crate) fn recover_matching(
         InstallationContext::detect() == InstallationContext::Native,
         "Recover service switching from the native host application"
     );
-    let system = Account::system()?;
     let operation = ServiceOperationLock::acquire(&InstallationContext::Native)?;
     let Some(mut journal) = Journal::load(&operation)? else {
         return Ok("No service switch needs recovery.".into());
@@ -678,16 +692,75 @@ pub(crate) fn recover_matching(
     } else {
         journal.record().intent.destination
     };
+    ensure!(
+        caller.uid == user.uid && caller.name == journal.record().intent.caller_name,
+        "The recovery journal belongs to another host account"
+    );
+    let (user_account, system) = if let Some(route) = journal.record().intent.container.clone() {
+        let deployment = crate::container_deployment::load()?
+            .context("The protected Distrobox deployment is missing")?;
+        ensure!(
+            deployment.route == route,
+            "The protected deployment differs from the recovery journal"
+        );
+        if crate::system_recovery::eligible(journal.record())
+            && journal
+                .record()
+                .system_restoration(&crate::service_startup::boot_id()?)?
+                .1
+        {
+            deployment.verify_owner(&caller)?;
+            deployment.inspect_system()?;
+            if matches!(
+                journal.record().phase,
+                Phase::StoppingSource
+                    | Phase::SourceStopped
+                    | Phase::Publishing
+                    | Phase::Published
+                    | Phase::SelectingDestination
+                    | Phase::StartingDestination
+                    | Phase::VerifyingDestination
+            ) {
+                journal.advance(Phase::StoppingDestination)?;
+            }
+            if matches!(
+                journal.record().phase,
+                Phase::StoppingDestination
+                    | Phase::RestoringDestination
+                    | Phase::RecoveryRequired
+                    | Phase::RestoringSystem
+                    | Phase::StoppingRecoveredSystem
+            ) {
+                journal.pause_launches()?;
+            }
+            let mut command = std::process::Command::new("/usr/bin/systemctl");
+            command
+                .args(["--system", "--no-ask-password", "start"])
+                .arg(format!("user@{}.service", caller.uid));
+            let output = crate::command::run(command, std::time::Duration::from_secs(60))?;
+            ensure!(
+                output.status.success(),
+                "Cannot start the account manager required by the boxed system service: {}",
+                output.stderr.trim()
+            );
+        }
+        deployment.verify_installed(&caller)?;
+        route.recovery_accounts(&caller)?
+    } else {
+        (caller.clone(), Account::system()?)
+    };
     let system_selection = if user == journal.record().intent.source {
         journal.record().intent.destination
     } else {
         journal.record().intent.source
     };
-    ensure!(caller.uid == user.uid && caller.name == journal.record().intent.caller_name && system.uid == system_selection.uid,
-        "The journal belongs to another caller or the packaged account changed. Preserve it for administrator recovery");
+    ensure!(
+        system.uid == system_selection.uid,
+        "The system account differs from the recovery journal"
+    );
     if matches!(journal.record().phase, Phase::Complete | Phase::RolledBack) {
         let destination = if journal.record().intent.destination.scope == ServiceScope::User {
-            &caller
+            &user_account
         } else {
             &system
         };
@@ -702,12 +775,12 @@ pub(crate) fn recover_matching(
     )?
     .identity;
     let destination = if journal.record().intent.destination.scope == ServiceScope::User {
-        &caller
+        &user_account
     } else {
         &system
     };
     let source = if journal.record().intent.source.scope == ServiceScope::User {
-        &caller
+        &user_account
     } else {
         &system
     };
