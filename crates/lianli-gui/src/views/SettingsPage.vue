@@ -8,6 +8,7 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import StatusDot from "@/components/common/StatusDot.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
+import StateBackups from "@/components/common/StateBackups.vue";
 import CatalogStorage from "@/components/common/CatalogStorage.vue";
 import ServiceStatus from "@/components/common/ServiceStatus.vue";
 import { useIpc } from "@/composables/useIpc";
@@ -183,6 +184,7 @@ function onHidBackend(v: "hidraw" | "rusb") {
       <p v-if="daemon.connected && !daemon.info?.capabilities.includes('hardware_video')" class="hint">Update the daemon to manage hardware video from Settings.</p>
     </section>
 
+    <StateBackups />
     <ServiceStatus />
     <CatalogStorage />
     <CatalogStorage managed />

@@ -65,7 +65,7 @@ impl ServiceWriteGate {
             .as_ref()
             .context("Host service write lock is unavailable in this container")?;
         let (file, current) = open_identity(path, self.require_root)
-            .context("Service write lock is unavailable. Install the current host tmpfiles rule and run sudo systemd-tmpfiles --create lianli.conf before changing settings; see the Service modes guide in Installation Health")?;
+            .context("Service write lock is unavailable. Install the current host tmpfiles rule and run sudo systemd-tmpfiles --create lianli.conf before changing settings. See the Service modes guide in Installation Health")?;
         let (_, pinned) = self.identity.get_or_init(|| (file, current.clone()));
         ensure!(*pinned == current, "Service write lock was replaced while this daemon was running. Stop the daemon cleanly and repair the host setup before restarting it");
         Ok(pinned.clone())
@@ -77,7 +77,9 @@ impl ServiceWriteGate {
         }
         let slots = if matches!(
             request,
-            IpcRequest::StartCatalogRemoval { .. } | IpcRequest::StartManagedMediaRemoval { .. }
+            IpcRequest::RestoreStateBackup { .. }
+                | IpcRequest::StartCatalogRemoval { .. }
+                | IpcRequest::StartManagedMediaRemoval { .. }
         ) {
             MAX_PENDING_WRITES
         } else {
@@ -122,19 +124,30 @@ mod tests {
     }
 
     #[test]
-    fn removal_excludes_pending_saves_and_keeps_read_only_requests_available() {
+    fn restore_excludes_pending_saves_and_keeps_read_only_requests_available() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("control");
         std::fs::write(&path, "").unwrap();
         let gate = gate(path);
+        let restore = IpcRequest::RestoreStateBackup {
+            target: lianli_shared::backups::BackupTarget::Configuration,
+            sha256: "reviewed".into(),
+        };
         let save = gate.guard(&write()).unwrap();
+        assert!(gate.guard(&restore).is_err());
         let removal = IpcRequest::StartCatalogRemoval {
             operation_id: "reviewed".into(),
         };
         assert!(gate.guard(&removal).is_err());
         drop(save);
+        let restoring = gate.guard(&restore).unwrap();
+        assert!(gate.guard(&write()).is_err());
+        assert!(gate.guard(&restore).is_err());
+        assert!(gate.guard(&IpcRequest::GetConfig).unwrap().is_none());
+        drop(restoring);
         let removing = gate.guard(&removal).unwrap();
         assert!(gate.guard(&write()).is_err());
+        assert!(gate.guard(&restore).is_err());
         assert!(gate.guard(&removal).is_err());
         assert!(gate
             .guard(&IpcRequest::GetCatalogReview {

@@ -115,6 +115,118 @@ pub fn state_backup_path(path: &Path, preserved: bool) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub fn delete_backup(original: &Path, preserved: bool, sha256: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let parent = original
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+        .join(original.file_name().context("State path has no filename")?);
+    let _writer = WriteSlot::acquire(&pinned)?;
+    let path = state_backup_path(&pinned, preserved);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "Backup is not a regular file");
+    anyhow::ensure!(
+        metadata.len() <= MAX_STATE_BYTES as u64,
+        "Backup exceeds 16 MiB"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))?
+        .take(MAX_STATE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= MAX_STATE_BYTES, "Backup exceeds 16 MiB");
+    anyhow::ensure!(
+        format!("{:x}", Sha256::digest(&bytes)) == sha256,
+        "Backup changed after preview. Review it again."
+    );
+    let current = fs::symlink_metadata(&path)?;
+    anyhow::ensure!(
+        current.dev() == metadata.dev() && current.ino() == metadata.ino(),
+        "Backup was replaced during deletion. Review it again."
+    );
+    fs::remove_file(&path)?;
+    directory
+        .sync_all()
+        .context("Backup was deleted, but directory sync failed")
+}
+
+pub fn restore_json(path: &Path, reviewed: &[u8], expected_current: Option<&[u8]>) -> Result<()> {
+    anyhow::ensure!(reviewed.len() <= MAX_STATE_BYTES, "Backup exceeds 16 MiB");
+    let mut parser = serde_json::Deserializer::from_slice(reviewed);
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut parser)?;
+    parser.end()?;
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    use std::os::fd::AsRawFd;
+    let pinned_parent = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let pinned_path = pinned_parent.join(path.file_name().context("State path has no filename")?);
+    let _writer = WriteSlot::acquire(&pinned_path)?;
+    let mut permissions = None;
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&pinned_path)
+    {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            anyhow::ensure!(metadata.is_file(), "Current state is not a regular file");
+            anyhow::ensure!(
+                metadata.len() <= MAX_STATE_BYTES as u64,
+                "Current state exceeds 16 MiB"
+            );
+            let mut current = Vec::new();
+            fs::File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))?
+                .take(MAX_STATE_BYTES as u64 + 1)
+                .read_to_end(&mut current)?;
+            anyhow::ensure!(
+                current.len() <= MAX_STATE_BYTES,
+                "Current state exceeds 16 MiB"
+            );
+            anyhow::ensure!(
+                expected_current == Some(current.as_slice()),
+                "Settings changed after review. Preview again."
+            );
+            let mode = Permissions::from_mode(metadata.permissions().mode() & 0o777);
+            let mut previous = tempfile::NamedTempFile::new_in(&pinned_parent)?;
+            previous.write_all(&current)?;
+            previous.as_file().set_permissions(mode.clone())?;
+            previous.as_file().sync_all()?;
+            let mut name = pinned_path.as_os_str().to_os_string();
+            name.push(".before-restore");
+            previous.persist_noclobber(PathBuf::from(name)).context(
+                "Review and remove the existing .before-restore file before restoring again",
+            )?;
+            directory.sync_all()?;
+            permissions = Some(mode);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::ensure!(
+                expected_current.is_none(),
+                "Settings file disappeared after review. Preview again."
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    replace_file(&pinned_path, reviewed, permissions)
+}
+
 fn replace_file(path: &Path, bytes: &[u8], permissions: Option<Permissions>) -> Result<()> {
     let parent = path
         .parent()
@@ -212,6 +324,68 @@ mod tests {
             0o640
         );
         assert_eq!(fs::read(sentinel).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn restore_preserves_damaged_state_and_refuses_stale_or_repeated_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let damaged = b"broken {";
+        fs::write(&path, damaged).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o640)).unwrap();
+        fs::write(backup_path(&path), b"{}").unwrap();
+        assert!(restore_json(&path, b"{}", Some(b"stale")).is_err());
+        assert!(!root.path().join("config.json.before-restore").exists());
+        restore_json(&path, b"{}", Some(damaged)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(
+            fs::read(root.path().join("config.json.before-restore")).unwrap(),
+            damaged
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), b"{}");
+        assert!(restore_json(&path, b"[]", Some(b"{}")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn backup_cleanup_rejects_symlinks_and_active_writes() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("config.json");
+        let backup = backup_path(&original);
+        fs::write(&original, b"{}").unwrap();
+        symlink(&original, &backup).unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"{}"));
+        assert!(delete_backup(&original, false, &hash).is_err());
+        assert!(backup.is_symlink());
+        fs::remove_file(&backup).unwrap();
+        fs::write(&backup, b"{}").unwrap();
+        let slot = WriteSlot::acquire(&original).unwrap();
+        assert!(delete_backup(&original, false, &hash).is_err());
+        assert!(backup.exists());
+        drop(slot);
+        delete_backup(&original, false, &hash).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn restore_refuses_symlinks_and_failed_preservation_without_changing_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let sentinel = root.path().join("private");
+        fs::write(&sentinel, b"private").unwrap();
+        symlink(&sentinel, &path).unwrap();
+        assert!(restore_json(&path, b"{}", Some(b"private")).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"old").unwrap();
+        symlink(&sentinel, root.path().join("config.json.before-restore")).unwrap();
+        assert!(restore_json(&path, b"{}", Some(b"old")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(fs::read(&sentinel).unwrap(), b"private");
     }
 
     #[test]

@@ -108,6 +108,22 @@ pub enum IpcRequest {
         device_id: String,
     },
     RetryOpenRgb,
+    ListStateBackups,
+    PreviewStateBackup {
+        target: crate::backups::BackupTarget,
+        #[serde(default)]
+        preserved: bool,
+    },
+    DeleteStateBackup {
+        target: crate::backups::BackupTarget,
+        #[serde(default)]
+        preserved: bool,
+        sha256: String,
+    },
+    RestoreStateBackup {
+        target: crate::backups::BackupTarget,
+        sha256: String,
+    },
     GetWirelessOperation {
         operation_id: String,
     },
@@ -236,6 +252,8 @@ impl IpcRequest {
         match self {
             Self::ListDevices
             | Self::GetConfig
+            | Self::ListStateBackups
+            | Self::PreviewStateBackup { .. }
             | Self::GetTelemetry
             | Self::GetRgbCapabilities
             | Self::GetZoneColors { .. }
@@ -262,6 +280,8 @@ impl IpcRequest {
             Self::Guarded { .. }
             | Self::StopService { .. }
             | Self::SetConfig { .. }
+            | Self::RestoreStateBackup { .. }
+            | Self::DeleteStateBackup { .. }
             | Self::SetLcdMedia { .. }
             | Self::SetFanConfig { .. }
             | Self::SetRgbEffect { .. }

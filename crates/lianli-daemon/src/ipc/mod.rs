@@ -12,6 +12,7 @@
 //! - [`templates`] — LCD template CRUD.
 //! - [`presets`] — RGB preset save / load / delete / apply.
 
+mod backups;
 mod event_sender;
 mod server;
 mod service_stop;

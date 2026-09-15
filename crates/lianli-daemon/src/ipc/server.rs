@@ -78,6 +78,9 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             "openrgb_retry".into(),
             "media_access".into(),
             "state_recovery".into(),
+            "backup_preview".into(),
+            "backup_restore".into(),
+            "backup_cleanup".into(),
             "catalog_install_status".into(),
             "catalog_storage".into(),
             "managed_media_storage".into(),
@@ -310,6 +313,32 @@ fn handle_request(
         IpcRequest::ListSensors => super::system::list_sensors(state),
         IpcRequest::ListPwmHeaders => super::system::list_pwm_headers(),
         IpcRequest::ListDevices => super::system::list_devices(state),
+        IpcRequest::ListStateBackups => {
+            super::backups::run(state, super::backups::Operation::List, tx)
+        }
+        IpcRequest::PreviewStateBackup { target, preserved } => super::backups::run(
+            state,
+            super::backups::Operation::Preview { target, preserved },
+            tx,
+        ),
+        IpcRequest::DeleteStateBackup {
+            target,
+            preserved,
+            sha256,
+        } => super::backups::run(
+            state,
+            super::backups::Operation::Delete {
+                target,
+                preserved,
+                sha256,
+            },
+            tx,
+        ),
+        IpcRequest::RestoreStateBackup { target, sha256 } => super::backups::run(
+            state,
+            super::backups::Operation::Restore { target, sha256 },
+            tx,
+        ),
         IpcRequest::GetConfig => super::system::get_config(state),
         IpcRequest::GetTelemetry => super::system::get_telemetry(state),
 
