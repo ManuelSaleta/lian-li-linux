@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::os::raw::{c_int, c_void};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, trace};
@@ -80,12 +81,10 @@ pub enum Event {
     CrtcStateChanged(i32),
 }
 
-#[derive(Default)]
 struct EventSink {
     queue: VecDeque<Event>,
-    // Raw handle used by callbacks (e.g. DDCCI) that need to call back into
-    // libevdi. Populated at `connect()` time, cleared on disconnect/drop.
     handle_raw: ffi::evdi_handle,
+    api: Arc<ffi::Api>,
 }
 
 extern "C" fn on_dpms(dpms_mode: c_int, user_data: *mut c_void) {
@@ -166,11 +165,12 @@ extern "C" fn on_ddcci(data: ffi::evdi_ddcci_data, user_data: *mut c_void) {
         // and result=false ("no DDC/CI data available").
         let len = data.buffer_length;
         let zeros = vec![0u8; len as usize];
-        ffi::evdi_ddcci_response(handle, zeros.as_ptr(), len, false);
+        (sink.api.ddcci_response)(handle, zeros.as_ptr(), len, false);
     }
 }
 
 pub struct EvdiHandle {
+    api: Arc<ffi::Api>,
     raw: NonNull<ffi::evdi_device_context>,
     sink: Box<EventSink>,
     ctx: Box<ffi::evdi_event_context>,
@@ -181,42 +181,44 @@ pub struct EvdiHandle {
 }
 
 impl EvdiHandle {
-    pub fn lib_version() -> (i32, i32, i32) {
-        let mut v = ffi::evdi_lib_version {
-            version_major: 0,
-            version_minor: 0,
-            version_patchlevel: 0,
-        };
-        unsafe { ffi::evdi_get_lib_version(&mut v) };
-        (v.version_major, v.version_minor, v.version_patchlevel)
+    pub fn lib_version() -> Result<(i32, i32, i32)> {
+        Ok(ffi::Api::load()?.version)
     }
 
     /// Open the first AVAILABLE evdi device, creating a new node if none exist.
     pub fn open_or_add() -> Result<Self> {
+        let api = ffi::Api::load()?;
         for n in 0..16 {
-            let status = unsafe { ffi::evdi_check_device(n) };
+            let status = unsafe { (api.check_device)(n) };
             if status == ffi::AVAILABLE {
-                return Self::open(n);
+                return Self::open_with_api(n, api);
             }
         }
-        let added = unsafe { ffi::evdi_add_device() };
+        let added = unsafe { (api.add_device)() };
         if added <= 0 {
             return Err(explain_add_failure());
         }
         for n in 0..16 {
-            let status = unsafe { ffi::evdi_check_device(n) };
+            let status = unsafe { (api.check_device)(n) };
             if status == ffi::AVAILABLE {
-                return Self::open(n);
+                return Self::open_with_api(n, api);
             }
         }
         Err(EvdiError::NoDeviceAvailable.into())
     }
 
     pub fn open(device: c_int) -> Result<Self> {
-        let raw = unsafe { ffi::evdi_open(device) };
+        Self::open_with_api(device, ffi::Api::load()?)
+    }
+
+    fn open_with_api(device: c_int, api: Arc<ffi::Api>) -> Result<Self> {
+        let raw = unsafe { (api.open)(device) };
         let raw = NonNull::new(raw).ok_or(EvdiError::OpenFailed(device))?;
-        let mut sink = Box::new(EventSink::default());
-        sink.handle_raw = raw.as_ptr();
+        let mut sink = Box::new(EventSink {
+            queue: VecDeque::new(),
+            handle_raw: raw.as_ptr(),
+            api: Arc::clone(&api),
+        });
         let ctx = Box::new(ffi::evdi_event_context {
             dpms_handler: Some(on_dpms),
             mode_changed_handler: Some(on_mode),
@@ -228,6 +230,7 @@ impl EvdiHandle {
             user_data: sink.as_mut() as *mut EventSink as *mut c_void,
         });
         Ok(Self {
+            api,
             raw,
             sink,
             ctx,
@@ -255,7 +258,7 @@ impl EvdiHandle {
             bail!("connect: EDID must be non-empty");
         }
         unsafe {
-            ffi::evdi_connect2(
+            (self.api.connect2)(
                 self.raw.as_ptr(),
                 edid.as_ptr(),
                 edid.len() as u32,
@@ -269,12 +272,13 @@ impl EvdiHandle {
             // `tearingBlockedBy`).
         }
         self.connected = true;
+        self.sink.handle_raw = self.raw.as_ptr();
         Ok(())
     }
 
     pub fn disconnect(&mut self) {
         if self.connected {
-            unsafe { ffi::evdi_disconnect(self.raw.as_ptr()) };
+            unsafe { (self.api.disconnect)(self.raw.as_ptr()) };
             self.connected = false;
         }
         self.sink.handle_raw = std::ptr::null_mut();
@@ -292,7 +296,7 @@ impl EvdiHandle {
             rects: buf.rects.as_mut_ptr(),
             rect_count: MAX_DIRTY_RECTS as c_int,
         };
-        unsafe { ffi::evdi_register_buffer(self.raw.as_ptr(), raw) };
+        unsafe { (self.api.register_buffer)(self.raw.as_ptr(), raw) };
         self.buffer = Some(buf);
         Ok(())
     }
@@ -300,7 +304,7 @@ impl EvdiHandle {
     fn unregister_buffer(&mut self) {
         if self.buffer.is_some() {
             // libevdi must release its pointers before the backing storage is freed.
-            unsafe { ffi::evdi_unregister_buffer(self.raw.as_ptr(), 1) };
+            unsafe { (self.api.unregister_buffer)(self.raw.as_ptr(), 1) };
             self.buffer = None;
         }
     }
@@ -312,7 +316,7 @@ impl EvdiHandle {
     /// Returns true when evdi has an update ready for the buffer immediately
     /// (no need to await the eventfd before calling `grab_pixels`).
     pub fn request_update(&mut self) -> bool {
-        self.buffer.is_some() && unsafe { ffi::evdi_request_update(self.raw.as_ptr(), 1) }
+        self.buffer.is_some() && unsafe { (self.api.request_update)(self.raw.as_ptr(), 1) }
     }
 
     pub fn grab_pixels(&mut self) -> Vec<Rect> {
@@ -322,7 +326,7 @@ impl EvdiHandle {
         let mut rects = [ffi::evdi_rect::default(); MAX_DIRTY_RECTS];
         let mut n: c_int = MAX_DIRTY_RECTS as c_int;
         unsafe {
-            ffi::evdi_grab_pixels(self.raw.as_ptr(), rects.as_mut_ptr(), &mut n);
+            (self.api.grab_pixels)(self.raw.as_ptr(), rects.as_mut_ptr(), &mut n);
         }
         let n = n.max(0) as usize;
         rects.iter().take(n).copied().map(Rect::from).collect()
@@ -335,7 +339,7 @@ impl EvdiHandle {
         let fd = if let Some(cached) = self.cached_event_fd {
             cached
         } else {
-            let fd = unsafe { ffi::evdi_get_event_ready(self.raw.as_ptr()) };
+            let fd = unsafe { (self.api.get_event_ready)(self.raw.as_ptr()) };
             if fd < 0 {
                 bail!("evdi_get_event_ready returned {fd}");
             }
@@ -356,7 +360,7 @@ impl EvdiHandle {
         if rc > 0 && (pfd.revents & libc::POLLIN) != 0 {
             trace!("evdi eventfd POLLIN — dispatching");
             unsafe {
-                ffi::evdi_handle_events(self.raw.as_ptr(), self.ctx.as_mut());
+                (self.api.handle_events)(self.raw.as_ptr(), self.ctx.as_mut());
             }
         }
         Ok(self.drain_events())
@@ -367,7 +371,7 @@ impl EvdiHandle {
     }
 
     pub fn raw_event_fd(&mut self) -> c_int {
-        unsafe { ffi::evdi_get_event_ready(self.raw.as_ptr()) }
+        unsafe { (self.api.get_event_ready)(self.raw.as_ptr()) }
     }
 }
 
@@ -375,7 +379,7 @@ impl Drop for EvdiHandle {
     fn drop(&mut self) {
         self.disconnect();
         self.unregister_buffer();
-        unsafe { ffi::evdi_close(self.raw.as_ptr()) };
+        unsafe { (self.api.close)(self.raw.as_ptr()) };
         debug!("EvdiHandle dropped");
     }
 }
@@ -415,14 +419,9 @@ impl EvdiBuffer {
     }
 }
 
-/// Tiny smoke test: load libevdi and report its version. Used by the daemon
-/// at startup to fail fast when the runtime library is missing.
+/// Checks the optional userspace library without opening or creating DRM devices.
 pub fn probe_runtime() -> Result<(i32, i32, i32)> {
-    let v = EvdiHandle::lib_version();
-    if v == (0, 0, 0) {
-        return Err(anyhow!("libevdi reported version 0.0.0"));
-    }
-    Ok(v)
+    EvdiHandle::lib_version()
 }
 
 fn explain_add_failure() -> anyhow::Error {

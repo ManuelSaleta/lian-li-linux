@@ -8,6 +8,7 @@ name = "lianli-daemon"
 path = "src/main.rs"
 
 [dependencies]
+lianli-display = { path = "../lianli-display" }
 lianli-shared = { path = "../lianli-shared" }
 lianli-control = { path = "../lianli-control" }
 lianli-transport = { path = "../lianli-transport" }

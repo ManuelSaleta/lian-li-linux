@@ -1,0 +1,20 @@
+[package]
+name = "lianli-session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+libc = { workspace = true }
+lianli-control = { path = "../lianli-control" }
+lianli-display = { path = "../lianli-display" }
+lianli-media = { path = "../lianli-media" }
+lianli-shared = { path = "../lianli-shared" }
+signal-hook = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+turbojpeg = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

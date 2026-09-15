@@ -8,3 +8,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
+libloading = "0.8.9"

@@ -2551,6 +2551,7 @@ dependencies = [
  "image",
  "lianli-control",
  "lianli-devices",
+ "lianli-display",
  "lianli-evdi",
  "lianli-media",
  "lianli-shared",
@@ -2595,11 +2596,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lianli-display"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "lianli-evdi",
+ "lianli-shared",
+ "libc",
+ "libloading 0.8.9",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "lianli-evdi"
 version = "0.9.1"
 dependencies = [
  "anyhow",
  "libc",
+ "libloading 0.8.9",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -2640,6 +2658,24 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "turbojpeg",
+]
+
+[[package]]
+name = "lianli-session"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lianli-control",
+ "lianli-display",
+ "lianli-media",
+ "lianli-shared",
+ "libc",
+ "signal-hook",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "turbojpeg",
 ]
 

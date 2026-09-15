@@ -1,5 +1,4 @@
-//! Hand-written `extern "C"` bindings for libevdi 1.14 (`/usr/include/evdi_lib.h`).
-//! Only the subset used by the safe wrapper is exposed.
+//! ABI declarations checked against libevdi 1.14 and 1.15.
 
 #![allow(non_camel_case_types, dead_code)]
 
@@ -98,36 +97,106 @@ pub struct evdi_lib_version {
     pub version_patchlevel: c_int,
 }
 
-extern "C" {
-    pub fn evdi_check_device(device: c_int) -> c_int;
-    pub fn evdi_open(device: c_int) -> evdi_handle;
-    pub fn evdi_add_device() -> c_int;
-    pub fn evdi_close(handle: evdi_handle);
-    pub fn evdi_connect(
-        handle: evdi_handle,
-        edid: *const u8,
-        edid_length: c_uint,
-        sku_area_limit: u32,
-    );
-    pub fn evdi_connect2(
-        handle: evdi_handle,
-        edid: *const u8,
-        edid_length: c_uint,
-        pixel_area_limit: u32,
-        pixel_per_second_limit: u32,
-    );
-    pub fn evdi_disconnect(handle: evdi_handle);
-    pub fn evdi_register_buffer(handle: evdi_handle, buffer: evdi_buffer);
-    pub fn evdi_unregister_buffer(handle: evdi_handle, buffer_id: c_int);
-    pub fn evdi_request_update(handle: evdi_handle, buffer_id: c_int) -> bool;
-    pub fn evdi_grab_pixels(handle: evdi_handle, rects: *mut evdi_rect, num_rects: *mut c_int);
-    pub fn evdi_handle_events(handle: evdi_handle, evtctx: *mut evdi_event_context);
-    pub fn evdi_get_event_ready(handle: evdi_handle) -> evdi_selectable;
-    pub fn evdi_get_lib_version(version: *mut evdi_lib_version);
-    pub fn evdi_ddcci_response(
-        handle: evdi_handle,
-        buffer: *const u8,
-        buffer_length: u32,
-        result: bool,
-    );
+pub struct Api {
+    pub check_device: unsafe extern "C" fn(c_int) -> c_int,
+    pub open: unsafe extern "C" fn(c_int) -> evdi_handle,
+    pub add_device: unsafe extern "C" fn() -> c_int,
+    pub close: unsafe extern "C" fn(evdi_handle),
+    pub connect2: unsafe extern "C" fn(evdi_handle, *const u8, c_uint, u32, u32),
+    pub disconnect: unsafe extern "C" fn(evdi_handle),
+    pub register_buffer: unsafe extern "C" fn(evdi_handle, evdi_buffer),
+    pub unregister_buffer: unsafe extern "C" fn(evdi_handle, c_int),
+    pub request_update: unsafe extern "C" fn(evdi_handle, c_int) -> bool,
+    pub grab_pixels: unsafe extern "C" fn(evdi_handle, *mut evdi_rect, *mut c_int),
+    pub handle_events: unsafe extern "C" fn(evdi_handle, *mut evdi_event_context),
+    pub get_event_ready: unsafe extern "C" fn(evdi_handle) -> evdi_selectable,
+    pub ddcci_response: unsafe extern "C" fn(evdi_handle, *const u8, u32, bool),
+    pub version: (i32, i32, i32),
+    _library: libloading::Library,
+}
+
+impl Api {
+    pub fn load() -> anyhow::Result<std::sync::Arc<Self>> {
+        use anyhow::Context;
+        // SONAME first; some source installations only provide the unversioned name.
+        let library = unsafe { libloading::Library::new("libevdi.so.1") }
+            .or_else(|_| unsafe { libloading::Library::new("libevdi.so") })
+            .context(
+                "EVDI userspace library is unavailable; install libevdi for EVDI desktop mode",
+            )?;
+        Self::from_library(library).map(std::sync::Arc::new)
+    }
+
+    fn from_library(library: libloading::Library) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        // Function signatures match the checked ABI, and the library outlives every pointer.
+        unsafe {
+            let get_version: libloading::Symbol<unsafe extern "C" fn(*mut evdi_lib_version)> =
+                library
+                    .get(b"evdi_get_lib_version\0")
+                    .context("libevdi lacks its version query")?;
+            let mut version = evdi_lib_version {
+                version_major: 0,
+                version_minor: 0,
+                version_patchlevel: 0,
+            };
+            get_version(&mut version);
+            let version = (
+                version.version_major,
+                version.version_minor,
+                version.version_patchlevel,
+            );
+            validate_version(version)?;
+            Ok(Self {
+                check_device: *library.get(b"evdi_check_device\0")?,
+                open: *library.get(b"evdi_open\0")?,
+                add_device: *library.get(b"evdi_add_device\0")?,
+                close: *library.get(b"evdi_close\0")?,
+                connect2: *library.get(b"evdi_connect2\0")?,
+                disconnect: *library.get(b"evdi_disconnect\0")?,
+                register_buffer: *library.get(b"evdi_register_buffer\0")?,
+                unregister_buffer: *library.get(b"evdi_unregister_buffer\0")?,
+                request_update: *library.get(b"evdi_request_update\0")?,
+                grab_pixels: *library.get(b"evdi_grab_pixels\0")?,
+                handle_events: *library.get(b"evdi_handle_events\0")?,
+                get_event_ready: *library.get(b"evdi_get_event_ready\0")?,
+                ddcci_response: *library.get(b"evdi_ddcci_response\0")?,
+                version,
+                _library: library,
+            })
+        }
+    }
+}
+
+fn validate_version(version: (i32, i32, i32)) -> anyhow::Result<()> {
+    if version.0 != 1 || !(14..=15).contains(&version.1) || version.2 < 0 {
+        anyhow::bail!(
+            "Unsupported libevdi {}.{}.{}; EVDI requires the checked 1.14 or 1.15 ABI",
+            version.0,
+            version.1,
+            version.2
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unchecked_library_abis() {
+        for version in [(0, 0, 0), (1, 13, 9), (1, 16, 0), (2, 14, 0), (1, 14, -1)] {
+            assert!(validate_version(version).is_err());
+        }
+        assert!(validate_version((1, 14, 8)).is_ok());
+        assert!(validate_version((1, 15, 0)).is_ok());
+    }
+
+    #[test]
+    fn library_without_evdi_symbols_fails_before_device_access() {
+        let library = unsafe { libloading::Library::new("libc.so.6") }.unwrap();
+        let error = Api::from_library(library).err().unwrap();
+        assert!(error.to_string().contains("version query"));
+    }
 }

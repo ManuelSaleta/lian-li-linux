@@ -7,6 +7,8 @@ resolver = "2"
 members = [
     "crates/lianli-shared",
     "crates/lianli-control",
+    "crates/lianli-display",
+    "crates/lianli-session",
     "crates/lianli-transport",
     "crates/lianli-devices",
     "crates/lianli-evdi",

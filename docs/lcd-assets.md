@@ -1,5 +1,14 @@
 # Managed LCD media
 
+Desktop mode uses `lianli-session` in the graphical login session to capture frames
+for the daemon. Packages install its user unit and login trigger so capture does
+not depend on opening the GUI. Source installations must install the helper beside
+the daemon and GUI, plus `packaging/systemd/lianli-session.service` and
+`packaging/desktop/com.sgtaziz.lianlilinux.session.desktop` in the user-unit and XDG
+autostart directories. EVDI capture requires its userspace library and kernel module.
+The capture coordinator verifies the active graphical session and bounds worker
+startup, communication and teardown. Runtime video/FPS changes recreate its encoder.
+
 Playback prepares replacements separately and retires old sources without blocking
 the streaming loop. Settings reports the active transfer method, encoder and FPS
 limit. Retry failed media uses saved settings without saving unrelated drafts.

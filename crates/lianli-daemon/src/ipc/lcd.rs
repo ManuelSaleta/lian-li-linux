@@ -9,6 +9,34 @@ use lianli_shared::screen::ScreenInfo;
 use crate::ipc::SharedState;
 use crate::service::DaemonEvent;
 
+pub fn retry_desktop(
+    state: &SharedState,
+    tx: &EventSender,
+    bus: u8,
+    address: u8,
+    product_id: u16,
+) -> IpcResponse {
+    let failed = state.lock().telemetry.desktop_streams.iter().any(|stream| {
+        stream.bus == bus
+            && stream.address == address
+            && stream.product_id == product_id
+            && stream.state == lianli_shared::ipc::DesktopStreamState::Failed
+    });
+    if !failed {
+        return IpcResponse::error(
+            "The selected desktop display is no longer failed. Refresh its status.",
+        );
+    }
+    match tx.send(DaemonEvent::RetryDesktopDisplay {
+        bus,
+        address,
+        product_id,
+    }) {
+        Ok(()) => IpcResponse::ok(serde_json::json!({"accepted": true})),
+        Err(_) => IpcResponse::error("The daemon is stopping. Retry was not queued"),
+    }
+}
+
 pub fn switch_display_mode(state: &SharedState, tx: EventSender, device_id: String) -> IpcResponse {
     let (family, pid) = {
         let state = state.lock();

@@ -17,5 +17,6 @@ pub mod screen;
 pub mod sensors;
 pub mod serde_limits;
 pub mod services;
+pub mod session;
 pub mod systeminfo;
 pub mod template;

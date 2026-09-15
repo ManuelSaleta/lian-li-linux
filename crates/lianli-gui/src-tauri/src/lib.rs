@@ -4,6 +4,7 @@ mod managed_import;
 
 mod ipc;
 mod service_operations;
+mod session_worker;
 
 use ipc::PollResult;
 use serde_json::Value;
@@ -318,6 +319,7 @@ pub fn run() {
             container_setup,
         ])
         .setup(|app| {
+            session_worker::start();
             tauri::async_runtime::spawn_blocking(|| {
                 if let Err(error) = lianli_control::automatic_recovery::trigger() {
                     tracing::warn!("Service recovery request failed: {error:#}");

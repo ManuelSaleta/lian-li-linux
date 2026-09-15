@@ -107,6 +107,11 @@ pub enum IpcRequest {
     SwitchDisplayMode {
         device_id: String,
     },
+    RetryDesktopDisplay {
+        bus: u8,
+        address: u8,
+        product_id: u16,
+    },
     RetryOpenRgb,
     RetryMedia,
     ListStateBackups,
@@ -296,6 +301,7 @@ impl IpcRequest {
             | Self::SetFanDirection { .. }
             | Self::SetRgbConfig { .. }
             | Self::SwitchDisplayMode { .. }
+            | Self::RetryDesktopDisplay { .. }
             | Self::RetryMedia
             | Self::RetryOpenRgb
             | Self::BindWirelessDevice { .. }
@@ -529,8 +535,35 @@ pub struct MediaEncoderStatus {
 }
 
 /// Snapshot of live telemetry data, returned by GetTelemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopStreamState {
+    WaitingForSession,
+    Starting,
+    Streaming,
+    Paused,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopStreamStatus {
+    pub bus: u8,
+    pub address: u8,
+    pub product_id: u16,
+    pub state: DesktopStreamState,
+    pub backend: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub error: Option<String>,
+    pub applied_generation: Option<u64>,
+    pub applied_policy: Option<crate::display::DisplayVideoPolicy>,
+    #[serde(default)]
+    pub encoding: Option<crate::display::DesktopEncodingStatus>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
+    #[serde(default)]
+    pub desktop_streams: Vec<DesktopStreamStatus>,
     #[serde(default)]
     pub media_preparation: HashMap<usize, MediaPreparationStatus>,
     /// Fan RPMs keyed by device_id.

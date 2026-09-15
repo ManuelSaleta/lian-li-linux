@@ -47,6 +47,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::IpcUpdate => "IpcUpdate",
         DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
         DaemonEvent::RetryMedia => "RetryMedia",
+        DaemonEvent::RetryDesktopDisplay { .. } => "RetryDesktopDisplay",
         DaemonEvent::USBCheck => "USBCheck",
         DaemonEvent::DevicePoll => "DevicePoll",
         DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
@@ -101,6 +102,11 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     RetryOpenRgb,
     RetryMedia,
+    RetryDesktopDisplay {
+        bus: u8,
+        address: u8,
+        product_id: u16,
+    },
     USBCheck,
     DevicePoll,
     DisplaySwitch {
@@ -212,6 +218,8 @@ pub struct ServiceManager {
     desktop_displays: crate::desktop_display::DesktopDisplayRegistry,
     tx: Option<Sender<DaemonEvent>>,
     mode_switch_suppression: HashMap<String, Instant>,
+    post_switch_refresh: display_mode::PostSwitchRefresh,
+    display_switch: Option<display_mode::DisplaySwitch>,
     serial_rewrite_backoff: Option<Instant>,
     pixel_clean_sessions: Vec<crate::pixel_cleaner::PixelCleanSession>,
     pixel_clean_preparation: Option<pixel_cleaner::PixelCleanPreparation>,
@@ -271,6 +279,8 @@ impl ServiceManager {
             desktop_displays: crate::desktop_display::DesktopDisplayRegistry::new(),
             tx: None,
             mode_switch_suppression: HashMap::new(),
+            post_switch_refresh: display_mode::PostSwitchRefresh::default(),
+            display_switch: None,
             serial_rewrite_backoff: None,
             pixel_clean_sessions: Vec::new(),
             pixel_clean_preparation: None,
@@ -681,6 +691,7 @@ impl ServiceManager {
                     }
                 }
                 DaemonEvent::DevicePoll => {
+                    self.refresh_after_mode_switch();
                     self.check_pixel_clean_sessions();
                     self.device_poll();
                     if self.restart_requested {
@@ -775,6 +786,13 @@ impl ServiceManager {
                         self.start_openrgb_server();
                     }
                     self.ipc.state.lock().openrgb_retry_pending = false;
+                }
+                DaemonEvent::RetryDesktopDisplay {
+                    bus,
+                    address,
+                    product_id,
+                } => {
+                    self.desktop_displays.retry((bus, address), product_id);
                 }
                 DaemonEvent::RetryMedia => {
                     self.poll_prepared_media();

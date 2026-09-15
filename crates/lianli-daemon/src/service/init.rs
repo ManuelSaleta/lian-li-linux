@@ -32,6 +32,9 @@ impl ServiceManager {
         if signals.requested() {
             return;
         }
+        if let Err(error) = self.desktop_displays.start_session(&self.socket_path) {
+            warn!("Desktop session coordinator could not start: {error:#}");
+        }
         self.ipc.thread = Some(ipc::start_ipc_server(
             Arc::clone(&self.ipc.state),
             Arc::clone(&self.ipc.stop),
@@ -932,7 +935,8 @@ impl ServiceManager {
                     return false;
                 }
                 self.cleaner_reload_pending = false;
-                self.desktop_displays.set_hardware_video(cfg.hardware_video);
+                self.desktop_displays
+                    .set_video_policy(cfg.hardware_video, cfg.default_fps);
                 self.config = Some(cfg);
                 self.packet_builder = PacketBuilder::new();
                 self.prepare_media_assets(tx);

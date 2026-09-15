@@ -78,6 +78,7 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             "media_preparation".into(),
             "openrgb_retry".into(),
             "media_retry".into(),
+            lianli_shared::daemon::DESKTOP_RETRY.into(),
             "media_access".into(),
             "state_recovery".into(),
             "backup_preview".into(),
@@ -311,6 +312,11 @@ fn handle_request(
             IpcResponse::error("Service stop requires authenticated peer credentials")
         }
         IpcRequest::Ping => super::system::ping(),
+        IpcRequest::RetryDesktopDisplay {
+            bus,
+            address,
+            product_id,
+        } => super::lcd::retry_desktop(state, &tx, bus, address, product_id),
         IpcRequest::RetryMedia => super::system::retry_media(state, tx),
         IpcRequest::RetryOpenRgb => super::system::retry_openrgb(state, tx),
         IpcRequest::GetDaemonInfo => super::system::daemon_info(state),

@@ -1,0 +1,12 @@
+[Unit]
+Description=Lian Li desktop session capture
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lianli-session --login-start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

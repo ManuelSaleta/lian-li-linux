@@ -6,8 +6,8 @@ pkgdesc="Open-source Linux replacement for L-Connect 3 for Lian Li devices"
 arch=('x86_64')
 url="https://github.com/sgtaziz/lian-li-linux"
 license=('MIT')
-depends=('libusb' 'ffmpeg' 'evdi-dkms' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
-optdepends=('polkit: administrator authorization for service mode switching')
+depends=('libusb' 'ffmpeg' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
+optdepends=('evdi-dkms: EVDI desktop capture' 'systemd: graphical login-session authorization' 'polkit: administrator authorization for service mode switching')
 makedepends=('git' 'cargo' 'clang' 'cmake' 'nasm' 'npm')
 provides=('lianli-linux')
 conflicts=('lianli-linux')
@@ -44,6 +44,12 @@ package() {
   install -Dm755 target/release/lianli-gui "$pkgdir/usr/bin/lianli-gui"
 
   install -Dm755 target/release/lianli-control "$pkgdir/usr/bin/lianli-control"
+
+  install -Dm755 target/release/lianli-session "$pkgdir/usr/bin/lianli-session"
+  install -Dm644 packaging/systemd/lianli-session.service "$pkgdir/usr/lib/systemd/user/lianli-session.service"
+  install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
+  ln -s ../lianli-session.service "$pkgdir/usr/lib/systemd/user/default.target.wants/lianli-session.service"
+  install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.session.desktop "$pkgdir/etc/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop"
 
   # udev rules
   install -Dm644 packaging/udev/60-lianli.rules "$pkgdir/usr/lib/udev/rules.d/60-lianli.rules"

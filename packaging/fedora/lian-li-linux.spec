@@ -34,6 +34,7 @@ BuildRequires:  pkgconfig(libavutil)
 
 Requires:       hicolor-icon-theme
 Requires:       ffmpeg
+Requires:       systemd-libs
 # evdi kernel module for desktop-mode devices
 Recommends:     displaylink
 
@@ -81,6 +82,12 @@ ln -s ../lianli-control-recovery.service %{buildroot}%{_unitdir}/multi-user.targ
 install -Dpm644 packaging/polkit/49-lianli-recovery.rules %{buildroot}%{_datadir}/polkit-1/rules.d/49-lianli-recovery.rules
 install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
 
+install -Dpm755 target/release/lianli-session %{buildroot}%{_bindir}/lianli-session
+install -Dpm644 packaging/systemd/lianli-session.service %{buildroot}%{_userunitdir}/lianli-session.service
+install -d %{buildroot}%{_userunitdir}/default.target.wants
+ln -s ../lianli-session.service %{buildroot}%{_userunitdir}/default.target.wants/lianli-session.service
+install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.session.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
+
 %pre
 getent group lianli >/dev/null || groupadd -r lianli
 getent passwd lianli >/dev/null || \
@@ -123,6 +130,10 @@ fi
 %license LICENSE
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
+%{_bindir}/lianli-session
+%{_userunitdir}/lianli-session.service
+%{_userunitdir}/default.target.wants/lianli-session.service
+%config(noreplace) %{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
 %{_bindir}/lianli-control
 %{_unitdir}/lianli-control-recovery.service
 %{_unitdir}/multi-user.target.wants/lianli-control-recovery.service

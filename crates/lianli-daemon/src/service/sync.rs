@@ -480,11 +480,13 @@ impl ServiceManager {
                 .filter_map(|d| retained_cache_entry(d, &opened_topos, &bound_mac_strs)),
         );
 
+        let desktop_streams = self.desktop_displays.statuses();
         {
             let mut ipc_state = self.ipc.state.lock();
             for (index, status) in &mut ipc_state.telemetry.media_preparation {
                 status.runtime = media_runtime.get(index).cloned();
             }
+            ipc_state.telemetry.desktop_streams = desktop_streams;
             ipc_state.telemetry.streaming_active = streaming_active;
             ipc_state.telemetry.openrgb_status = openrgb_status;
             ipc_state.telemetry.fan_rpms = fan_rpms;

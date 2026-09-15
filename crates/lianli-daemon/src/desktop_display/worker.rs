@@ -1,51 +1,55 @@
-use super::ensure_ffmpeg_initialized;
+use super::policy::{FramePacer, SharedVideoPolicy};
+use super::session::{CaptureConnection, SessionClient};
 use super::{DesktopDisplayHandle, TurzxDeviceMatch, HEALTHY_UPTIME};
-use anyhow::{bail, Context, Result};
+use anyhow::{ensure, Context, Result};
 use lianli_devices::turzx::{self, Mode as TurzxMode, TurzxDisplay, FMT_H264, FMT_MJPEG};
-use lianli_evdi::{EvdiHandle, Event as EvdiEvent};
-use lianli_media::video::H264Encoder;
+use lianli_display::buffer::EncodedBuffer;
+use lianli_shared::display::{
+    CaptureCommand, CaptureReply, DisplayCodec, DisplayMode, OutputRequest,
+};
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self};
+use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-/// PIDs known to have buggy H264 implementations — forced to JPEG.
-/// Both rev1 (0xACD1) and rev2 (0xAD11) Lancool 207 share the silicon bug.
-/// Vision 9.2" (0xAD26) ACKs H264 chunks but never renders them.
+// These firmware revisions acknowledge H.264 but cannot reliably display it.
 const JPEG_FORCE_PIDS: &[u16] = &[0xACD1, 0xAD11, 0xAD26];
 
 pub(super) fn spawn_worker(
     target: TurzxDeviceMatch,
-    hardware_video: Arc<AtomicBool>,
+    video_policy: Arc<SharedVideoPolicy>,
+    session: SessionClient,
+    status: Arc<super::status::StreamStatus>,
 ) -> Result<DesktopDisplayHandle> {
     let pid = target.pid;
     let key = target.key;
-    ensure_ffmpeg_initialized();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
     let healthy = Arc::new(AtomicBool::new(false));
-    let healthy_clone = Arc::clone(&healthy);
+    let healthy_clone = healthy.clone();
     let join = thread::Builder::new()
         .name(format!("turzx-bridge-{pid:04x}"))
         .spawn(move || {
-            if let Err(e) = run_worker(
+            status.starting();
+            if let Err(error) = run_worker(
                 target,
-                Arc::clone(&stop_clone),
-                healthy_clone,
-                hardware_video,
+                &stop_clone,
+                &healthy_clone,
+                &video_policy,
+                session,
+                &status,
             ) {
                 if stop_clone.load(Ordering::Relaxed) {
-                    debug!("TURZX {pid:04x} at {key:?} worker stopped: {e:#}");
+                    debug!("TURZX {pid:04x} at {key:?} worker stopped: {error:#}");
                 } else {
-                    error!(
-                        "TURZX {:04x}:{pid:04x} at {key:?} worker exited: {e:#}",
-                        turzx::VID
-                    );
+                    status.failed(&format!("{error:#}"));
+                    error!("TURZX {pid:04x} at {key:?} worker exited: {error:#}");
                 }
             }
         })
-        .context("spawning worker thread")?;
+        .context("Spawning desktop USB worker")?;
     Ok(DesktopDisplayHandle {
         stop,
         healthy,
@@ -56,370 +60,413 @@ pub(super) fn spawn_worker(
 
 fn run_worker(
     target: TurzxDeviceMatch,
-    stop: Arc<AtomicBool>,
-    healthy: Arc<AtomicBool>,
-    hardware_video: Arc<AtomicBool>,
+    stop: &AtomicBool,
+    healthy: &AtomicBool,
+    video_policy: &SharedVideoPolicy,
+    session: SessionClient,
+    status: &super::status::StreamStatus,
 ) -> Result<()> {
     let pid = target.pid;
-    let mut display = TurzxDisplay::open_device(target.device, || stop.load(Ordering::Relaxed))
-        .with_context(|| format!("opening TURZX {:04x}:{pid:04x}", turzx::VID))?;
-    let caps = display.caps().clone();
-    let edid = *display.edid();
-    let identity = display.identity().clone();
-    info!(
-        "TURZX {pid:04x} identity: usb_serial={:?} port={} → EDID serial=0x{:08x}",
-        identity.usb_serial, identity.port_path, identity.edid_serial
-    );
-    debug!("TURZX {pid:04x} caps: {caps:?}");
-
-    let use_jpeg = JPEG_FORCE_PIDS.contains(&pid);
-    let fmt = if use_jpeg { FMT_MJPEG } else { FMT_H264 };
-    if use_jpeg {
-        info!("TURZX {pid:04x} using JPEG mode (forced for this device)");
-    }
-
-    let mut evdi = EvdiHandle::open_or_add().context("evdi open_or_add")?;
-    let lib_version = EvdiHandle::lib_version();
-    info!(
-        "evdi library {}.{}.{} connected for TURZX {pid:04x}",
-        lib_version.0, lib_version.1, lib_version.2
-    );
-    let sku_area_limit = (caps.max_w as u32).saturating_mul(caps.max_h as u32).max(1);
-
-    // Pre-register a buffer at the device's preferred mode BEFORE evdi_connect.
-    // No fourcc is known before the first ModeChanged event, and nothing is
-    // encoded until one arrives, so carry the historical XR24 assumption.
-    let preferred = turzx::pick_mode(&caps).context("device advertises no modes")?;
-    let preferred_resolved = ResolvedMode {
-        width: preferred.width as u32,
-        height: preferred.height as u32,
-        refresh_hz: preferred.refresh_hz as u32,
-        pixel_format: DRM_FORMAT_XRGB8888,
+    ensure!(session.ready(), "Waiting for the active desktop worker");
+    let mut display = TurzxDisplay::open_device(target.device, || stop.load(Ordering::Relaxed))?;
+    let caps = display.caps();
+    let convert = |mode: TurzxMode| DisplayMode {
+        width: u32::from(mode.width),
+        height: u32::from(mode.height),
+        refresh_hz: u32::from(mode.refresh_hz),
     };
-    evdi.set_buffer(
-        preferred_resolved.width as i32,
-        preferred_resolved.height as i32,
-    )?;
-
-    let pixel_per_sec_limit = 80_000_000u32;
-    evdi.connect_with_rate(&edid, sku_area_limit, pixel_per_sec_limit)
-        .context("evdi_connect2")?;
-    let event_fd = evdi.raw_event_fd();
-    info!(
-        "TURZX {pid:04x} evdi connected (event fd={event_fd}, sku_area_limit={sku_area_limit}, \
-         preferred {}×{}@{}Hz buffer pre-registered); waiting for compositor mode-set",
-        preferred_resolved.width, preferred_resolved.height, preferred_resolved.refresh_hz
-    );
-
-    let mut current_mode: Option<ResolvedMode> = None;
-    let mut encoder: Option<H264Encoder> = None;
+    let output = OutputRequest {
+        edid: display.edid().to_vec(),
+        preferred: convert(turzx::pick_mode(caps).context("Device advertises no modes")?),
+        modes: caps.modes.iter().copied().map(convert).collect(),
+        max_width: u32::from(caps.max_w),
+        max_height: u32::from(caps.max_h),
+    };
+    let codec = if JPEG_FORCE_PIDS.contains(&pid) {
+        DisplayCodec::Jpeg
+    } else {
+        DisplayCodec::H264
+    };
+    let format = if codec == DisplayCodec::Jpeg {
+        FMT_MJPEG
+    } else {
+        FMT_H264
+    };
+    let mut connection = session.open(output.clone(), codec, stop)?;
+    let mut ready = await_ready(&mut connection, stop)?;
+    let buffer = match ready.message {
+        CaptureReply::Ready {
+            backend,
+            fallback_reason,
+            buffer_bytes,
+        } => {
+            ensure!(
+                ready.descriptors.len() == 1,
+                "Capture worker did not provide one frame buffer"
+            );
+            info!("TURZX {pid:04x} connected to {backend} session capture");
+            status.backend(&backend, fallback_reason.as_deref());
+            if let Some(reason) = fallback_reason {
+                info!("TURZX {pid:04x} desktop fallback: {reason}");
+            }
+            EncodedBuffer::from_descriptor(ready.descriptors.pop().unwrap(), buffer_bytes)?
+        }
+        CaptureReply::Failed { reason } => anyhow::bail!("Desktop setup failed: {reason}"),
+        _ => anyhow::bail!("Unexpected display startup response"),
+    };
+    let mut requested = video_policy.load();
+    let mut generation = 1u64;
+    let mut sequence = 0u64;
+    let mut pending: Option<(u64, Instant)> = None;
+    let mut pause_pending = false;
+    let mut paused = false;
     let mut streaming = false;
-    let mut update_pending = false;
-    let mut request_in_flight = false;
-    let mut grab_us: u64 = 0;
-    let mut encode_us: u64 = 0;
-    let mut send_us: u64 = 0;
-    let mut timing_frames: u32 = 0;
-    let mut timing_bytes: u64 = 0;
-    let mut first_frame_at = None;
-    let mut encoder_hardware_video = hardware_video.load(Ordering::Acquire);
-
-    while !stop.load(Ordering::SeqCst) {
-        let requested_hardware_video = hardware_video.load(Ordering::Acquire);
-        if requested_hardware_video != encoder_hardware_video {
-            if let Some(mode) = current_mode.filter(|_| !use_jpeg) {
-                drop(encoder.take());
-                encoder = Some(
-                    H264Encoder::new(
-                        mode.width,
-                        mode.height,
-                        mode.refresh_hz,
-                        mode.rgb_byte_order(),
-                        requested_hardware_video,
-                    )
-                    .context("reconfiguring desktop video encoder")?,
-                );
-                update_pending = true;
+    let mut current_mode: Option<DisplayMode> = None;
+    let mut pacer = FramePacer::new();
+    let mut bytes = Vec::new();
+    let mut first_frame = None;
+    let mut reported_generation = None;
+    while !stop.load(Ordering::Relaxed) {
+        let permitted = connection.permitted.load(Ordering::Acquire);
+        let policy = video_policy.load();
+        if policy != requested {
+            requested = policy;
+            generation = generation
+                .checked_add(1)
+                .context("Video policy generation exhausted")?;
+            if let Some(mode) = current_mode {
+                pacer.set_fps(policy.fps(mode.refresh_hz));
             }
-            encoder_hardware_video = requested_hardware_video;
+            if pending.is_some() && !pause_pending {
+                connection.channel.send(
+                    &CaptureCommand::Pause,
+                    &[],
+                    Duration::from_millis(200),
+                    stop,
+                )?;
+                pause_pending = true;
+            }
         }
-        let timeout = current_mode
-            .as_ref()
-            .map(|m| Duration::from_millis((1000 / m.refresh_hz.max(1)) as u64))
-            .unwrap_or_else(|| Duration::from_millis(200));
-
-        let events = evdi.poll_events(timeout).context("evdi poll_events")?;
-
-        if !events.is_empty() {
-            debug!("TURZX {pid:04x} got {} evdi event(s)", events.len());
+        if !permitted {
+            if streaming {
+                power_off(&mut display);
+                streaming = false;
+                status.paused();
+                reported_generation = None;
+            }
+            if !paused && !pause_pending {
+                connection.channel.send(
+                    &CaptureCommand::Pause,
+                    &[],
+                    Duration::from_millis(200),
+                    stop,
+                )?;
+                pause_pending = true;
+            }
         }
-
-        for ev in events {
-            match ev {
-                EvdiEvent::ModeChanged(mode) => {
-                    let rgb_first =
-                        matches!(mode.pixel_format, DRM_FORMAT_ABGR8888 | DRM_FORMAT_XBGR8888);
-                    info!(
-                        "TURZX {pid:04x} evdi mode: {}×{} @ {}Hz (bpp {}, fmt {:#x}, {} first)",
-                        mode.width,
-                        mode.height,
-                        mode.refresh_hz,
-                        mode.bits_per_pixel,
-                        mode.pixel_format,
-                        if rgb_first { "red" } else { "blue" }
+        if let Some(reply) = connection.channel.try_receive::<CaptureReply>()? {
+            ensure!(
+                reply.descriptors.is_empty(),
+                "Unexpected encoded-frame descriptors"
+            );
+            match reply.message {
+                CaptureReply::Frame {
+                    sequence: received,
+                    generation: applied,
+                    mode,
+                    bytes: length,
+                    encoding,
+                } => {
+                    ensure!(
+                        pending.map(|(sequence, _)| sequence) == Some(received),
+                        "Unexpected display frame sequence"
                     );
-                    let resolved =
-                        ResolvedMode::from_evdi(mode).context("negotiated mode unsupported")?;
-                    evdi.set_buffer(resolved.width as i32, resolved.height as i32)?;
-                    if !use_jpeg {
-                        encoder = Some(
-                            H264Encoder::new(
-                                resolved.width,
-                                resolved.height,
-                                resolved.refresh_hz,
-                                resolved.rgb_byte_order(),
-                                encoder_hardware_video,
-                            )
-                            .context("building H264Encoder")?,
-                        );
+                    pending.take();
+                    output.validate_mode(mode)?;
+                    if !permitted || pause_pending || applied != generation {
+                        continue;
                     }
-                    display
-                        .start_streaming(
+                    // Copy before the next request grants the producer permission to reuse its storage.
+                    buffer.read(length, &mut bytes)?;
+                    if !connection.permitted.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    if !streaming || current_mode != Some(mode) {
+                        display.start_streaming(
                             TurzxMode {
-                                width: resolved.width as u16,
-                                height: resolved.height as u16,
-                                refresh_hz: resolved.refresh_hz as u8,
+                                width: mode.width as u16,
+                                height: mode.height as u16,
+                                refresh_hz: mode.refresh_hz as u8,
                             },
-                            fmt,
-                        )
-                        .context("TURZX start_streaming")?;
-                    streaming = true;
-                    current_mode = Some(resolved);
-                    update_pending = false;
-                    request_in_flight = false;
-                }
-                EvdiEvent::UpdateReady(_) => {
-                    update_pending = true;
-                    request_in_flight = false;
-                }
-                EvdiEvent::DpmsChanged(mode) => {
-                    debug!("TURZX {pid:04x} DPMS changed: {mode}");
-                    if mode != 0 && streaming {
-                        if let Err(e) = lianli_transport::usb::with_teardown_io(
-                            Duration::from_millis(200),
-                            || display.send_power_off(),
-                        ) {
-                            warn!("TURZX {pid:04x} power_off (DPMS) failed: {e:#}");
-                        }
-                        streaming = false;
-                    } else if mode == 0 && !streaming {
-                        if let Some(m) = current_mode {
-                            if let Err(e) = display.start_streaming(
-                                TurzxMode {
-                                    width: m.width as u16,
-                                    height: m.height as u16,
-                                    refresh_hz: m.refresh_hz as u8,
-                                },
-                                fmt,
-                            ) {
-                                warn!("TURZX {pid:04x} DPMS resume failed: {e:#}");
-                            } else {
-                                streaming = true;
-                            }
-                        }
+                            format,
+                        )?;
+                        streaming = true;
                     }
-                }
-                EvdiEvent::CrtcStateChanged(state) => {
-                    debug!("TURZX {pid:04x} crtc state: {state}");
-                }
-            }
-        }
-
-        if !streaming {
-            continue;
-        }
-
-        if update_pending {
-            update_pending = false;
-            let t0 = Instant::now();
-            let _rects = evdi.grab_pixels();
-            let t1 = Instant::now();
-            let pixels = evdi.pixels().context("EVDI framebuffer unavailable")?;
-
-            let encode_and_send = if use_jpeg {
-                let m = current_mode.unwrap();
-                let tj_image = turbojpeg::Image {
-                    pixels,
-                    width: m.width as usize,
-                    height: m.height as usize,
-                    pitch: m.width as usize * 4,
-                    format: if m.rgb_byte_order() {
-                        turbojpeg::PixelFormat::RGBX
+                    current_mode = Some(mode);
+                    pacer.set_fps(requested.fps(mode.refresh_hz));
+                    request_frame(
+                        &connection.channel,
+                        &mut pacer,
+                        &mut pending,
+                        &mut sequence,
+                        generation,
+                        requested,
+                        stop,
+                    )?;
+                    let sent = if codec == DisplayCodec::Jpeg {
+                        display.send_jpeg_frame(&bytes)
                     } else {
-                        turbojpeg::PixelFormat::BGRX
-                    },
-                };
-                match turbojpeg::compress(tj_image, 90, turbojpeg::Subsamp::Sub2x2) {
-                    Ok(jpeg) => {
-                        let jpeg = jpeg.to_vec();
-                        let t2 = Instant::now();
-                        let packet_len = jpeg.len() as u64;
-                        let send_result = display.send_jpeg_frame(&jpeg);
-                        let t3 = Instant::now();
-                        Some((packet_len, t2, t3, send_result))
+                        display.send_stream_a(&bytes)
+                    };
+                    // A missing H.264 packet invalidates subsequent dependent frames; restart cleanly.
+                    sent.context("Sending desktop frame")?;
+                    if reported_generation != Some((applied, encoding)) {
+                        status.applied(applied, requested, encoding);
+                        reported_generation = Some((applied, encoding));
                     }
-                    Err(e) => {
-                        warn!("TURZX {pid:04x} JPEG encode failed: {e:#}");
-                        None
-                    }
-                }
-            } else {
-                let Some(enc) = encoder.as_mut() else {
-                    continue;
-                };
-                match enc.encode(pixels) {
-                    Ok(packet) if !packet.is_empty() => {
-                        let t2 = Instant::now();
-                        let packet_len = packet.len() as u64;
-                        let send_result = display.send_stream_a(&packet);
-                        let t3 = Instant::now();
-                        Some((packet_len, t2, t3, send_result))
-                    }
-                    Ok(_) => None,
-                    Err(e) => {
-                        warn!("TURZX {pid:04x} H.264 encode failed: {e:#}");
-                        None
-                    }
-                }
-            };
-
-            if let Some((packet_len, t2, t3, send_result)) = encode_and_send {
-                if let Err(e) = &send_result {
-                    first_frame_at = None;
-                    if is_device_gone(e) {
-                        info!("TURZX {pid:04x} disconnected mid-stream, stopping worker");
-                        break;
-                    }
-                    warn!("TURZX {pid:04x} send failed: {e:#}");
-                } else if !healthy.load(Ordering::Relaxed) {
-                    let first = first_frame_at.get_or_insert_with(Instant::now);
+                    let first = first_frame.get_or_insert_with(Instant::now);
                     if first.elapsed() >= HEALTHY_UPTIME {
-                        healthy.store(true, Ordering::Relaxed);
+                        healthy.store(true, Ordering::Release);
                     }
                 }
-                grab_us += (t1 - t0).as_micros() as u64;
-                encode_us += (t2 - t1).as_micros() as u64;
-                send_us += (t3 - t2).as_micros() as u64;
-                timing_frames += 1;
-                timing_bytes += packet_len;
-                if timing_frames >= 60 {
-                    let n = timing_frames as u64;
-                    debug!(
-                        "TURZX {pid:04x} timings over {} frames: grab {:.2}ms enc {:.2}ms send {:.2}ms, avg packet {} B",
-                        n,
-                        grab_us as f64 / n as f64 / 1000.0,
-                        encode_us as f64 / n as f64 / 1000.0,
-                        send_us as f64 / n as f64 / 1000.0,
-                        timing_bytes / n,
+                CaptureReply::Idle { sequence: received } => {
+                    ensure!(
+                        pending.map(|(sequence, _)| sequence) == Some(received),
+                        "Unexpected empty display frame sequence"
                     );
-                    grab_us = 0;
-                    encode_us = 0;
-                    send_us = 0;
-                    timing_frames = 0;
-                    timing_bytes = 0;
+                    pending = None;
                 }
+                CaptureReply::Paused => {
+                    ensure!(pause_pending, "Unexpected display pause acknowledgement");
+                    pending = None;
+                    pause_pending = false;
+                    paused = true;
+                    status.paused();
+                    reported_generation = None;
+                }
+                CaptureReply::Power { powered: false } => {
+                    if streaming {
+                        power_off(&mut display);
+                        streaming = false;
+                        status.paused();
+                        reported_generation = None;
+                    }
+                }
+                CaptureReply::Power { powered: true } => {}
+                CaptureReply::Failed { reason } => {
+                    anyhow::bail!("Session capture failed: {reason}")
+                }
+                CaptureReply::Ready { .. } => anyhow::bail!("Duplicate display startup response"),
             }
         }
-
-        if !request_in_flight {
-            if evdi.request_update() {
-                update_pending = true;
-            } else {
-                request_in_flight = true;
-            }
+        if permitted && !pause_pending {
+            request_frame(
+                &connection.channel,
+                &mut pacer,
+                &mut pending,
+                &mut sequence,
+                generation,
+                requested,
+                stop,
+            )?;
+            paused = false;
+        }
+        let wait = if permitted && !pause_pending && pending.is_none() {
+            pacer
+                .remaining(Instant::now())
+                .min(Duration::from_millis(200))
+        } else {
+            Duration::from_millis(200)
+        };
+        let mut fd = libc::pollfd {
+            fd: connection.channel.as_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut fd, 1, wait.as_millis().clamp(1, 200) as i32) };
+        if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(std::io::Error::last_os_error().into());
         }
     }
-
-    if let Err(e) = lianli_transport::usb::with_teardown_io(Duration::from_millis(200), || {
-        display.send_power_off()
-    }) {
-        debug!("TURZX {pid:04x} final power_off ignored: {e:#}");
-    }
+    power_off(&mut display);
     Ok(())
 }
 
-fn is_device_gone(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusb::Error>(),
-            Some(rusb::Error::NoDevice)
+fn power_off(display: &mut TurzxDisplay) {
+    if let Err(error) = lianli_transport::usb::with_teardown_io(Duration::from_millis(200), || {
+        display.send_power_off()
+    }) {
+        warn!("TURZX power-off failed: {error:#}");
+    }
+}
+
+fn await_ready(
+    connection: &mut CaptureConnection,
+    stop: &AtomicBool,
+) -> Result<lianli_display::channel::Received<CaptureReply>> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        ensure!(!stop.load(Ordering::Relaxed), "Display startup cancelled");
+        ensure!(
+            connection.permitted.load(Ordering::Acquire),
+            "Desktop session locked or disappeared during startup"
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "Desktop capture startup timed out"
+        );
+        match connection.channel.receive(Duration::from_millis(50), stop) {
+            Ok(reply) => {
+                ensure!(
+                    connection.permitted.load(Ordering::Acquire),
+                    "Desktop session changed before capture was ready"
+                );
+                return Ok(reply);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn request_frame(
+    channel: &lianli_display::channel::PacketChannel,
+    pacer: &mut FramePacer,
+    pending: &mut Option<(u64, Instant)>,
+    sequence: &mut u64,
+    generation: u64,
+    policy: lianli_shared::display::DisplayVideoPolicy,
+    stop: &AtomicBool,
+) -> Result<()> {
+    if pending.is_some() || !pacer.ready(Instant::now()) {
+        return Ok(());
+    }
+    let next = sequence
+        .checked_add(1)
+        .context("Display frame sequence exhausted")?;
+    let requested_at = Instant::now();
+    channel.send(
+        &CaptureCommand::Next {
+            sequence: next,
+            generation,
+            policy,
+        },
+        &[],
+        Duration::from_millis(200),
+        stop,
+    )?;
+    pacer.started(Instant::now());
+    *sequence = next;
+    *pending = Some((next, requested_at));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lianli_display::channel::PacketChannel;
+
+    #[test]
+    fn capture_overlap_keeps_one_request_in_flight_and_obeys_pacing() {
+        let (daemon, mut session) = PacketChannel::pair().unwrap();
+        let stop = AtomicBool::new(false);
+        let mut pacer = FramePacer::new();
+        pacer.set_fps(1);
+        let mut pending = None;
+        let mut sequence = 0;
+        let policy = lianli_shared::display::DisplayVideoPolicy {
+            hardware_video: true,
+            fps_limit: 60,
+        };
+        request_frame(
+            &daemon,
+            &mut pacer,
+            &mut pending,
+            &mut sequence,
+            7,
+            policy,
+            &stop,
         )
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResolvedMode {
-    width: u32,
-    height: u32,
-    refresh_hz: u32,
-    /// DRM fourcc of the negotiated framebuffer layout.
-    pixel_format: u32,
-}
-
-/// Packs a DRM fourcc code the way the kernel does, first character in the
-/// lowest byte.
-const fn fourcc(code: &[u8; 4]) -> u32 {
-    (code[0] as u32) | ((code[1] as u32) << 8) | ((code[2] as u32) << 16) | ((code[3] as u32) << 24)
-}
-
-/// DRM_FORMAT_ABGR8888, memory layout R then G then B then A.
-const DRM_FORMAT_ABGR8888: u32 = fourcc(b"AB24");
-/// DRM_FORMAT_XBGR8888, memory layout R then G then B then X.
-const DRM_FORMAT_XBGR8888: u32 = fourcc(b"XB24");
-/// DRM_FORMAT_XRGB8888, memory layout B then G then R then X.
-const DRM_FORMAT_XRGB8888: u32 = fourcc(b"XR24");
-/// DRM_FORMAT_ARGB8888, memory layout B then G then R then A.
-const DRM_FORMAT_ARGB8888: u32 = fourcc(b"AR24");
-
-impl ResolvedMode {
-    fn from_evdi(m: lianli_evdi::Mode) -> Result<Self> {
-        if m.width <= 0 || m.height <= 0 {
-            bail!("evdi mode has non-positive dimensions ({:?})", m);
-        }
-        // Every consumer of the framebuffer assumes four bytes per pixel in
-        // one of the two channel orders. A compositor that negotiates
-        // anything else would hand the encoders a buffer they cannot read
-        // correctly, so refuse the mode instead of producing shifted colors
-        // or reading past a smaller buffer.
-        if m.bits_per_pixel != 32
-            || !matches!(
-                m.pixel_format,
-                DRM_FORMAT_XRGB8888
-                    | DRM_FORMAT_ARGB8888
-                    | DRM_FORMAT_ABGR8888
-                    | DRM_FORMAT_XBGR8888
-            )
-        {
-            bail!(
-                "evdi mode has unsupported format {:#x} at {} bpp",
-                m.pixel_format,
-                m.bits_per_pixel
-            );
-        }
-        let refresh = m.refresh_hz.max(30) as u32;
-        Ok(Self {
-            width: m.width as u32,
-            height: m.height as u32,
-            refresh_hz: refresh,
-            pixel_format: m.pixel_format,
-        })
+        .unwrap();
+        let reply = session.try_receive::<CaptureCommand>().unwrap().unwrap();
+        assert!(matches!(
+            reply.message,
+            CaptureCommand::Next {
+                sequence: 1,
+                generation: 7,
+                ..
+            }
+        ));
+        pacer.started(Instant::now() - Duration::from_secs(2));
+        request_frame(
+            &daemon,
+            &mut pacer,
+            &mut pending,
+            &mut sequence,
+            7,
+            policy,
+            &stop,
+        )
+        .unwrap();
+        assert!(session.try_receive::<CaptureCommand>().unwrap().is_none());
+        pending = None;
+        pacer.started(Instant::now());
+        request_frame(
+            &daemon,
+            &mut pacer,
+            &mut pending,
+            &mut sequence,
+            7,
+            policy,
+            &stop,
+        )
+        .unwrap();
+        assert!(session.try_receive::<CaptureCommand>().unwrap().is_none());
+        pacer.started(Instant::now() - Duration::from_secs(2));
+        request_frame(
+            &daemon,
+            &mut pacer,
+            &mut pending,
+            &mut sequence,
+            8,
+            policy,
+            &stop,
+        )
+        .unwrap();
+        let reply = session.try_receive::<CaptureCommand>().unwrap().unwrap();
+        assert!(matches!(
+            reply.message,
+            CaptureCommand::Next {
+                sequence: 2,
+                generation: 8,
+                ..
+            }
+        ));
     }
 
-    /// True when the negotiated layout stores red in the first byte of each
-    /// pixel. AB24 and XB24 do, XR24 and AR24 store blue first. The encoders
-    /// read the buffer raw, so they must be told which interpretation to
-    /// use rather than assuming one.
-    fn rgb_byte_order(&self) -> bool {
-        matches!(self.pixel_format, DRM_FORMAT_ABGR8888 | DRM_FORMAT_XBGR8888)
+    #[test]
+    fn a_ready_worker_cannot_authorize_capture_after_its_session_is_revoked() {
+        let (helper, daemon) = PacketChannel::pair().unwrap();
+        let stop = AtomicBool::new(false);
+        helper
+            .send(
+                &CaptureReply::Ready {
+                    backend: "test".into(),
+                    fallback_reason: None,
+                    buffer_bytes: 0,
+                },
+                &[],
+                Duration::from_secs(1),
+                &stop,
+            )
+            .unwrap();
+        let mut connection = CaptureConnection {
+            channel: daemon,
+            permitted: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(await_ready(&mut connection, &stop).is_err());
     }
 }
