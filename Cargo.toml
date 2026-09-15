@@ -7,11 +7,11 @@ resolver = "2"
 members = [
     "crates/lianli-shared",
     "crates/lianli-control",
-    "crates/lianli-display",
-    "crates/lianli-session",
     "crates/lianli-transport",
     "crates/lianli-devices",
     "crates/lianli-evdi",
+    "crates/lianli-display",
+    "crates/lianli-session",
     "crates/lianli-media",
     "crates/lianli-daemon",
     "crates/lianli-gui/src-tauri",
@@ -64,7 +64,7 @@ libc = "0.2"
 signal-hook = "0.3"
 
 # Video encoding
-ffmpeg-next = { version = "9.0", default-features = false, features = ["codec", "software-scaling", "format", "non-exhaustive-enums"] }
+ffmpeg-next = { version = "9.0", default-features = false, features = ["codec", "software-scaling", "format", "filter", "non-exhaustive-enums"] }
 
 # Template catalog
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }

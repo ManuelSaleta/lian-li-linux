@@ -4,6 +4,7 @@ pub mod h264;
 pub mod h264_inprocess;
 pub mod h264_live;
 pub(crate) mod process;
+pub mod vaapi;
 
 pub use ffmpeg::{cap_fps_to_source, probe_source_fps};
 pub use h264::encode_h264;

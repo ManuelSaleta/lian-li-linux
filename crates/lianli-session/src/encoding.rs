@@ -1,15 +1,19 @@
 use anyhow::{ensure, Context, Result};
 use lianli_display::frame::{Mode, PixelFormat};
 use lianli_display::Capture;
+use lianli_media::video::vaapi::{DmaFrame, DmaPlane, VaapiEncoder};
 use lianli_media::video::H264Encoder;
 use lianli_shared::display::{
     CpuReadbackReason, DesktopEncoder, DesktopEncodingStatus, DisplayCodec, SoftwareEncodingReason,
 };
+use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 pub struct Encoder {
+    vaapi: Option<VaapiEncoder>,
     cpu_input: Option<H264Encoder>,
+    gpu_unavailable: bool,
     cpu_readback_reason: Option<CpuReadbackReason>,
     software_reason: Option<SoftwareEncodingReason>,
     status: Option<DesktopEncodingStatus>,
@@ -29,12 +33,14 @@ impl Encoder {
         self.status
     }
 
-    pub fn reset(&mut self, _capture: &mut dyn Capture) -> Result<()> {
+    pub fn reset(&mut self, capture: &mut dyn Capture) -> Result<()> {
+        self.vaapi = None;
         self.cpu_input = None;
+        self.gpu_unavailable = false;
         self.cpu_readback_reason = None;
         self.software_reason = None;
         self.status = None;
-        Ok(())
+        capture.discard_gpu()
     }
 
     pub fn encode(
@@ -43,9 +49,37 @@ impl Encoder {
         request: FrameRequest,
         cancel: &AtomicBool,
     ) -> Result<Vec<u8>> {
-        self.cpu_readback_reason = request
-            .hardware_video
-            .then_some(CpuReadbackReason::NoDmaBuf);
+        if request.codec == DisplayCodec::H264 && request.hardware_video && !self.gpu_unavailable {
+            match self.gpu_packet(capture, request, cancel) {
+                Ok(Some(packet)) => {
+                    self.status = Some(DesktopEncodingStatus {
+                        encoder: DesktopEncoder::H264Vaapi,
+                        gpu_input: true,
+                        cpu_readback_reason: None,
+                        software_reason: None,
+                    });
+                    return Ok(packet);
+                }
+                Ok(None) => {
+                    tracing::info!("Selected capture implementation supplies CPU buffers; GPU-buffer input is unavailable on this path");
+                    self.gpu_unavailable = true;
+                    self.cpu_readback_reason = Some(CpuReadbackReason::NoDmaBuf);
+                }
+                Err(error) => {
+                    self.vaapi = None;
+                    capture.discard_gpu()?;
+                    ensure!(
+                        !cancel.load(Ordering::Relaxed),
+                        "Desktop encoding cancelled"
+                    );
+                    tracing::warn!(
+                        "GPU desktop encoding unavailable; using CPU readback: {error:#}"
+                    );
+                    self.gpu_unavailable = true;
+                    self.cpu_readback_reason = Some(CpuReadbackReason::GpuFailure);
+                }
+            }
+        }
         let frame = capture.frame(cancel)?;
         ensure!(
             frame.mode == request.mode && frame.format == request.format,
@@ -143,6 +177,56 @@ impl Encoder {
         }
         result
     }
+
+    fn gpu_packet(
+        &mut self,
+        capture: &mut dyn Capture,
+        request: FrameRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(frame) = capture.gpu_frame(cancel)? else {
+            return Ok(None);
+        };
+        ensure!(
+            (frame.image.width, frame.image.height) == (request.mode.width, request.mode.height),
+            "GPU frame geometry changed unexpectedly"
+        );
+        let planes: Vec<_> = frame
+            .image
+            .planes
+            .iter()
+            .map(|plane| DmaPlane {
+                descriptor: plane.descriptor.as_fd(),
+                allocation_bytes: plane.allocation_bytes,
+                pitch: plane.pitch,
+                offset: plane.offset,
+            })
+            .collect();
+        let input = DmaFrame {
+            width: frame.image.width,
+            height: frame.image.height,
+            fourcc: frame.image.fourcc,
+            modifier: frame.image.modifier,
+            planes: &planes,
+        };
+        let initializing = self.vaapi.is_none();
+        if initializing {
+            ensure!(
+                !cancel.load(Ordering::Relaxed),
+                "Desktop encoding cancelled"
+            );
+            self.vaapi = Some(VaapiEncoder::new(frame.device, &input, request.fps)?);
+        }
+        let packet = self
+            .vaapi
+            .as_mut()
+            .context("VAAPI encoder is missing")?
+            .encode(&input, cancel)?;
+        if initializing {
+            tracing::info!("Desktop encoding applied: h264_vaapi with GPU composition and conversion, without CPU pixel readback");
+        }
+        Ok(Some(packet))
+    }
 }
 
 fn complete_cpu_packet(encoder: &mut H264Encoder, pixels: &[u8], stride: usize) -> Result<Vec<u8>> {
@@ -157,7 +241,7 @@ fn complete_cpu_packet(encoder: &mut H264Encoder, pixels: &[u8], stride: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lianli_display::{frame::Frame, Event};
+    use lianli_display::{frame::Frame, gpu::GpuFrame, Event};
     use std::time::Duration;
 
     struct SoftwareCapture {
@@ -176,6 +260,9 @@ mod tests {
             self.frames += 1;
             Frame::new(mode(), PixelFormat::Argb8888, 64, &self.pixels)
         }
+        fn gpu_frame(&mut self, _: &AtomicBool) -> Result<Option<GpuFrame<'_>>> {
+            panic!("Software/JPEG encoding must not initialize DMA-BUF video")
+        }
         fn invalidate(&mut self) -> Result<()> {
             Ok(())
         }
@@ -190,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_packets_report_the_selected_encoder_and_reset_status() {
+    fn software_policy_and_jpeg_firmware_never_initialize_gpu_video() {
         for (codec, hardware_video) in [
             (DisplayCodec::H264, false),
             (DisplayCodec::Jpeg, false),

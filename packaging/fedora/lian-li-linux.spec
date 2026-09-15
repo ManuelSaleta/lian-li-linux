@@ -5,7 +5,7 @@ Summary:        Open-source Linux replacement for L-Connect 3
 
 %global evdi_version 1.15.0
 
-License:        MIT
+License:        MIT AND (GPL-2.0-only WITH Linux-syscall-note)
 URL:            https://github.com/sgtaziz/lian-li-linux
 Source0:        %{name}-%{version}.tar.gz
 Source1:        https://github.com/DisplayLink/evdi/archive/refs/tags/v%{evdi_version}.tar.gz#/evdi-%{evdi_version}.tar.gz
@@ -31,6 +31,7 @@ BuildRequires:  pkgconfig(libavcodec)
 BuildRequires:  pkgconfig(libavformat)
 BuildRequires:  pkgconfig(libswscale)
 BuildRequires:  pkgconfig(libavutil)
+BuildRequires:  pkgconfig(libavfilter)
 
 Requires:       hicolor-icon-theme
 Requires:       ffmpeg
@@ -39,6 +40,8 @@ Requires:       systemd-libs
 Recommends:     displaylink
 
 Recommends:     polkit
+Suggests:       libglvnd-egl
+Suggests:       mesa-libgbm
 
 Requires(post): systemd
 Requires(preun): systemd
@@ -128,6 +131,7 @@ fi
 
 %files
 %license LICENSE
+%license crates/lianli-display/src/hermes/UAPI-LICENSE
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
 %{_bindir}/lianli-session

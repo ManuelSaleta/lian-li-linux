@@ -5,9 +5,9 @@ pkgrel=1
 pkgdesc="Open-source Linux replacement for L-Connect 3 for Lian Li devices"
 arch=('x86_64')
 url="https://github.com/sgtaziz/lian-li-linux"
-license=('MIT')
+license=('MIT' 'GPL-2.0-only WITH Linux-syscall-note')
 depends=('libusb' 'ffmpeg' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
-optdepends=('evdi-dkms: EVDI desktop capture' 'systemd: graphical login-session authorization' 'polkit: administrator authorization for service mode switching')
+optdepends=('libglvnd: EGL GPU capture for Hermes-KMS' 'mesa: GBM GPU capture for Hermes-KMS' 'evdi-dkms: EVDI desktop capture' 'systemd: graphical login-session authorization' 'polkit: administrator authorization for service mode switching')
 makedepends=('git' 'cargo' 'clang' 'cmake' 'nasm' 'npm')
 provides=('lianli-linux')
 conflicts=('lianli-linux')
@@ -84,4 +84,5 @@ package() {
 
   # License
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 crates/lianli-display/src/hermes/UAPI-LICENSE "$pkgdir/usr/share/licenses/$pkgname/Hermes-KMS-UAPI-LICENSE"
 }

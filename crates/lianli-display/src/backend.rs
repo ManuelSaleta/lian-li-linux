@@ -1,8 +1,9 @@
 use crate::evdi::EvdiCapture;
+use crate::hermes::capture::HermesCapture;
 use crate::hyprland::Control;
 use crate::wayland::HyprlandCapture;
 use crate::{Capture, OutputRequest};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub enum LocalBackend {
@@ -34,17 +35,29 @@ impl LocalBackend {
                 backend: "Hyprland native",
                 fallback_reason: None,
             }),
-            Self::Drm => {
-                ensure!(
-                    !cancel.load(Ordering::Relaxed),
-                    "Desktop capture startup cancelled"
-                );
-                Ok(OpenedCapture {
-                    capture: Box::new(EvdiCapture::open(request)?),
-                    backend: "EVDI",
+            Self::Drm => match HermesCapture::open(request.clone(), cancel) {
+                Ok(capture) => Ok(OpenedCapture {
+                    capture: Box::new(capture),
+                    backend: "Hermes-KMS",
                     fallback_reason: None,
-                })
-            }
+                }),
+                Err(error) => {
+                    ensure!(
+                        !cancel.load(Ordering::Relaxed),
+                        "Desktop capture startup cancelled"
+                    );
+                    let reason: String = format!("{error:#}").chars().take(2048).collect();
+                    tracing::info!("Hermes-KMS unavailable; trying EVDI: {reason}");
+                    let capture = EvdiCapture::open(request).with_context(|| {
+                        format!("EVDI fallback failed after Hermes-KMS: {reason}")
+                    })?;
+                    Ok(OpenedCapture {
+                        capture: Box::new(capture),
+                        backend: "EVDI",
+                        fallback_reason: Some(reason),
+                    })
+                }
+            },
         }
     }
 }
