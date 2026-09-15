@@ -7,7 +7,7 @@ arch=('x86_64')
 url="https://github.com/sgtaziz/lian-li-linux"
 license=('MIT' 'GPL-2.0-only WITH Linux-syscall-note')
 depends=('libusb' 'ffmpeg' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
-optdepends=('libglvnd: EGL GPU capture for Hermes-KMS' 'mesa: GBM GPU capture for Hermes-KMS' 'evdi-dkms: EVDI desktop capture' 'systemd: graphical login-session authorization' 'polkit: administrator authorization for service mode switching')
+optdepends=('evdi-dkms: EVDI desktop mode (userspace library and kernel module)' 'polkit: administrator authorization for service mode switching')
 makedepends=('git' 'cargo' 'clang' 'cmake' 'nasm' 'npm')
 provides=('lianli-linux')
 conflicts=('lianli-linux')
@@ -42,10 +42,8 @@ package() {
   # Binaries
   install -Dm755 target/release/lianli-daemon "$pkgdir/usr/bin/lianli-daemon"
   install -Dm755 target/release/lianli-gui "$pkgdir/usr/bin/lianli-gui"
-
-  install -Dm755 target/release/lianli-control "$pkgdir/usr/bin/lianli-control"
-
   install -Dm755 target/release/lianli-session "$pkgdir/usr/bin/lianli-session"
+  install -Dm755 target/release/lianli-control "$pkgdir/usr/bin/lianli-control"
   install -Dm644 packaging/systemd/lianli-session.service "$pkgdir/usr/lib/systemd/user/lianli-session.service"
   install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
   ln -s ../lianli-session.service "$pkgdir/usr/lib/systemd/user/default.target.wants/lianli-session.service"
@@ -63,7 +61,6 @@ package() {
   # Systemd services: per-user + system service, user enables either
   install -Dm644 packaging/systemd/lianli-daemon.service "$pkgdir/usr/lib/systemd/user/lianli-daemon.service"
   install -Dm644 packaging/systemd/lianli-daemon-system.service "$pkgdir/usr/lib/systemd/system/lianli-daemon-system.service"
-
   install -Dm644 packaging/systemd/lianli-control-recovery.service "$pkgdir/usr/lib/systemd/system/lianli-control-recovery.service"
   install -d "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
   ln -s ../lianli-control-recovery.service "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/lianli-control-recovery.service"
@@ -75,6 +72,9 @@ package() {
 
   # Desktop entry
   install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.desktop "$pkgdir/usr/share/applications/com.sgtaziz.lianlilinux.desktop"
+  install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.metainfo.xml "$pkgdir/usr/share/metainfo/com.sgtaziz.lianlilinux.metainfo.xml"
+  install -d "$pkgdir/usr/share/man/man1"
+  install -m644 packaging/man/*.1 "$pkgdir/usr/share/man/man1/"
 
   # Icons
   install -Dm644 assets/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png"

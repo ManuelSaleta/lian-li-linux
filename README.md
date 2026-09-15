@@ -84,365 +84,113 @@ group needs the V2 dongle, V1 dongles show both entries.
 
 ### Desktop Mode (Virtual Display)
 
-Devices in desktop/display mode (HydroShift II, Lancool 207 Digital, Universal Screen 8.8") are
-additionally driven as a native secondary monitor via [evdi](https://github.com/DisplayLink/evdi).
-The daemon auto-attaches an evdi virtual output on detection, the device shows up in your
-compositor's display settings with its real EDID, and any window can be dragged onto it.
+HydroShift II, Lancool 207 Digital and Universal Screen 8.8" can extend your desktop.
+Hyprland uses native headless monitors. Other sessions try Hermes-KMS first, then
+EVDI. Desktop capture needs a logged-in graphical session, even with a system
+daemon. These optional backends are not required for cooling, RGB or LCD playback.
+See [desktop setup and requirements](docs/desktop-backends.md).
 
-Requirements:
-- `evdi-dkms` — bundles the userspace library (required to link the daemon) and the kernel
-  module (required at runtime for virtual display attach). On Arch this is the `evdi-dkms` AUR
-  package; on Debian/Ubuntu both pieces are packaged separately (`libevdi0-dev` + `evdi-dkms`).
-- System `ffmpeg` libraries (libavcodec/libavformat/libswscale) for H.264 encoding — already
-  pulled in by the base `ffmpeg` dependency.
-
-The daemon will still start without the kernel module loaded, but desktop-mode devices (HydroShift II,
-Lancool 207, Universal Screen 8.8") won't get attached as virtual displays until the module is present.
-
-`/sys/devices/evdi/add` is root-only by default; the package ships a udev rule that grants write access to it (and a `modules-load.d` drop-in that auto-loads the `evdi` module at boot), so the daemon creates and opens its own evdi nodes with no root setup step.
-
-If you've tested a device that isn't marked as tested above, please [open an issue or PR](https://github.com/sgtaziz/lian-li-linux/issues) to update this table.
-
-## Architecture
-
-```
-lianli-daemon          Daemon (user or system service) - fan control loop + LCD streaming
-  lianli-devices       HID/USB device drivers
-  lianli-transport     USB bulk transport (wireless protocol, display streaming)
-  lianli-media         Image/video/GIF encoding, sensor gauge rendering
-  lianli-shared        IPC types, config schema, device IDs
-
-lianli-gui             Tauri desktop app (Rust + Vue) - connects to daemon via Unix socket
-```
-
-The daemon runs as either a per-user or system systemd service (see [Service modes](#service-modes)), neither is enabled automatically. USB access is granted via udev rules (no root required). The GUI connects over `$XDG_RUNTIME_DIR/lianli-daemon.sock` (per-user daemon) or `/run/lianli/lianli-daemon.sock` (system daemon) and auto-detects which.
-
-Settings shows the connected daemon's version, configuration mode, and configuration file. Older daemons still connect but do not report this information.
+If you have tested a device not marked above, please
+[report your results](https://github.com/sgtaziz/lian-li-linux/issues) with a diagnostic export.
 
 ## Installing
 
 ### Arch Linux (AUR)
 
-```bash
+```sh
 yay -S lianli-linux-git
 ```
 
-You can also build from the PKGBUILD in case AUR is inaccessible:
-```bash
-git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && cd lian-li-linux/packaging/archlinux
+To build the package directly:
+
+```sh
+git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git
+cd lian-li-linux/packaging/archlinux
 makepkg -si
 ```
 
-The package installs binaries, udev rules, both systemd units, and creates the `lianli` system user/group automatically. Reload udev, then pick a service mode:
-```bash
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-See [Service modes](#service-modes) for the per-user vs system choice and how to enable each.
-
 ### Fedora (COPR)
 
-```bash
-# libx264 (H.264 LCD streaming) is GPL, ffmpeg with it is only available in rpmfusion free repo. Enable it first
+For immutable Fedora distributions such as Bazzite, use the
+[recommended Distrobox installation](#distrobox-and-immutable-hosts) below.
+
+Enable RPM Fusion Free for full FFmpeg with libx264, then install the project package:
+
+```sh
 sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-# Then the project repo
 sudo dnf copr enable sgtaziz/lian-li-linux
 sudo dnf install lian-li-linux
 ```
 
-This installs binaries, udev rules, both systemd units, the `lianli` system user/group, desktop entry, and icons, and pulls in full `ffmpeg` (with libx264) from rpmfusion. It does **not** auto-start the daemon. Pick a mode in [Service modes](#service-modes).
+### Debian and Ubuntu
 
-Desktop-mode devices (HydroShift II, Lancool 207, Universal Screen 8.8") additionally need the `evdi` kernel module:
-```bash
-sudo dnf copr enable crashdummy/Displaylink
-sudo dnf install displaylink
-```
+Use the release artifact matching your distribution: Ubuntu 24.04, Ubuntu 26.04
+or Debian 13, amd64. These packages are distribution-specific because their linked
+libraries differ. See [download verification and installation](docs/debian-packages.md).
 
-### Distrobox (containers)
+### Distrobox and immutable hosts
 
-On Bazzite and other immutable systems, the recommended way to add software is a Distrobox container rather than layering onto the base. lian-li-linux runs fine in one when the host grants access to its USB devices.
+**We strongly recommend Distrobox on immutable distributions such as Bazzite,
+Fedora Silverblue and Kinoite.** It keeps the application and its dependencies
+inside a Fedora container, avoiding application package layering and dependency
+conflicts with the host image.
 
-Inside the container:
-```bash
-# 1. Enable rpmfusion (full ffmpeg with libx264)
-sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-# 2. Enable the project COPR
-sudo dnf copr enable sgtaziz/lian-li-linux
-# 3. Install, skipping Recommends — displaylink pulls a DKMS kernel-module build
-#    that triggers dracut, which fails in a container. Kernel modules don't belong
-#    in a box anyway.
-sudo dnf install --setopt=install_weak_deps=False lian-li-linux
-```
+Follow the [Distrobox installation guide](docs/distrobox.md), including host USB
+rules, the host bridge and user/system service setup. Complete the host setup
+steps too: installing the package inside the box alone is not enough. Optional
+desktop kernel modules still belong on the host.
 
-Don't enable `crashdummy/Displaylink` inside the box either, same reason.
-
-The package installs its udev rules and creates the `lianli` group inside the container, but USB device nodes are managed by the host. After replacing `<boxname>` with your container name, install the rule and grant your user access on the **host**:
-```bash
-getent group lianli >/dev/null || sudo groupadd --system lianli
-sudo usermod --append --groups lianli "$USER"
-distrobox-enter -n <boxname> -- cat /usr/lib/udev/rules.d/60-lianli.rules \
-  | sudo tee /etc/udev/rules.d/60-lianli.rules >/dev/null
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-The daemon also requires the shared ownership lock on the **host**. Install the box's
-tmpfiles rule there before starting the service:
-```bash
-distrobox-enter -n "<boxname>" -- cat /usr/lib/tmpfiles.d/lianli.conf \
-  | sudo tee /etc/tmpfiles.d/lianli.conf >/dev/null
-sudo systemd-tmpfiles --create lianli.conf
-```
-The daemon uses `/run/host/run/lianli-daemon.lock` inside Distrobox so it coordinates with
-native services. See [Service modes and ownership](docs/service-modes.md) for recovery.
-
-Log out and back in so the new group membership reaches Distrobox and the user systemd service. If the box remained running, stop it with `distrobox stop <boxname>`; the next `distrobox-enter` starts it again with the updated groups.
-
-A default Distrobox doesn't run systemd, so the shipped `lianli-daemon.service` can't manage the daemon from inside the box. To start it on login, create a user systemd unit on the **host** that enters the box, e.g. `~/.config/systemd/user/lianli-daemon.service`:
-```ini
-[Unit]
-Description=Lian Li Daemon (distrobox)
-After=graphical-session.target
-
-[Service]
-ExecStart=/usr/bin/distrobox-enter -n <boxname> -- lianli-daemon
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-Replace `<boxname>` with your container name (check the path with `command -v distrobox-enter`), then:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now lianli-daemon.service
-```
-Run the GUI with `distrobox-enter -n <boxname> -- lianli-gui`.
-
-### Immutable Fedora (Bazzite)
-
-Prefer the distrobox method above. If you need to install directly on the base instead, `dnf install` doesn't apply on rpm-ostree. Packages layer into a new deployment that only takes effect after a reboot, and the daemon won't start on its own.
-
-```bash
-# 1. Enable rpmfusion (full ffmpeg with libx264)
-sudo rpm-ostree install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-sudo systemctl reboot
-
-# 2. After reboot: add the project repo and install
-sudo curl --output-dir /etc/yum.repos.d/ --remote-name \
-  https://copr.fedorainfracloud.org/coprs/sgtaziz/lian-li-linux/repo/fedora-$(rpm -E %fedora)/sgtaziz-lian-li-linux-fedora-$(rpm -E %fedora).repo
-sudo rpm-ostree install lian-li-linux
-sudo systemctl reboot
-
-# 3. After reboot: start the daemon
-systemctl --user daemon-reload
-systemctl --user enable --now lianli-daemon.service
-```
-
+[Native package layering on immutable Fedora](docs/immutable-host.md) is an
+advanced alternative for users who specifically need a host installation. It
+changes the host deployment and requires reboots. Prefer Distrobox for normal use.
 
 ### From Source
 
-1) Clone the repo and submodules:
-```bash
-git clone --recurse-submodules https://github.com/sgtaziz/lian-li-linux.git && cd lian-li-linux
-```
-> If you already cloned without `--recurse-submodules`, run: `git submodule update --init --recursive`
+See [build dependencies and installation](docs/building-from-source.md).
+`cargo build --release` builds the daemon, GUI, control helper and session helper,
+including the frontend.
 
-2) Install dependencies:
-- **Rust** (stable)
-- **npm**
-- **ffmpeg** and **ffprobe** in `PATH` (for video/GIF decoding)
-- **System libraries:**
+## First launch
 
-```bash
-# Arch
-sudo pacman -S libusb ffmpeg fontconfig mesa libxkbcommon wayland libx11 libinput libdrm \
-  libjpeg-turbo clang cmake pkg-config nasm npm \
-  webkit2gtk-4.1 gtk3 glib2 libsoup3 libayatana-appindicator librsvg
-yay -S evdi-dkms             # AUR — evdi-dkms bundles libevdi + DKMS module
+Open **Lian Li Linux** after installation. **Installation Health** checks setup
+and links to repair instructions. Fresh native installs leave both daemon services
+stopped: choose **User (at login)** or **System (at boot)** and select **Enable and
+start**. Only one mode can own the hardware.
 
-# Ubuntu / Debian
-sudo apt install libusb-1.0-0-dev libudev-dev libfontconfig-dev \
-  libxkbcommon-dev libwayland-dev libx11-dev libinput-dev libdrm-dev \
-  libgl-dev libegl-dev clang cmake pkg-config ffmpeg nasm npm \
-  libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
-  libevdi0-dev \
-  libwebkit2gtk-4.1-dev libglib2.0-dev libgtk-3-dev libsoup-3.0-dev \
-  libayatana-appindicator3-dev librsvg2-dev
-sudo apt install evdi-dkms  # optional, only needed at runtime for desktop-mode devices
+Use **Settings → Configuration** to manage services, transfer settings/media,
+restore backups and manage storage. The system daemon needs access to every LCD
+asset, including images, video and fonts referenced by templates.
 
-# Fedora
-sudo dnf install libusb1-devel fontconfig-devel \
-  libxkbcommon-devel wayland-devel libX11-devel libinput-devel libdrm-devel \
-  mesa-libGL-devel mesa-libEGL-devel clang cmake pkg-config ffmpeg \
-  ffmpeg-devel nasm npm \
-  webkit2gtk4.1-devel gtk3-devel glib2-devel libsoup3-devel \
-  libappindicator-gtk3-devel librsvg2-devel
-# evdi is not packaged in Fedora repos — build libevdi from source to link the daemon:
-#   https://github.com/DisplayLink/evdi  (evdi-dkms is only needed at runtime)
-# You can also download https://github.com/displaylink-rpm/displaylink-rpm instead
-# Make sure to replace ffmpeg-free with ffmpeg if ffmpeg-free is installed
-```
-
-3) Build:
-```bash
-cargo build --release
-```
-
-The GUI crate's build script runs `npm install` + `npm run build` automatically when the frontend
-sources are newer than the built `dist/`.
-
-Binaries: `target/release/lianli-daemon` and `target/release/lianli-gui`
-
-4) Install udev rules (required for USB access without root):
-```bash
-sudo install -Dm644 packaging/udev/60-lianli.rules /usr/lib/udev/rules.d/60-lianli.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-# If evdi is already loaded, apply the new evdi chmod rule without a reboot:
-[ -e /sys/module/evdi ] && sudo udevadm trigger --action=add /sys/module/evdi
-```
-
-> Install to `/usr/lib/udev/rules.d/` (the vendor location, same as the package) — **not** `/etc/udev/rules.d/`. A file in `/etc` with the same name would shadow the packaged one and silently override it.
-
-For headless operation, run the [system service](#service-modes). This allows control even when no users are logged in.
-
-5) Install binaries, service units, and the system user/group:
-```bash
-sudo install -Dm755 target/release/lianli-daemon /usr/bin/lianli-daemon
-sudo install -Dm755 target/release/lianli-gui /usr/bin/lianli-gui
-
-sudo install -Dm644 packaging/systemd/lianli-daemon.service /usr/lib/systemd/user/lianli-daemon.service
-sudo install -Dm644 packaging/systemd/lianli-daemon-system.service /usr/lib/systemd/system/lianli-daemon-system.service
-sudo install -Dm644 packaging/sysusers.d/lianli.conf /usr/lib/sysusers.d/lianli.conf
-sudo install -Dm644 packaging/tmpfiles.d/lianli.conf /usr/lib/tmpfiles.d/lianli.conf
-sudo systemd-sysusers lianli.conf
-sudo systemd-tmpfiles --create lianli.conf
-
-# Auto-load evdi at boot (for desktop-mode LCD support)
-sudo install -Dm644 packaging/modules-load.d/lianli-evdi.conf /usr/lib/modules-load.d/lianli-evdi.conf
-systemctl --user daemon-reload
-sudo systemctl daemon-reload
-```
-
-Now enable one service — see [Service modes](#service-modes). A default config is created on first run at `~/.config/lianli/config.json` (user service) or `/var/lib/lianli/config.json` (system service).
-
-6) Install desktop entry and icons:
-```bash
-# Install icons
-for size in 32x32 128x128 256x256 scalable; do mkdir -p ~/.local/share/icons/hicolor/$size/apps; done
-cp assets/icons/32x32.png ~/.local/share/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png
-cp assets/icons/128x128.png ~/.local/share/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
-cp assets/icons/128x128@2x.png ~/.local/share/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
-cp assets/icons/icon.svg ~/.local/share/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
-
-# Install desktop entry
-cp packaging/desktop/com.sgtaziz.lianlilinux.desktop ~/.local/share/applications/
-update-desktop-database ~/.local/share/applications/
-```
-
-## Udev rules
-
-The default rules grant device access with **no manual setup**:
-- The active logged-in user gets read/write via `uaccess` — used by the per-user daemon.
-- The `lianli` system user (auto-created at install) gets read/write via the `lianli` group — used by the optional [system service](#service-modes) for headless control.
-
-## Service modes
-
-The daemon ships as two systemd units. **Neither is enabled automatically**. Pick one at install (not both, or they'll fight over the same USB devices). The GUI auto-detects whichever is running.
-
-> **Upgrading from an older package?** Previous versions force-enabled the user service in the **global** scope. That lingers across the upgrade, and `systemctl --user disable` alone won't undo it (you'll get a "still started automatically" warning). Clear it first, then pick a mode:
-> ```bash
-> sudo systemctl --global disable lianli-daemon.service
-> systemctl --user disable lianli-daemon.service
-> ```
-
-**Per-user.** Runs as your user, reads `~/.config/lianli/config.json`. Best for multi-user systems (each user has their own profile/LCDs).
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now lianli-daemon.service
-```
-
-**System (headless / single-user).** Runs as the `lianli` system user at boot — no login required. Config lives at `/var/lib/lianli/config.json`.
-```bash
-sudo systemctl enable --now lianli-daemon-system.service
-```
-From-source installs must create the user first (packaged installs do it automatically via `sysusers.d`):
-```bash
-sudo groupadd -r lianli && sudo useradd -r -g lianli -d / -s /usr/sbin/nologin -c "Lian Li daemon" lianli
-```
-
-> **LCD media access:** the system daemon reads media files (videos/GIFs/PNGs referenced by your LCD config) directly as the `lianli` user. It can only open files `lianli` has filesystem permission to reach, so if your home dir is hardened to `0700` (`drwx------`), put your media somewhere `lianli` can read (e.g. `/var/lib/lianli/media/`, or any world-readable path). The per-user daemon has no such limit since it runs as you.
-
-### Migrating between modes
-
-Config is stored per mode (user: `~/.config/lianli/`, system: `/var/lib/lianli/`). To keep your settings — profiles, fan curves, RGB presets — when switching, copy the whole directory across and fix ownership:
-
-```bash
-# user to system
-sudo cp -a ~/.config/lianli/. /var/lib/lianli/
-sudo chown -R lianli:lianli /var/lib/lianli
-
-# system to user
-cp -a /var/lib/lianli/. ~/.config/lianli/
-sudo chown -R $USER:$USER ~/.config/lianli
-```
-
-Then enable the other unit and disable the current one (the shared lock refuses to let both run, so stop the old one first). If the old one was the user service and won't disable, see the upgrade note above.
+- [Service setup, switching and recovery](docs/service-modes.md)
+- [USB permissions and udev rules](docs/usb-permissions.md)
+- [LCD assets and managed storage](docs/lcd-assets.md)
+- [Configuration and template backups](docs/state-backups.md)
 
 ## Configuration
 
-The daemon reads its config from `~/.config/lianli/config.json` (per-user service) or `/var/lib/lianli/config.json` (system service) — see [Service modes](#service-modes). The GUI edits this file via the daemon's IPC socket. LCD targets, fan curves, and speed modes are all configured through the GUI.
+The GUI saves changes through the daemon. User configuration lives in
+`~/.config/lianli/`; system configuration lives in `/var/lib/lianli/`.
 
-**Hardware video acceleration** in Settings is disabled by default. Save the setting to
-reconfigure active video streams without restarting the daemon. It replaces the
-`LIANLI_ENABLE_HW_VIDEO` environment variable, which is no longer read. See
-[Hardware video](docs/hardware-video.md) for scope and troubleshooting.
+**Hardware video acceleration** is disabled by default. Enable it in Settings and
+save to recreate active video streams without restarting the daemon. See
+[hardware video](docs/hardware-video.md) for supported paths and diagnostics.
 
-## Pixel conditioning
+LCD cards also offer [pixel conditioning](docs/pixel-conditioning.md), with
+cancellation and restoration of the previous display.
 
-Each LCD card has a pixel-conditioning control with 15, 30, 60, and 120-minute presets. The daemon generates a five-second pattern of alternating black/white, changing grayscale noise, and solid color phases. JPEG-only displays use native-sized frames within their payload limits. H.264 displays use noise generated at reduced resolution and upscaled to the panel's native dimensions before encoding; bitrate and frame bursts follow the negotiated block size, or the driver's fallback when negotiation is unavailable. There is no bundled video or download. Preparation finishes before the display changes; use Cancel to abandon preparation or Stop to restore the previous display.
+## Help and diagnostics
 
-```bash
-lianli-daemon lcd clean --minutes 30
-lianli-daemon lcd clean --device-id 'hid:1-2:1.0#0' --minutes 15
-```
+Start with [troubleshooting](docs/troubleshooting.md). Before opening an
+[issue](https://github.com/sgtaziz/lian-li-linux/issues), export a diagnostic report
+from **Installation Health**. The export requires daemon logs and includes logs
+from the last daemon startup. Review the report before sharing it.
 
-Omitting `--device-id` selects active configured LCD targets. The `#0` suffix identifies the configuration entry, not the physical USB port. Ctrl+C or SIGTERM cancels preparation or stops the session started by that CLI process. CLI durations must be positive; values above 255 minutes are capped.
+## Architecture
 
-Conditioning uses 75% brightness and restores the configured brightness afterward (100% when omitted). Config reload cancels conditioning before applying new entries. On daemon shutdown, supported LCD backlights are turned off by default. Disable **Turn off LCDs on shutdown** in Settings to skip this brightness change. Startup reapplies configured brightness. This routine exercises pixels; it does not guarantee recovery from retention or panel damage.
-
-## Troubleshooting
-
-**Daemon won't start / no devices found:**
-```bash
-# Check udev rules are loaded
-sudo udevadm test /sys/bus/usb/devices/<your-device>
-
-# Check daemon logs (whichever mode you use)
-journalctl --user -u lianli-daemon -f          # per-user service
-sudo journalctl -u lianli-daemon-system -f     # system service
-```
-
-Device access uses `uaccess` (per-user daemon) or the `lianli` group (system service). If you get permission errors or a device isn't detected, confirm the rules are installed and re-triggered. See [Udev rules](#udev-rules) and [Service modes](#service-modes).
-
-**GUI says "Daemon offline":**
-```bash
-# Verify the daemon is running (whichever mode you use)
-systemctl --user status lianli-daemon          # per-user
-sudo systemctl status lianli-daemon-system     # system
-
-# Check the socket exists (GUI auto-detects either)
-ls -la "$XDG_RUNTIME_DIR/lianli-daemon.sock" /run/lianli/lianli-daemon.sock 2>/dev/null
-```
-
-**GUI won't launch (blank window / webview errors):**
-
-The Tauri GUI depends on WebKit2GTK. Ensure `webkit2gtk-4.1` is installed and your GPU drivers support it. On Wayland with NVIDIA, `WEBKIT_DISABLE_COMPOSITING_MODE=1` may help as a workaround.
-
-**Permission denied on USB device:**
-```bash
-# Re-trigger udev after plugging in device
-sudo udevadm trigger
-```
+The Rust daemon owns hardware, cooling and media playback. The Tauri/Vue GUI
+communicates with it over a Unix socket. `lianli-control` manages service ownership
+and state transfer; `lianli-session` captures desktop outputs in the graphical
+session.
 
 ## License
 

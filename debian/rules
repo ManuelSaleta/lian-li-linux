@@ -1,0 +1,65 @@
+#!/usr/bin/make -f
+
+export CARGO_TARGET_DIR = $(CURDIR)/target/debian
+export CARGO_PROFILE_RELEASE_STRIP = symbols
+# Avoid GCC LTO's nested-jobserver failure while building bundled TurboJPEG.
+export DEB_BUILD_MAINT_OPTIONS = optimize=-lto
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	cargo build --locked --release -p lianli-daemon -p lianli-gui -p lianli-session -p lianli-control
+
+override_dh_auto_test:
+	cargo test --locked --workspace
+
+override_dh_auto_clean:
+
+override_dh_auto_install:
+	install -Dm755 target/debian/release/lianli-daemon debian/lian-li-linux/usr/bin/lianli-daemon
+	install -Dm755 target/debian/release/lianli-gui debian/lian-li-linux/usr/bin/lianli-gui
+	install -Dm755 target/debian/release/lianli-session debian/lian-li-linux/usr/bin/lianli-session
+	install -Dm755 target/debian/release/lianli-control debian/lian-li-linux/usr/bin/lianli-control
+	install -Dm644 packaging/systemd/lianli-session.service debian/lian-li-linux/usr/lib/systemd/user/lianli-session.service
+	install -d debian/lian-li-linux/usr/lib/systemd/user/default.target.wants
+	ln -s ../lianli-session.service debian/lian-li-linux/usr/lib/systemd/user/default.target.wants/lianli-session.service
+	install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.session.desktop debian/lian-li-linux/etc/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
+	install -Dm644 packaging/udev/60-lianli.rules debian/lian-li-linux/usr/lib/udev/rules.d/60-lianli.rules
+	install -Dm644 packaging/sysusers.d/lianli.conf debian/lian-li-linux/usr/lib/sysusers.d/lianli.conf
+	install -Dm644 packaging/tmpfiles.d/lianli.conf debian/lian-li-linux/usr/lib/tmpfiles.d/lianli.conf
+	install -Dm644 packaging/systemd/lianli-daemon.service debian/lian-li-linux/usr/lib/systemd/user/lianli-daemon.service
+	install -Dm644 packaging/systemd/lianli-daemon-system.service debian/lian-li-linux/usr/lib/systemd/system/lianli-daemon-system.service
+	install -Dm644 packaging/systemd/lianli-control-recovery.service debian/lian-li-linux/usr/lib/systemd/system/lianli-control-recovery.service
+	install -d debian/lian-li-linux/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../lianli-control-recovery.service debian/lian-li-linux/usr/lib/systemd/system/multi-user.target.wants/lianli-control-recovery.service
+	install -Dm644 packaging/polkit/49-lianli-recovery.rules debian/lian-li-linux/usr/share/polkit-1/rules.d/49-lianli-recovery.rules
+	install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop debian/lian-li-linux/etc/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
+	install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.desktop debian/lian-li-linux/usr/share/applications/com.sgtaziz.lianlilinux.desktop
+	install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.metainfo.xml debian/lian-li-linux/usr/share/metainfo/com.sgtaziz.lianlilinux.metainfo.xml
+	install -d debian/lian-li-linux/usr/share/man/man1
+	install -m644 packaging/man/*.1 debian/lian-li-linux/usr/share/man/man1/
+	install -Dm644 assets/icons/32x32.png debian/lian-li-linux/usr/share/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png
+	install -Dm644 assets/icons/128x128.png debian/lian-li-linux/usr/share/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
+	install -Dm644 assets/icons/128x128@2x.png debian/lian-li-linux/usr/share/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
+	install -Dm644 assets/icons/icon.svg debian/lian-li-linux/usr/share/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
+	install -d debian/lian-li-linux/usr/share/doc/lian-li-linux/guides
+	install -m644 docs/*.md debian/lian-li-linux/usr/share/doc/lian-li-linux/guides/
+	install -Dm644 vendor/tinyuz/LICENSE debian/lian-li-linux/usr/share/doc/lian-li-linux/tinyuz-LICENSE
+	install -Dm644 vendor/HDiffPatch/LICENSE debian/lian-li-linux/usr/share/doc/lian-li-linux/HDiffPatch-LICENSE
+	install -Dm644 crates/lianli-display/src/hermes/UAPI-LICENSE debian/lian-li-linux/usr/share/doc/lian-li-linux/Hermes-KMS-UAPI-LICENSE
+	bash packaging/debian/install-jpeg-license.sh debian/lian-li-linux/usr/share/doc/lian-li-linux
+
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start --no-stop-on-upgrade
+
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+override_dh_compress:
+	dh_compress -XHermes-KMS-UAPI-LICENSE

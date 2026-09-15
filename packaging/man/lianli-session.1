@@ -1,0 +1,52 @@
+.TH LIANLI-SESSION 1 "" "Lian Li Linux"
+.SH NAME
+lianli-session \- provide graphical-session capture for Lian Li desktop displays
+.SH SYNOPSIS
+.B lianli-session
+.RI [ "\-\-login-start" ]
+.RI [ "\-\-socket PATH" ]
+.SH DESCRIPTION
+The session helper connects the hardware daemon to the active local graphical
+session. It supervises a capture worker and manages application-owned virtual
+outputs. It must run as the desktop user, not root.
+.PP
+Native packages arrange graphical-login startup through the user service.
+Distrobox requires a host user capture unit entering the intended box; generate
+its recipe with
+.BR "lianli-control distrobox-service-unit \-\-desktop-session" .
+Application binaries stay inside the box.
+.PP
+System capture verifies the selected host service account against the socket
+peer. A Distrobox system daemon uses the host runtime socket and requires the
+selected box owner's host and container UID to match.
+.PP
+The helper is separate from the hardware daemon. Before graphical login,
+desktop-mode displays wait for an eligible session; fan, lighting and ordinary
+LCD control remain daemon responsibilities.
+.SH OPTIONS
+.TP
+.B \-\-login-start
+Wait for a graphical login and discover its desktop environment before capture.
+.TP
+.BI "\-\-socket " PATH
+Select the daemon IPC socket. The display-channel suffix is added automatically.
+.TP
+.BI "\-\-service-invocation " ID
+Register ownership for the invocation supplied by a host service wrapper.
+Use the generated unit rather than inventing invocation IDs.
+.TP
+.BI "\-\-stop-service " ID
+Request termination of only the capture helper registered for that invocation,
+with process-identity checks and a bounded exit wait.
+.TP
+.B \-\-help
+Show command help.
+.SH ENVIRONMENT
+The helper uses the active login's XDG_RUNTIME_DIR, WAYLAND_DISPLAY and, on
+Hyprland, HYPRLAND_INSTANCE_SIGNATURE. Login startup discovers the matching
+session environment; do not substitute another user's compositor credentials.
+.SH SEE ALSO
+.BR lianli-daemon (1),
+.BR lianli-control (1)
+.PP
+https://github.com/sgtaziz/lian-li-linux/blob/main/docs/distrobox.md

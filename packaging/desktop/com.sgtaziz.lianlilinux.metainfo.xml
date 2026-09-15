@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.sgtaziz.lianlilinux</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Lian Li Linux</name>
+  <summary>Control Lian Li fans, lighting and LCDs</summary>
+  <description>
+    <p>Configure supported Lian Li hardware through a desktop client and a background daemon.</p>
+    <ul>
+      <li>Configure fan curves, lighting effects and LCD media.</li>
+      <li>Display sensor gauges and custom templates.</li>
+      <li>Check installation requirements and manage the selected daemon service.</li>
+      <li>Use supported LCD panels as desktop displays in a compatible graphical session.</li>
+    </ul>
+    <p>Device features vary by model. Choose a user or system daemon after installation; hardware control is not enabled automatically.</p>
+  </description>
+  <developer id="io.github.sgtaziz"><name>sgtaziz</name></developer>
+  <launchable type="desktop-id">com.sgtaziz.lianlilinux.desktop</launchable>
+  <url type="homepage">https://github.com/sgtaziz/lian-li-linux</url>
+  <url type="bugtracker">https://github.com/sgtaziz/lian-li-linux/issues</url>
+  <url type="help">https://github.com/sgtaziz/lian-li-linux/tree/main/docs</url>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <modalias>usb:v0416p7371d*</modalias>
+    <modalias>usb:v0416p7372d*</modalias>
+    <modalias>usb:v0416p7373d*</modalias>
+    <modalias>usb:v0416p7391d*</modalias>
+    <modalias>usb:v0416p7395d*</modalias>
+    <modalias>usb:v0416p7398d*</modalias>
+    <modalias>usb:v0416p7399d*</modalias>
+    <modalias>usb:v0416p739Ad*</modalias>
+    <modalias>usb:v0416p8040d*</modalias>
+    <modalias>usb:v0416p8041d*</modalias>
+    <modalias>usb:v0416p8050d*</modalias>
+    <modalias>usb:v0416p8051d*</modalias>
+    <modalias>usb:v04FCp7393d*</modalias>
+    <modalias>usb:v0CF2pA100d*</modalias>
+    <modalias>usb:v0CF2pA101d*</modalias>
+    <modalias>usb:v0CF2pA102d*</modalias>
+    <modalias>usb:v0CF2pA103d*</modalias>
+    <modalias>usb:v0CF2pA104d*</modalias>
+    <modalias>usb:v0CF2pA105d*</modalias>
+    <modalias>usb:v0CF2pA106d*</modalias>
+    <modalias>usb:v0CF2pA200d*</modalias>
+    <modalias>usb:v1A86p2107d*</modalias>
+    <modalias>usb:v1A86pACD1d*</modalias>
+    <modalias>usb:v1A86pACE1d*</modalias>
+    <modalias>usb:v1A86pAD11d*</modalias>
+    <modalias>usb:v1A86pAD20d*</modalias>
+    <modalias>usb:v1A86pAD21d*</modalias>
+    <modalias>usb:v1A86pAD22d*</modalias>
+    <modalias>usb:v1A86pAD23d*</modalias>
+    <modalias>usb:v1A86pAD26d*</modalias>
+    <modalias>usb:v1A86pE304d*</modalias>
+    <modalias>usb:v1A86pE305d*</modalias>
+    <modalias>usb:v1CBEp0005d*</modalias>
+    <modalias>usb:v1CBEp0006d*</modalias>
+    <modalias>usb:v1CBEpA018d*</modalias>
+    <modalias>usb:v1CBEpA019d*</modalias>
+    <modalias>usb:v1CBEpA021d*</modalias>
+    <modalias>usb:v1CBEpA034d*</modalias>
+    <modalias>usb:v1CBEpA065d*</modalias>
+    <modalias>usb:v1CBEpA068d*</modalias>
+    <modalias>usb:v1CBEpA088d*</modalias>
+    <modalias>usb:v1CBEpA092d*</modalias>
+    <modalias>usb:v43A8p0101d*</modalias>
+    <modalias>usb:v43A8p0102d*</modalias>
+    <modalias>usb:v43A8p0103d*</modalias>
+    <modalias>usb:v43A8p0104d*</modalias>
+    <modalias>usb:v43A8p0105d*</modalias>
+    <modalias>usb:v43A8p0106d*</modalias>
+    <modalias>usb:v43A8p0107d*</modalias>
+  </provides>
+</component>

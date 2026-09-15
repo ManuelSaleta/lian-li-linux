@@ -36,10 +36,9 @@ BuildRequires:  pkgconfig(libavfilter)
 Requires:       hicolor-icon-theme
 Requires:       ffmpeg
 Requires:       systemd-libs
-# evdi kernel module for desktop-mode devices
-Recommends:     displaylink
-
 Recommends:     polkit
+Suggests:       %{name}-evdi = %{version}-%{release}
+Suggests:       displaylink
 Suggests:       libglvnd-egl
 Suggests:       mesa-libgbm
 
@@ -56,7 +55,6 @@ effects, LCD streaming, and sensor gauges for Lian Li devices.
 
 %build
 %make_build -C evdi-%{evdi_version}/library
-export LIBRARY_PATH="$PWD/evdi-%{evdi_version}/library${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 cargo build --release --frozen
 
@@ -67,29 +65,30 @@ ln -s libevdi.so.%{evdi_version} %{buildroot}%{_libdir}/libevdi.so.1
 
 install -Dpm755 target/release/lianli-daemon %{buildroot}%{_bindir}/lianli-daemon
 install -Dpm755 target/release/lianli-gui     %{buildroot}%{_bindir}/lianli-gui
+install -Dpm755 target/release/lianli-session %{buildroot}%{_bindir}/lianli-session
+install -Dpm755 target/release/lianli-control %{buildroot}%{_bindir}/lianli-control
+install -Dpm644 packaging/systemd/lianli-session.service %{buildroot}%{_userunitdir}/lianli-session.service
+install -d %{buildroot}%{_userunitdir}/default.target.wants
+ln -s ../lianli-session.service %{buildroot}%{_userunitdir}/default.target.wants/lianli-session.service
+install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.session.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
 install -Dpm644 packaging/udev/60-lianli.rules %{buildroot}%{_udevrulesdir}/60-lianli.rules
 install -Dpm644 packaging/systemd/lianli-daemon.service %{buildroot}%{_userunitdir}/lianli-daemon.service
 install -Dpm644 packaging/systemd/lianli-daemon-system.service %{buildroot}%{_unitdir}/lianli-daemon-system.service
-install -Dpm644 packaging/tmpfiles.d/lianli.conf %{buildroot}%{_tmpfilesdir}/lianli.conf
-install -Dpm644 packaging/modules-load.d/lianli-evdi.conf %{buildroot}%{_modulesloaddir}/lianli-evdi.conf
-install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.desktop %{buildroot}%{_datadir}/applications/com.sgtaziz.lianlilinux.desktop
-install -Dpm644 assets/icons/32x32.png      %{buildroot}%{_datadir}/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png
-install -Dpm644 assets/icons/128x128.png    %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
-install -Dpm644 assets/icons/128x128@2x.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
-install -Dpm644 assets/icons/icon.svg       %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
-
-install -Dpm755 target/release/lianli-control %{buildroot}%{_bindir}/lianli-control
 install -Dpm644 packaging/systemd/lianli-control-recovery.service %{buildroot}%{_unitdir}/lianli-control-recovery.service
 install -d %{buildroot}%{_unitdir}/multi-user.target.wants
 ln -s ../lianli-control-recovery.service %{buildroot}%{_unitdir}/multi-user.target.wants/lianli-control-recovery.service
 install -Dpm644 packaging/polkit/49-lianli-recovery.rules %{buildroot}%{_datadir}/polkit-1/rules.d/49-lianli-recovery.rules
 install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
-
-install -Dpm755 target/release/lianli-session %{buildroot}%{_bindir}/lianli-session
-install -Dpm644 packaging/systemd/lianli-session.service %{buildroot}%{_userunitdir}/lianli-session.service
-install -d %{buildroot}%{_userunitdir}/default.target.wants
-ln -s ../lianli-session.service %{buildroot}%{_userunitdir}/default.target.wants/lianli-session.service
-install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.session.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
+install -Dpm644 packaging/tmpfiles.d/lianli.conf %{buildroot}%{_tmpfilesdir}/lianli.conf
+install -Dpm644 packaging/modules-load.d/lianli-evdi.conf %{buildroot}%{_modulesloaddir}/lianli-evdi.conf
+install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.desktop %{buildroot}%{_datadir}/applications/com.sgtaziz.lianlilinux.desktop
+install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.metainfo.xml %{buildroot}%{_datadir}/metainfo/com.sgtaziz.lianlilinux.metainfo.xml
+install -d %{buildroot}%{_mandir}/man1
+install -pm644 packaging/man/*.1 %{buildroot}%{_mandir}/man1/
+install -Dpm644 assets/icons/32x32.png      %{buildroot}%{_datadir}/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png
+install -Dpm644 assets/icons/128x128.png    %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
+install -Dpm644 assets/icons/128x128@2x.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
+install -Dpm644 assets/icons/icon.svg       %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
 
 %pre
 getent group lianli >/dev/null || groupadd -r lianli
@@ -135,20 +134,22 @@ fi
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
 %{_bindir}/lianli-session
+%{_bindir}/lianli-control
 %{_userunitdir}/lianli-session.service
 %{_userunitdir}/default.target.wants/lianli-session.service
 %config(noreplace) %{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.session.desktop
-%{_bindir}/lianli-control
+%{_udevrulesdir}/60-lianli.rules
+%{_userunitdir}/lianli-daemon.service
+%{_unitdir}/lianli-daemon-system.service
 %{_unitdir}/lianli-control-recovery.service
 %{_unitdir}/multi-user.target.wants/lianli-control-recovery.service
 %{_datadir}/polkit-1/rules.d/49-lianli-recovery.rules
 %config(noreplace) %{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
-%{_udevrulesdir}/60-lianli.rules
-%{_userunitdir}/lianli-daemon.service
-%{_unitdir}/lianli-daemon-system.service
 %{_tmpfilesdir}/lianli.conf
 %{_modulesloaddir}/lianli-evdi.conf
 %{_datadir}/applications/com.sgtaziz.lianlilinux.desktop
+%{_datadir}/metainfo/com.sgtaziz.lianlilinux.metainfo.xml
+%{_mandir}/man1/lianli-*.1*
 %{_datadir}/icons/hicolor/32x32/apps/com.sgtaziz.lianlilinux.png
 %{_datadir}/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
 %{_datadir}/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
@@ -159,7 +160,8 @@ Summary:        Bundled libevdi library for %{name}
 Provides:       libevdi.so.1()(64bit)
 
 %description evdi
-Bundled libevdi (v%{evdi_version}) userspace library, used by lianli-daemon.
+Optional libevdi (v%{evdi_version}) userspace library for EVDI desktop mode.
+The host also needs a compatible EVDI kernel module.
 
 %files evdi
 %{_libdir}/libevdi.so.1

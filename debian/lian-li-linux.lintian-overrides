@@ -1,0 +1,3 @@
+# turbojpeg-sys needs 3.x APIs; these distributions ship 2.x. Cargo.lock pins the bundled build.
+lian-li-linux: embedded-library libjpeg [usr/bin/lianli-daemon]
+lian-li-linux: embedded-library libjpeg [usr/bin/lianli-session]

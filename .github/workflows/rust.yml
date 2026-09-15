@@ -34,7 +34,7 @@ jobs:
           libavformat-dev \
           libswscale-dev \
           libavutil-dev \
-          libevdi0-dev \
+          libavfilter-dev \
           libwebkit2gtk-4.1-dev \
           libglib2.0-dev \
           libgtk-3-dev \

@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    systemd-sysusers /usr/lib/sysusers.d/lianli.conf
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/lianli.conf
+    if ! systemd-detect-virt --quiet --container; then
+        if [ -d /run/udev ]; then
+            udevadm control --reload-rules
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload
+        fi
+    fi
+fi
+
+#DEBHELPER#

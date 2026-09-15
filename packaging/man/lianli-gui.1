@@ -1,0 +1,31 @@
+.TH LIANLI-GUI 1 "" "Lian Li Linux"
+.SH NAME
+lianli-gui \- configure Lian Li hardware through the daemon
+.SH SYNOPSIS
+.B lianli-gui
+.SH DESCRIPTION
+The desktop client configures supported fans, lighting and LCDs through daemon
+IPC. Installation Health reports missing prerequisites and links focused repair
+guides. Service controls select one user or system hardware daemon.
+.PP
+LCD and template edits use the GUI's Save/apply workflow. A saved setting does
+not by itself confirm successful media preparation or physical display output;
+inspect the reported runtime status when troubleshooting.
+.PP
+Hardware video acceleration defaults to disabled and is configured through GUI
+settings. The daemon applies policy changes to affected streams at runtime.
+.PP
+The GUI offers managed media copies, asset-access checks and backup operations.
+System-daemon access is checked separately from desktop-user access. Original
+assets are retained when copying into managed storage.
+.SH DIAGNOSTICS
+Use Installation Health to recheck prerequisites. Diagnostic export includes
+daemon logs; review the export before sharing it. A service manager is needed
+for service actions, but standalone inspection is available through
+.BR lianli-control (1).
+.SH SEE ALSO
+.BR lianli-daemon (1),
+.BR lianli-control (1),
+.BR lianli-session (1)
+.PP
+https://github.com/sgtaziz/lian-li-linux/tree/main/docs

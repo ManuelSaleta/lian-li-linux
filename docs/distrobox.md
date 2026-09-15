@@ -1,13 +1,39 @@
 # Distrobox installation and recovery
 
 Use a Fedora Distrobox for the existing COPR package on immutable hosts such as Bazzite.
-Commands in the first section run **inside the box**. Host sections must run in a host terminal.
+Each section identifies whether commands run on the **host** or **inside the box**.
 
 Installation Health labels the GUI and connected daemon separately, for example
 `GUI: Native · Daemon: Distrobox (fedora)`. Each process detects its own environment.
 An older or disconnected daemon shows `Daemon: Unverified`. Running the GUI on the
 host does not change where the daemon runs. Host checks and service actions still
 follow the GUI's installation context.
+
+## Create a Fedora box
+
+If you do not have Distrobox and a container engine installed, follow the
+[Distrobox installation instructions](https://distrobox.it/#installation) for your host.
+Use rootless Podman for this setup.
+
+Run these commands in a **host terminal**, as your normal user:
+
+```sh
+distrobox list
+distrobox create --name lianli --image registry.fedoraproject.org/fedora:44
+distrobox enter --name lianli
+```
+
+If you already have a suitable Fedora box, skip creation and enter its name instead.
+On hosts using NVIDIA's proprietary driver, add `--nvidia` to the create command
+to enable [host driver integration](https://distrobox.it/usage/distrobox-create/#nvidia-integration).
+
+Keep the default host home, device and process sharing. Do not use `sudo`, `--root`,
+`--init` or `--unshare-*` for this setup. Both daemon service modes use host-managed
+services; system mode does not require systemd running inside the container.
+
+Wait for first-entry setup to finish, then continue below **inside the box**.
+Use `exit` to return to the host for later host setup sections. Wherever this guide
+asks for your box name, use `lianli` or the existing name you chose.
 
 ## Install inside the box
 

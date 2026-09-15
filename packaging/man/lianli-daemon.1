@@ -1,0 +1,75 @@
+.TH LIANLI-DAEMON 1 "" "Lian Li Linux"
+.SH NAME
+lianli-daemon \- control supported Lian Li hardware
+.SH SYNOPSIS
+.B lianli-daemon
+.RI [ options ]
+.br
+.B lianli-daemon capabilities
+.br
+.B lianli-daemon
+.RI [ options ]
+.B lcd clean
+.RI [ "\-\-device-id ID" ]
+.RI [ "\-\-minutes N" ]
+.SH DESCRIPTION
+The daemon controls fans, lighting and LCD media and serves the desktop client
+through a Unix socket. Use the GUI service controls to select one user or system
+daemon. Packaged hardware services are not enabled on a fresh installation.
+Run hardware control under the selected unprivileged account.
+.PP
+Desktop display capture additionally requires
+.BR lianli-session (1)
+in the active graphical login. Ordinary hardware control does not require the GUI.
+.SH OPTIONS
+.TP
+.BI "\-\-config " PATH
+Use the specified configuration file.
+.TP
+.BI "\-\-socket " PATH
+Use the specified IPC socket.
+.TP
+.B \-\-system
+Select system-service mode and default paths. This option does not change the
+process account.
+.TP
+.BI "\-\-log-level " LEVEL
+Set logging to error, warn, info, debug or trace. Default: info.
+.TP
+.B \-\-help
+Show command help. Subcommands also accept this option.
+.TP
+.B \-\-version
+Show the application version.
+.SH COMMANDS
+.TP
+.B capabilities
+Print build and IPC capabilities without loading configuration or accessing hardware.
+.TP
+.B lcd clean
+Request pixel conditioning through the selected daemon's IPC socket.
+The optional device ID limits the target; otherwise all applicable LCDs are targeted.
+Duration defaults to 30 minutes; positive values above 255 are limited to 255.
+This command changes LCD output.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/lianli/config.json
+User configuration; defaults to ~/.config/lianli/config.json.
+.TP
+.I /var/lib/lianli/config.json
+Default system configuration.
+.TP
+.I $XDG_RUNTIME_DIR/lianli-daemon.sock
+Default user socket; /tmp is used if XDG_RUNTIME_DIR is unset.
+.TP
+.I /run/lianli/lianli-daemon.sock
+Default system socket.
+.SH SIGNALS
+SIGINT and SIGTERM request orderly shutdown. Stop the selected service before
+starting a replacement daemon.
+.SH SEE ALSO
+.BR lianli-gui (1),
+.BR lianli-control (1),
+.BR lianli-session (1)
+.PP
+https://github.com/sgtaziz/lian-li-linux/tree/main/docs

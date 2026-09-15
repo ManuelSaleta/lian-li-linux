@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --mode mock",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build && node scripts/stamp-build.mjs",
     "build:nocheck": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",

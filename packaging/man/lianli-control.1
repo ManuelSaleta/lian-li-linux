@@ -1,0 +1,64 @@
+.TH LIANLI-CONTROL 1 "" "Lian Li Linux"
+.SH NAME
+lianli-control \- inspect installation and coordinate daemon services
+.SH SYNOPSIS
+.B lianli-control
+.I COMMAND
+.RI [ options ]
+.SH DESCRIPTION
+This helper provides installation diagnostics and constrained service operations.
+Use the GUI for normal mode switching, settings migration and recovery.
+Internal worker commands are implementation interfaces, not general-purpose
+administration commands.
+.SH COMMANDS
+.TP
+.B diagnose
+Inspect service setup without starting a daemon or accessing hardware.
+.TP
+.B diagnose-runtime \-\-hid-backend hidraw|rusb
+Inspect the executing account's credentials, host lock and USB node permissions
+without device I/O. The default backend is hidraw. A successful permission check
+does not prove that a device driver can open or operate the hardware.
+.TP
+.B distrobox-service-unit
+Print a host user hardware-daemon unit without installing or starting it.
+Use \-\-desktop-session for the separate capture unit, \-\-box NAME to select the
+box, \-\-distrobox-enter PATH for the host executable and \-\-binaries DIRECTORY for
+the installed guest binaries. Default paths are /usr/bin/distrobox-enter and
+/usr/bin. Review and install the generated unit on the host.
+Use \-\-system-uid UID with \-\-system-config PATH to print a system-manager
+recipe running as the box owner with separate guest settings. Automatic setup
+and migration for that recipe are still being integrated. Do not enable it
+until the coordinated host setup is available.
+.TP
+.B inspect-state \-\-config PATH \-\-working-directory DIRECTORY
+Inspect saved configuration, profiles, templates and media references.
+Add \-\-check-assets to open referenced assets under the executing account,
+including inactive profiles and templates. This does not change settings or
+prove access under a different daemon account or filesystem namespace.
+.TP
+.B check-destination \-\-scope user|system
+Authorize and preflight a native service destination without stopping the current daemon.
+.TP
+.B select-mode \-\-scope user|system
+Administrator-only selection of one native hardware mode while all daemons are
+stopped. User mode requires \-\-user-uid UID; system mode uses the packaged lianli
+account. This low-level selection does not perform settings migration or enable
+and start the destination service. Prefer the GUI's coordinated switch.
+.TP
+.B stop-service \-\-invocation-id ID [\-\-scope user|system]
+Stop only the daemon belonging to the specified host service mode and invocation.
+The default scope is user. The caller must own the daemon process.
+This command is used by generated Distrobox units.
+.SH OPTIONS
+Use \-\-help for command-specific options and \-\-version for the application version.
+.SH FILES
+.I /etc/lianli/service-selection.json
+records the selected account/mode or an unfinished switch gate. Do not delete it
+to bypass service ownership checks; use recovery for an interrupted switch.
+.SH SEE ALSO
+.BR lianli-daemon (1),
+.BR lianli-gui (1),
+.BR lianli-session (1)
+.PP
+https://github.com/sgtaziz/lian-li-linux/tree/main/docs

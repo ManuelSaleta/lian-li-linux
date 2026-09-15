@@ -1,23 +1,7 @@
 name: Release Notes
 
-# Publishes the notes for a release from the history that already exists.
-# Nothing about the commit or tagging workflow has to change: push a `vX.Y.Z`
-# tag exactly as before and the Release page is filled in from the commits
-# that tag introduced.
-#
-# Run it manually first (Actions -> Release Notes -> Run workflow) to see the
-# output for any tag in the job summary. That preview publishes nothing unless
-# you tick "publish".
-#
-# Tag pushes only trigger this in the source repository — see the guard on the
-# job below — so forks stay quiet unless their owner runs it by hand.
-#
-# A second job keeps CHANGELOG.md current. It regenerates the file from the
-# tag and opens a pull request when the committed copy has fallen behind, so
-# tagging by hand loses nothing. .github/scripts/bump-version.sh does the same
-# work locally as part of cutting the release, which is tidier — the changelog
-# lands inside the release commit, so the tag covers it — and leaves that job
-# with nothing to open.
+# Publishing waits for all distribution packages. Manual notes previews remain
+# read-only and do not build packages; Debian packages also has an artifact-only run.
 
 on:
   push:
@@ -34,10 +18,8 @@ on:
         required: false
         default: false
 
-# What the `notes` job needs: the Release body, and nothing else. The
-# `changelog` job asks for more, and asks for it itself.
 permissions:
-  contents: write
+  contents: read
 
 # One release run at a time. A fixed key, not the ref: a manual run on a
 # branch and a tag push for the same release must still serialize.
@@ -60,6 +42,10 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.repository == 'sgtaziz/lian-li-linux'
     runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
 
     steps:
     - uses: actions/checkout@v4
@@ -117,6 +103,7 @@ jobs:
           exit 1
         fi
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "commit=$(git rev-parse "refs/tags/$TAG^{commit}")" >> "$GITHUB_OUTPUT"
 
     # Not only on a tag push. Manual dispatch is exempt from the repository
     # guard above so a fork owner can preview, and a preview publishes nothing
@@ -179,23 +166,65 @@ jobs:
     - name: Add to job summary
       run: cat notes.md >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Publish to GitHub Release
-      if: github.event_name == 'push' || inputs.publish
-      env:
-        GH_TOKEN: ${{ github.token }}
-        TAG: ${{ steps.resolve.outputs.tag }}
-      run: |
-        # A tag push may or may not already have a Release attached: the
-        # maintainer may have drafted one by hand, and re-running this job
-        # must not fail on the second attempt. So edit when one exists and
-        # create when it does not, rather than assuming either.
-        if gh release view "$TAG" >/dev/null 2>&1; then
-          gh release edit "$TAG" --notes-file notes.md
-          echo "Updated the notes on release $TAG"
-        else
-          gh release create "$TAG" --title "$TAG" --notes-file notes.md
-          echo "Created release $TAG"
-        fi
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-notes
+        path: notes.md
+        if-no-files-found: error
+
+  packages:
+    needs: notes
+    if: github.event_name == 'push' || inputs.publish
+    uses: ./.github/workflows/debian-packages.yml
+    with:
+      ref: ${{ needs.notes.outputs.commit }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [notes, packages]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.notes.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*-amd64
+          path: artifacts
+          merge-multiple: true
+      - name: Publish checked release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.notes.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.notes.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          for distribution in ubuntu24.04 ubuntu26.04 debian13; do
+            package="artifacts/lian-li-linux_${TAG#v}+${distribution}_amd64.deb"
+            test -f "$package"
+            test "$(dpkg-deb -f "$package" Version)" = "${TAG#v}+${distribution}"
+          done
+          (cd artifacts && sha256sum ./*.deb > SHA256SUMS)
+          created=false
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --notes-file notes.md
+            created=true
+          fi
+          gh release upload "$TAG" artifacts/*.deb artifacts/SHA256SUMS --clobber
+          if [ "$created" = true ]; then
+            gh release edit "$TAG" --draft=false
+          fi
 
   # The safety net for a release tagged by hand. It regenerates the changelog
   # from the tag and opens a pull request if the committed copy differs, so
@@ -206,7 +235,7 @@ jobs:
   # branch is not what branch protection guards, so this needs no exception
   # and the merge stays a human decision.
   changelog:
-    needs: notes
+    needs: publish
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     permissions:
