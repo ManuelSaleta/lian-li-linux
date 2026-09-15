@@ -2,6 +2,71 @@ use super::*;
 use lianli_devices::traits::RgbFrameDelivery;
 
 #[test]
+fn unchanged_rgb_can_be_saved_when_wireless_is_unavailable() {
+    use lianli_shared::config::AppConfig;
+    use lianli_shared::rgb::{RgbDeviceConfig, RgbZoneConfig};
+    let root = tempfile::tempdir().unwrap();
+    let mut controller = RgbController::new(HashMap::new(), None);
+    controller.wireless_state.insert(
+        "wireless:test".into(),
+        WirelessDevice {
+            mac: [1; 6],
+            fan_type: WirelessFanType::Led88,
+            fan_count: 0,
+            right_attach: false,
+        },
+    );
+    let rgb = RgbAppConfig {
+        devices: vec![RgbDeviceConfig {
+            device_id: "wireless:test".into(),
+            mb_rgb_sync: false,
+            active_preset: None,
+            regions: None,
+            effect_memory: Vec::new(),
+            zones: vec![RgbZoneConfig {
+                zone_index: 0,
+                effect: RgbEffect::default(),
+                swap_lr: false,
+                swap_tb: false,
+            }],
+        }],
+        ..Default::default()
+    };
+    assert!(controller
+        .validate_config(&rgb)
+        .unwrap_err()
+        .to_string()
+        .contains("wireless RGB controller is unavailable"));
+    let mut daemon = crate::ipc::DaemonState::new(root.path().join("config.json"));
+    daemon.config = Some(AppConfig {
+        rgb: Some(rgb.clone()),
+        ..Default::default()
+    });
+    daemon.rgb_controller = Some(Arc::new(parking_lot::Mutex::new(controller)));
+    let state = Arc::new(parking_lot::Mutex::new(daemon));
+    assert!(crate::ipc::rgb::validate_saved_config(&state, &rgb).is_none());
+    let mut changed = rgb.clone();
+    changed.devices[0].zones[0].effect.brightness = 1;
+    assert!(crate::ipc::rgb::validate_saved_config(&state, &changed).is_some());
+    assert!(crate::ipc::rgb::validate_config(&state, &rgb).is_some());
+    let mut config = state.lock().config.clone().unwrap();
+    config.hardware_video = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    assert!(matches!(
+        crate::ipc::persist_and_notify(&mut state.lock(), &tx, "SetConfig", config),
+        lianli_shared::ipc::IpcResponse::Ok { .. }
+    ));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        crate::service::DaemonEvent::IpcUpdate
+    ));
+    let saved: AppConfig =
+        serde_json::from_slice(&std::fs::read(root.path().join("config.json")).unwrap()).unwrap();
+    assert!(saved.hardware_video);
+    assert_eq!(saved.rgb, Some(rgb));
+}
+
+#[test]
 fn openrgb_ownership_cannot_resubmit_the_previous_native_loop() {
     let mut controller = RgbController::new(HashMap::new(), None);
     controller.uploads.insert(

@@ -177,6 +177,7 @@ pub struct ServiceManager {
     media_preparation: media_preparation::MediaPreparation,
     targets: Arc<Mutex<HashMap<usize, ActiveTarget>>>,
     wireless: WirelessController,
+    wireless_recovery_error: Option<String>,
     packet_builder: PacketBuilder,
     /// Wired USB device registry (fan handles, HID backends, hot-plug caches).
     registry: DeviceRegistry,
@@ -231,6 +232,7 @@ impl ServiceManager {
             media_preparation: Default::default(),
             targets: Arc::new(Mutex::new(HashMap::new())),
             wireless: WirelessController::new(),
+            wireless_recovery_error: None,
             packet_builder: PacketBuilder::new(),
             registry: DeviceRegistry::new(),
             aio_lcd_firmware: AioLcdFirmwareTracker::new(),

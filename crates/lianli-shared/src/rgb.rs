@@ -649,7 +649,7 @@ impl Default for RgbEffect {
 }
 
 /// Per-zone RGB configuration (stored in config file).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbZoneConfig {
     pub zone_index: u8,
     pub effect: RgbEffect,
@@ -662,7 +662,7 @@ pub struct RgbZoneConfig {
 }
 
 /// Per-device RGB configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbDeviceConfig {
     pub device_id: String,
     /// Use motherboard ARGB header instead of software-controlled effects.
@@ -678,7 +678,7 @@ pub struct RgbDeviceConfig {
     pub effect_memory: Vec<RgbEffectMemory>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbEffectMemory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<u8>,
@@ -695,7 +695,7 @@ pub struct RgbRegionConfig {
 }
 
 /// Top-level RGB configuration section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbAppConfig {
     /// Whether RGB control is enabled.
     #[serde(default = "default_true")]
@@ -828,7 +828,7 @@ pub enum RgbSyncKind {
     Matched,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MergeLightingConfig {
     #[serde(default)]
     pub enabled: bool,

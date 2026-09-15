@@ -182,6 +182,7 @@ impl WirelessController {
             .chain((1..=39).filter(|&ch| ch % 2 == 1))
             .collect();
 
+        let mut last_transport_error = None;
         for channel in channels_to_try {
             let attempts = if channel == 8 { 3 } else { 1 };
             for attempt in 1..=attempts {
@@ -205,6 +206,8 @@ impl WirelessController {
                 }
                 if let Err(error) = handle.write(&cmd, USB_TIMEOUT) {
                     debug!(channel, attempt, %error, "Master query write failed");
+                    last_transport_error =
+                        Some(anyhow::anyhow!(error).context("writing master MAC query"));
                     continue;
                 }
 
@@ -213,6 +216,8 @@ impl WirelessController {
                     Ok(len) => len,
                     Err(error) => {
                         debug!(channel, attempt, %error, "Master query read failed");
+                        last_transport_error =
+                            Some(anyhow::anyhow!(error).context("reading master MAC reply"));
                         continue;
                     }
                 };
@@ -235,6 +240,9 @@ impl WirelessController {
             }
         }
 
+        if let Some(error) = last_transport_error {
+            return Err(error).context("Failed to discover master MAC on any channel (tried 1-39)");
+        }
         bail!("Failed to discover master MAC on any channel (tried 1-39)");
     }
 

@@ -810,18 +810,23 @@ impl ServiceManager {
         if let Some(rgb) = &self.controllers.rgb {
             rgb.lock().set_wireless(None);
         }
-        match self.wireless.connect() {
-            Ok(()) => match self.wireless.start_polling() {
-                Ok(()) => {
-                    let _ = self.wireless.send_rx_sequence();
-                    info!("Wireless links active");
-                }
-                Err(err) => warn!("[wireless] polling start failed: {err}"),
-            },
-            Err(_) => {
-                debug!("[wireless] no TX/RX devices found, skipping wireless");
+        let result = self
+            .wireless
+            .connect()
+            .and_then(|()| self.wireless.start_polling());
+        if let Err(error) = result {
+            let error = format!("{error:#}");
+            if self.wireless_recovery_error.as_ref() != Some(&error) {
+                warn!(%error, "Wireless reconnect failed; existing fan and AIO controllers retained");
+                self.wireless_recovery_error = Some(error);
             }
+            return;
         }
+        self.wireless_recovery_error = None;
+        if let Err(error) = self.wireless.send_rx_sequence() {
+            warn!(%error, "Wireless receiver initialization sequence failed");
+        }
+        info!("Wireless links active");
         if restart_controllers {
             self.start_fan_control();
             self.start_aio_control();

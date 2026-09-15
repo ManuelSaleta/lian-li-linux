@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useMessage } from "naive-ui";
 import { useRoute } from "vue-router";
 import { Moon, RefreshCw, Save, Sun } from "lucide-vue-next";
 import { useDaemonStore } from "@/stores/daemon";
@@ -11,6 +12,8 @@ const daemon = useDaemonStore();
 const config = useConfigStore();
 const theme = useThemeStore();
 const route = useRoute();
+const message = useMessage();
+const saving = ref(false);
 
 const title = computed(
   () => MAIN_ROUTES.find((r) => r.name === route.name)?.label ?? "Lian Li Linux",
@@ -31,8 +34,16 @@ async function onRefresh() {
 }
 
 async function onSave() {
-  await config.save();
-  (document.activeElement as HTMLElement | null)?.blur();
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    await config.save();
+  } catch (error) {
+    message.error(`Save failed: ${error instanceof Error ? error.message : String(error)}`, { duration: 10000 });
+  } finally {
+    saving.value = false;
+    (document.activeElement as HTMLElement | null)?.blur();
+  }
 }
 
 function onToggleTheme() {
@@ -71,7 +82,8 @@ function onToggleTheme() {
     <n-button
       type="primary"
       size="small"
-      :disabled="!config.dirty || !daemon.canWrite"
+      :disabled="saving || !config.dirty || !daemon.canWrite"
+      :loading="saving"
       :class="{ dirty: config.dirty }"
       @click="onSave"
     >

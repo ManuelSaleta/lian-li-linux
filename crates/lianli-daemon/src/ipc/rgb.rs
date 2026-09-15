@@ -7,6 +7,27 @@ use lianli_shared::rgb::RgbEffect;
 
 use crate::ipc::SharedState;
 
+pub fn validate_saved_config(
+    state: &SharedState,
+    config: &lianli_shared::rgb::RgbAppConfig,
+) -> Option<IpcResponse> {
+    if let Err(error) = lianli_shared::rgb::validate_effect_memory(config) {
+        return Some(IpcResponse::error(format!(
+            "Invalid RGB configuration: {error}"
+        )));
+    }
+    if state
+        .lock()
+        .config
+        .as_ref()
+        .and_then(|saved| saved.rgb.as_ref())
+        == Some(config)
+    {
+        return None;
+    }
+    validate_config(state, config)
+}
+
 pub fn validate_config(
     state: &SharedState,
     config: &lianli_shared::rgb::RgbAppConfig,

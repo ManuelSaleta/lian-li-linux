@@ -243,7 +243,7 @@ fn handle_request(
 
         IpcRequest::SetConfig { config } => {
             if let Some(rgb_config) = &config.rgb {
-                if let Some(response) = super::rgb::validate_config(state, rgb_config) {
+                if let Some(response) = super::rgb::validate_saved_config(state, rgb_config) {
                     return response;
                 }
             }
