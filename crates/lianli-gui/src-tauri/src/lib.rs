@@ -72,7 +72,7 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Combined Ping + ListDevices + GetTelemetry, used by the 2s polling loop.
+/// Identity, devices and telemetry from the selected daemon.
 #[tauri::command]
 async fn poll_daemon() -> Result<PollResult, String> {
     let result = tauri::async_runtime::spawn_blocking(ipc::poll)

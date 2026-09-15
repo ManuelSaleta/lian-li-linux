@@ -1,86 +1,50 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+use lianli_shared::installation::InstallationContext;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
-
-const SHARED_LOCK: &str = "/run/lianli-daemon.lock";
+use std::path::Path;
+use tracing::{info, warn};
 
 pub struct PidLock {
     _file: File,
 }
 
+#[derive(Debug)]
 enum LockFailure {
     HeldByAnother(String),
     Unopenable(anyhow::Error),
 }
 
 impl PidLock {
-    pub fn acquire(system: bool) -> Result<Self> {
-        match lock_pidfile(Path::new(SHARED_LOCK)) {
+    pub fn acquire() -> Result<Self> {
+        let context = InstallationContext::detect();
+        let Some(path) = context.daemon_lock_path() else {
+            bail!("Cannot verify host-wide daemon ownership from this container. Use the documented Distrobox host integration: https://github.com/sgtaziz/lian-li-linux/blob/main/docs/service-modes.md");
+        };
+        match lock_pidfile(&path) {
             Ok(file) => {
-                info!("Acquired shared pidlock at {SHARED_LOCK}");
-                return Ok(Self { _file: file });
+                info!("Acquired shared daemon lock at {}", path.display());
+                Ok(Self { _file: file })
             }
-            Err(LockFailure::HeldByAnother(pid)) => {
-                error!(
-                    "Another lianli-daemon already holds {SHARED_LOCK} (pid={}). \
-                     Refusing to start.",
-                    if pid.is_empty() { "?" } else { &pid }
-                );
-                std::process::exit(1);
-            }
-            Err(LockFailure::Unopenable(e)) => {
-                warn!("shared lock {SHARED_LOCK} unavailable ({e}), cross-mode mutex disabled");
-            }
+            Err(LockFailure::HeldByAnother(pid)) => bail!(
+                "Another lianli-daemon holds {} (reported PID {}). Stop the active daemon before switching service modes.",
+                path.display(), if pid.is_empty() { "unknown" } else { &pid }
+            ),
+            Err(LockFailure::Unopenable(error)) => Err(error).with_context(|| format!(
+                "Shared daemon lock {} is unavailable; refusing to start a competing hardware owner. Install the tmpfiles rule on the host and run `sudo systemd-tmpfiles --create lianli.conf`. See https://github.com/sgtaziz/lian-li-linux/blob/main/docs/service-modes.md",
+                path.display()
+            )),
         }
-
-        let mut last_err: Option<anyhow::Error> = None;
-        for path in candidate_paths(system) {
-            match lock_pidfile(&path) {
-                Ok(file) => {
-                    info!("Acquired pidlock at {}", path.display());
-                    return Ok(Self { _file: file });
-                }
-                Err(LockFailure::HeldByAnother(pid)) => {
-                    error!(
-                        "Another lianli-daemon already holds {} (pid={}). Refusing to start.",
-                        path.display(),
-                        if pid.is_empty() { "?" } else { &pid }
-                    );
-                    std::process::exit(1);
-                }
-                Err(LockFailure::Unopenable(e)) => {
-                    debug!("pidlock candidate {} unavailable: {e}", path.display());
-                    last_err = Some(e);
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no pidlock candidate writable")))
     }
-}
-
-fn candidate_paths(system: bool) -> Vec<PathBuf> {
-    if system {
-        return vec![PathBuf::from("/run/lianli/lianli-daemon.pid")];
-    }
-    let mut paths = vec![
-        PathBuf::from("/run/lianli-daemon.pid"),
-        PathBuf::from("/var/run/lianli-daemon.pid"),
-    ];
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        paths.push(PathBuf::from(xdg).join("lianli-daemon.pid"));
-    }
-    paths
 }
 
 fn lock_pidfile(path: &Path) -> std::result::Result<File, LockFailure> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| {
             LockFailure::Unopenable(
@@ -88,24 +52,79 @@ fn lock_pidfile(path: &Path) -> std::result::Result<File, LockFailure> {
             )
         })?;
 
+    let metadata = file
+        .metadata()
+        .map_err(|error| LockFailure::Unopenable(error.into()))?;
+    if !metadata.is_file() {
+        return Err(LockFailure::Unopenable(anyhow::anyhow!(
+            "daemon lock is not a regular file"
+        )));
+    }
+
     let fd = file.as_raw_fd();
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         let errno = std::io::Error::last_os_error();
         if errno.raw_os_error() == Some(libc::EWOULDBLOCK) {
             let mut existing = String::new();
-            let _ = file.seek(SeekFrom::Start(0));
-            let _ = file.read_to_string(&mut existing);
-            return Err(LockFailure::HeldByAnother(existing.trim().to_string()));
+            let _ = (&mut file).take(32).read_to_string(&mut existing);
+            let pid = existing.trim();
+            let pid = if pid.bytes().all(|byte| byte.is_ascii_digit()) {
+                pid
+            } else {
+                "unknown"
+            };
+            return Err(LockFailure::HeldByAnother(pid.to_string()));
         }
         return Err(LockFailure::Unopenable(
             anyhow::Error::from(errno).context(format!("flock {}", path.display())),
         ));
     }
 
-    let _ = file.seek(SeekFrom::Start(0));
-    let _ = file.set_len(0);
-    let _ = writeln!(file, "{}", std::process::id());
-    let _ = file.sync_all();
+    let mut record_pid = || -> std::io::Result<()> {
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        writeln!(file, "{}", std::process::id())?;
+        Ok(())
+    };
+    if let Err(error) = record_pid() {
+        warn!("Daemon lock acquired, but recording its PID failed: {error}");
+    }
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independent_opens_cannot_hold_the_same_lock() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let first = lock_pidfile(file.path()).unwrap();
+        assert!(matches!(
+            lock_pidfile(file.path()),
+            Err(LockFailure::HeldByAnother(_))
+        ));
+        drop(first);
+        assert!(lock_pidfile(file.path()).is_ok());
+    }
+
+    #[test]
+    fn missing_and_symlinked_locks_are_rejected_without_creating_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        assert!(matches!(
+            lock_pidfile(&path),
+            Err(LockFailure::Unopenable(_))
+        ));
+        assert!(!path.exists());
+        let actual = dir.path().join("actual");
+        std::fs::write(&actual, "preserve").unwrap();
+        std::os::unix::fs::symlink(&actual, &path).unwrap();
+        assert!(matches!(
+            lock_pidfile(&path),
+            Err(LockFailure::Unopenable(_))
+        ));
+        assert_eq!(std::fs::read_to_string(actual).unwrap(), "preserve");
+    }
 }

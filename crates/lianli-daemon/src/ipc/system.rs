@@ -9,6 +9,10 @@ pub fn ping() -> IpcResponse {
     IpcResponse::ok(serde_json::json!("pong"))
 }
 
+pub fn daemon_info(state: &SharedState) -> IpcResponse {
+    IpcResponse::ok(&state.lock().info)
+}
+
 pub fn list_sensors(state: &SharedState) -> IpcResponse {
     let mut sensors = lianli_shared::sensors::enumerate_sensors();
     // Add wireless coolant sensors from live telemetry

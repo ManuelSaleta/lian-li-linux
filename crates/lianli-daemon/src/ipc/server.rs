@@ -1,12 +1,13 @@
 //! IPC server: Unix domain socket for daemon-GUI communication.
 //!
-//! Protocol: newline-delimited JSON (one request, one response per connection).
+//! Protocol: newline-delimited JSON, one response per request.
 //! The GUI polls periodically for telemetry. Config writes go through IPC.
 
 use crate::controllers::rgb::RgbController;
 use crate::service::DaemonEvent;
 use crate::template_store;
 use lianli_shared::config::AppConfig;
+use lianli_shared::daemon::{DaemonInfo, DaemonMode, IPC_PROTOCOL_VERSION};
 use lianli_shared::ipc::{DeviceInfo, IpcRequest, IpcResponse, TelemetrySnapshot};
 use lianli_shared::rgb::RgbPreset;
 use lianli_shared::template::LcdTemplate;
@@ -36,6 +37,7 @@ pub struct PixelCleanState {
 
 /// Shared state between the daemon main loop and the IPC server thread.
 pub struct DaemonState {
+    pub info: DaemonInfo,
     pub config: Option<AppConfig>,
     pub config_path: PathBuf,
     pub presets_path: PathBuf,
@@ -57,7 +59,22 @@ impl DaemonState {
             .unwrap_or(Path::new("."))
             .join("rgb_presets.json");
         let rgb_presets = crate::persistence::read_rgb_presets(&presets_path);
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         Self {
+            info: DaemonInfo {
+                version: env!("CARGO_PKG_VERSION").into(),
+                protocol_version: IPC_PROTOCOL_VERSION,
+                instance_id: format!("{:x}-{:x}", std::process::id(), started.as_nanos()),
+                pid: std::process::id(),
+                mode: DaemonMode::User,
+                config_path: config_path.clone(),
+                capabilities: vec![
+                    lianli_shared::daemon::GUARDED_WRITES.into(),
+                    "daemon_info".into(),
+                ],
+            },
             config: None,
             config_path,
             presets_path,
@@ -196,8 +213,11 @@ fn handle_connection(
             }
         };
 
-        debug!("IPC request: {request:?}");
-        let response = handle_request(request, &state, tx.clone());
+        let authorized = request.authorize(&state.lock().info);
+        let response = match authorized {
+            Ok(request) => handle_request(request, &state, tx.clone()),
+            Err(message) => IpcResponse::error(message),
+        };
         write_response(&mut writer, &response)?;
     }
 
@@ -210,7 +230,9 @@ fn handle_request(
     tx: Sender<DaemonEvent>,
 ) -> IpcResponse {
     match request {
+        IpcRequest::Guarded { .. } => IpcResponse::error("Request was not authorized"),
         IpcRequest::Ping => super::system::ping(),
+        IpcRequest::GetDaemonInfo => super::system::daemon_info(state),
         IpcRequest::ListSensors => super::system::list_sensors(state),
         IpcRequest::ListPwmHeaders => super::system::list_pwm_headers(),
         IpcRequest::ListDevices => super::system::list_devices(state),
@@ -224,8 +246,7 @@ fn handle_request(
                 }
             }
             let mut state = state.lock();
-            state.config = Some(*config);
-            super::persist_and_notify(&mut state, &tx, "SetConfig")
+            super::persist_and_notify(&mut state, &tx, "SetConfig", *config)
         }
 
         IpcRequest::SetLcdMedia { device_id, config } => {
@@ -288,12 +309,12 @@ fn handle_request(
                 return error;
             }
             let mut state = state.lock();
-            if let Some(ref mut app_config) = state.config {
+            if let Some(mut app_config) = state.config.clone() {
                 app_config
                     .rgb
                     .get_or_insert_with(Default::default)
                     .merge_lighting = Some(config);
-                super::persist_and_notify(&mut state, &tx, "SetMergeLightingConfig")
+                super::persist_and_notify(&mut state, &tx, "SetMergeLightingConfig", app_config)
             } else {
                 IpcResponse::error("no config loaded")
             }
@@ -457,6 +478,129 @@ fn write_response(writer: &mut impl Write, response: &IpcResponse) -> anyhow::Re
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn socket_rejects_legacy_and_stale_writes_before_persistence() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let mut daemon = DaemonState::new(path.clone());
+        daemon.config = Some(AppConfig::default());
+        let info = daemon.info.clone();
+        let state = Arc::new(Mutex::new(daemon));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let exchange = |request: IpcRequest| {
+            let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let state = state.clone();
+            let tx = tx.clone();
+            let worker = thread::spawn(move || handle_connection(server, state, tx));
+            writeln!(client, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = String::new();
+            BufReader::new(client).read_line(&mut response).unwrap();
+            worker.join().unwrap().unwrap();
+            serde_json::from_str::<IpcResponse>(&response).unwrap()
+        };
+        let write = IpcRequest::SetConfig {
+            config: Box::new(AppConfig {
+                default_fps: 24.0,
+                ..Default::default()
+            }),
+        };
+        assert!(matches!(
+            exchange(IpcRequest::GetDaemonInfo),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(matches!(exchange(write.clone()), IpcResponse::Error { .. }));
+        let mut guard = info.write_guard(env!("CARGO_PKG_VERSION")).unwrap();
+        guard.instance_id = "previous-instance".into();
+        assert!(matches!(
+            exchange(IpcRequest::Guarded {
+                guard,
+                request: Box::new(write.clone()),
+            }),
+            IpcResponse::Error { .. }
+        ));
+        assert!(!path.exists());
+        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 30.0);
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            exchange(IpcRequest::Guarded {
+                guard: info.write_guard(env!("CARGO_PKG_VERSION")).unwrap(),
+                request: Box::new(write),
+            }),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(path.is_file());
+        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 24.0);
+        assert!(matches!(rx.try_recv(), Ok(DaemonEvent::IpcUpdate)));
+    }
+
+    #[test]
+    fn failed_config_save_preserves_gui_state_and_does_not_queue_application() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let mut daemon = DaemonState::new(path.clone());
+        daemon.config = Some(AppConfig::default());
+        let state = Arc::new(Mutex::new(daemon));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::fs::create_dir(&path).unwrap();
+        let requested = AppConfig {
+            default_fps: 24.0,
+            ..Default::default()
+        };
+        let response = handle_request(
+            IpcRequest::SetConfig {
+                config: Box::new(requested.clone()),
+            },
+            &state,
+            tx.clone(),
+        );
+        assert!(matches!(response, IpcResponse::Error { .. }));
+        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 30.0);
+        assert!(rx.try_recv().is_err());
+        std::fs::remove_dir(&path).unwrap();
+        let response = handle_request(
+            IpcRequest::SetConfig {
+                config: Box::new(requested),
+            },
+            &state,
+            tx,
+        );
+        assert!(matches!(response, IpcResponse::Ok { .. }));
+        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 24.0);
+        assert!(matches!(rx.try_recv(), Ok(DaemonEvent::IpcUpdate)));
+    }
+
+    #[test]
+    fn identity_reports_launch_scope_without_changing_ping_or_queueing_work() {
+        let mut daemon = DaemonState::new("/custom/config.json".into());
+        daemon.info.mode = DaemonMode::System;
+        let expected = daemon.info.clone();
+        let state = Arc::new(Mutex::new(daemon));
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let IpcResponse::Ok { data } =
+                handle_request(IpcRequest::GetDaemonInfo, &state, tx.clone())
+            else {
+                panic!("identity request failed");
+            };
+            assert_eq!(
+                serde_json::from_value::<DaemonInfo>(data).unwrap(),
+                expected
+            );
+        }
+        let IpcResponse::Ok { data } = handle_request(IpcRequest::Ping, &state, tx) else {
+            panic!("ping failed");
+        };
+        assert_eq!(data, "pong");
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn invalid_cleaner_requests_never_reach_the_service() {

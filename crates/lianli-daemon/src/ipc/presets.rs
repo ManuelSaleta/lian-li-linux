@@ -3,7 +3,6 @@
 
 use std::sync::mpsc::Sender;
 
-use lianli_shared::config::AppConfig;
 use lianli_shared::ipc::IpcResponse;
 use lianli_shared::rgb::{RgbDeviceConfig, RgbMode, RgbPreset, RgbPresetZone, RgbZoneConfig};
 use tracing::info;
@@ -95,16 +94,16 @@ pub fn save(
         zones,
     };
     let mut state = state.lock();
-    if let Some(existing) = state
-        .rgb_presets
+    let mut presets = state.rgb_presets.clone();
+    if let Some(existing) = presets
         .iter_mut()
         .find(|p| p.name == name && p.device_id == preset.device_id)
     {
         *existing = preset;
     } else {
-        state.rgb_presets.push(preset);
+        presets.push(preset);
     }
-    save_and_notify(&mut state, &tx, &name)
+    save_and_notify(&mut state, &tx, &name, presets)
 }
 
 pub fn delete(
@@ -114,14 +113,13 @@ pub fn delete(
     device_id: String,
 ) -> IpcResponse {
     let mut state = state.lock();
-    let before = state.rgb_presets.len();
-    state
-        .rgb_presets
-        .retain(|p| !(p.name == name && p.device_id == device_id));
-    if state.rgb_presets.len() == before {
+    let mut presets = state.rgb_presets.clone();
+    let before = presets.len();
+    presets.retain(|p| !(p.name == name && p.device_id == device_id));
+    if presets.len() == before {
         return IpcResponse::error(format!("preset '{name}' not found for {device_id}"));
     }
-    save_and_notify(&mut state, &tx, &name)
+    save_and_notify(&mut state, &tx, &name, presets)
 }
 
 pub fn list(state: &SharedState) -> IpcResponse {
@@ -163,9 +161,8 @@ fn apply_config_and_leds(
     preset: &RgbPreset,
     name: &str,
 ) -> Result<(), IpcResponse> {
-    // 1. Merge zone effects into the persistent config.
+    let mut app_config = state.config.clone().unwrap_or_default();
     {
-        let app_config = state.config.get_or_insert_with(AppConfig::default);
         let rgb_cfg = app_config.rgb.get_or_insert_with(Default::default);
         let dev_cfg = if let Some(d) = rgb_cfg
             .devices
@@ -205,11 +202,11 @@ fn apply_config_and_leds(
             }
         }
     }
-    if let Err(e) = super::write_config(&state.config_path, state.config.as_ref().unwrap()) {
+    if let Err(e) = super::write_config(&state.config_path, &app_config) {
         return Err(IpcResponse::error(format!("failed to write config: {e}")));
     }
+    state.config = Some(app_config);
 
-    // 2. Push per-LED colors to the live RGB controller.
     let has_led_colors = preset.zones.iter().any(|z| !z.colors.is_empty());
     if has_led_colors {
         if let Some(ref rgb) = state.rgb_controller {
@@ -234,9 +231,15 @@ fn apply_config_and_leds(
 }
 
 /// Persist the preset list and send an `IpcUpdate` event.
-fn save_and_notify(state: &mut DaemonState, tx: &Sender<DaemonEvent>, name: &str) -> IpcResponse {
-    match super::write_rgb_presets(&state.presets_path, &state.rgb_presets) {
+fn save_and_notify(
+    state: &mut DaemonState,
+    tx: &Sender<DaemonEvent>,
+    name: &str,
+    presets: Vec<RgbPreset>,
+) -> IpcResponse {
+    match super::write_rgb_presets(&state.presets_path, &presets) {
         Ok(()) => {
+            state.rgb_presets = presets;
             let _ = tx.send(DaemonEvent::IpcUpdate);
             info!("RGB preset '{name}' saved");
             IpcResponse::ok(serde_json::json!(null))

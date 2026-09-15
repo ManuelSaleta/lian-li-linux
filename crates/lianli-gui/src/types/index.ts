@@ -96,9 +96,21 @@ export interface TelemetrySnapshot {
   pixel_clean_statuses?: Record<string, PixelCleanStatus>;
 }
 
+export interface DaemonInfo {
+  version: string;
+  protocol_version: number;
+  instance_id: string;
+  pid: number;
+  mode: "user" | "system" | "unknown";
+  config_path: string;
+  capabilities: string[];
+}
+
 export interface PollResult {
   connected: boolean;
   socket_path: string;
+  daemon_info?: DaemonInfo | null;
+  write_error?: string | null;
   devices: DeviceInfo[];
   telemetry: TelemetrySnapshot;
 }

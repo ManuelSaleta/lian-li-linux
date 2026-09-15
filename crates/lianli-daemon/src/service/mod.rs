@@ -200,8 +200,14 @@ pub struct ServiceManager {
 }
 
 impl ServiceManager {
-    pub fn new(config_path: PathBuf, socket_path: PathBuf) -> Result<Self> {
-        let ipc_state = Arc::new(Mutex::new(DaemonState::new(config_path.clone())));
+    pub fn new(
+        config_path: PathBuf,
+        socket_path: PathBuf,
+        mode: lianli_shared::daemon::DaemonMode,
+    ) -> Result<Self> {
+        let mut state = DaemonState::new(config_path.clone());
+        state.info.mode = mode;
+        let ipc_state = Arc::new(Mutex::new(state));
 
         Ok(Self {
             config_path,

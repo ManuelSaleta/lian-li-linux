@@ -71,7 +71,7 @@ function onToggleTheme() {
     <n-button
       type="primary"
       size="small"
-      :disabled="!config.dirty"
+      :disabled="!config.dirty || !daemon.canWrite"
       :class="{ dirty: config.dirty }"
       @click="onSave"
     >
@@ -111,4 +111,3 @@ function onToggleTheme() {
   box-shadow: 0 0 0 1px var(--warning), 0 0 8px rgba(251, 191, 36, 0.4);
 }
 </style>
-

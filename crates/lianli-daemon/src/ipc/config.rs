@@ -1,10 +1,7 @@
-//! Config-mutating IPC handlers: `SetLcdMedia`, `SetFanConfig`, `SetRgbConfig`.
-//! Each updates `state.config` in place and then calls
-//! [`super::persist_and_notify`] to flush to disk + wake the daemon.
+//! Configuration changes become visible only after successful persistence.
 
 use std::sync::mpsc::Sender;
 
-use lianli_shared::config::AppConfig;
 use lianli_shared::config::LcdConfig;
 use lianli_shared::fan::FanConfig;
 use lianli_shared::ipc::IpcResponse;
@@ -20,7 +17,7 @@ pub fn set_lcd_media(
     config: LcdConfig,
 ) -> IpcResponse {
     let mut state = state.lock();
-    let app_config = state.config.get_or_insert_with(AppConfig::default);
+    let mut app_config = state.config.clone().unwrap_or_default();
     if let Some(lcd) = app_config
         .lcds
         .iter_mut()
@@ -30,7 +27,7 @@ pub fn set_lcd_media(
     } else {
         app_config.lcds.push(config);
     }
-    persist_and_notify(&mut state, &tx, "SetLcdMedia")
+    persist_and_notify(&mut state, &tx, "SetLcdMedia", app_config)
 }
 
 pub fn set_fan_config(
@@ -39,8 +36,9 @@ pub fn set_fan_config(
     config: FanConfig,
 ) -> IpcResponse {
     let mut state = state.lock();
-    state.config.get_or_insert_with(AppConfig::default).fans = Some(config);
-    persist_and_notify(&mut state, &tx, "SetFanConfig")
+    let mut app_config = state.config.clone().unwrap_or_default();
+    app_config.fans = Some(config);
+    persist_and_notify(&mut state, &tx, "SetFanConfig", app_config)
 }
 
 pub fn set_rgb_config(
@@ -52,6 +50,7 @@ pub fn set_rgb_config(
         return response;
     }
     let mut state = state.lock();
-    state.config.get_or_insert_with(AppConfig::default).rgb = Some(config);
-    persist_and_notify(&mut state, &tx, "SetRgbConfig")
+    let mut app_config = state.config.clone().unwrap_or_default();
+    app_config.rgb = Some(config);
+    persist_and_notify(&mut state, &tx, "SetRgbConfig", app_config)
 }

@@ -117,6 +117,8 @@ lianli-gui             Tauri desktop app (Rust + Vue) - connects to daemon via U
 
 The daemon runs as either a per-user or system systemd service (see [Service modes](#service-modes)), neither is enabled automatically. USB access is granted via udev rules (no root required). The GUI connects over `$XDG_RUNTIME_DIR/lianli-daemon.sock` (per-user daemon) or `/run/lianli/lianli-daemon.sock` (system daemon) and auto-detects which.
 
+Settings shows the connected daemon's version, configuration mode, and configuration file. Older daemons still connect but do not report this information.
+
 ## Installing
 
 ### Arch Linux (AUR)
@@ -183,6 +185,16 @@ distrobox-enter -n <boxname> -- cat /usr/lib/udev/rules.d/60-lianli.rules \
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
+The daemon also requires the shared ownership lock on the **host**. Install the box's
+tmpfiles rule there before starting the service:
+```bash
+distrobox-enter -n "<boxname>" -- cat /usr/lib/tmpfiles.d/lianli.conf \
+  | sudo tee /etc/tmpfiles.d/lianli.conf >/dev/null
+sudo systemd-tmpfiles --create lianli.conf
+```
+The daemon uses `/run/host/run/lianli-daemon.lock` inside Distrobox so it coordinates with
+native services. See [Service modes and ownership](docs/service-modes.md) for recovery.
+
 Log out and back in so the new group membership reaches Distrobox and the user systemd service. If the box remained running, stop it with `distrobox stop <boxname>`; the next `distrobox-enter` starts it again with the updated groups.
 
 A default Distrobox doesn't run systemd, so the shipped `lianli-daemon.service` can't manage the daemon from inside the box. To start it on login, create a user systemd unit on the **host** that enters the box, e.g. `~/.config/systemd/user/lianli-daemon.service`:

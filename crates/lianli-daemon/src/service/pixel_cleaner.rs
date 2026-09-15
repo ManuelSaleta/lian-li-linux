@@ -570,6 +570,7 @@ mod tests {
         let mut service = ServiceManager::new(
             "/tmp/unused-clean-config".into(),
             "/tmp/unused-clean-socket".into(),
+            lianli_shared::daemon::DaemonMode::User,
         )
         .unwrap();
         for index in 0..2 {

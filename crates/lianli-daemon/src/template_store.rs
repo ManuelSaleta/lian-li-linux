@@ -1,6 +1,6 @@
 //! Persistence for LCD templates.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lianli_shared::sensors::SensorInfo;
 use lianli_shared::template::LcdTemplate;
 use std::fs;
@@ -41,16 +41,10 @@ pub fn load_user_templates(path: &Path) -> Vec<LcdTemplate> {
 }
 
 pub fn save_user_templates(path: &Path, templates: &[LcdTemplate]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent dir for {}", path.display()))?;
-    }
     let file = TemplateFile {
         templates: templates.to_vec(),
     };
-    let json = serde_json::to_string_pretty(&file)?;
-    fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    crate::persistence::write_json(path, &file)
 }
 
 pub fn all_templates(user: &[LcdTemplate], _sensors: &[SensorInfo]) -> Vec<LcdTemplate> {

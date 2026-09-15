@@ -1,9 +1,11 @@
 pub mod aio;
 pub mod config;
+pub mod daemon;
 pub mod device_id;
 pub mod fan;
 pub mod fonts;
 pub mod id;
+pub mod installation;
 pub mod ipc;
 pub mod media;
 pub mod profile;

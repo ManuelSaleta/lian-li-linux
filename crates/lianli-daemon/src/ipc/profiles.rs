@@ -16,8 +16,16 @@ fn profiles_dir(state: &DaemonState) -> std::path::PathBuf {
         .join("profiles")
 }
 
-fn profile_path(state: &DaemonState, name: &str) -> std::path::PathBuf {
-    profiles_dir(state).join(format!("{name}.json"))
+fn profile_path(state: &DaemonState, name: &str) -> Result<std::path::PathBuf, &'static str> {
+    if name.is_empty()
+        || name.len() > 250
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', '\0'])
+    {
+        return Err("Profile name must be a single filename, without path separators, and at most 250 bytes");
+    }
+    Ok(profiles_dir(state).join(format!("{name}.json")))
 }
 
 fn read_all_profiles(state: &DaemonState) -> Vec<DeviceProfile> {
@@ -59,7 +67,10 @@ pub fn save(
         None => return IpcResponse::error("no config loaded"),
     };
     let profile = DeviceProfile::capture_from_config(config, &name, &device_id, &family);
-    let path = profile_path(&st, &name);
+    let path = match profile_path(&st, &name) {
+        Ok(path) => path,
+        Err(error) => return IpcResponse::error(error),
+    };
     if let Err(e) = write_json(&path, &profile) {
         return IpcResponse::error(format!("failed to write profile: {e}"));
     }
@@ -71,7 +82,10 @@ pub fn save(
 
 pub fn delete(state: &SharedState, tx: Sender<DaemonEvent>, name: String) -> IpcResponse {
     let st = state.lock();
-    let path = profile_path(&st, &name);
+    let path = match profile_path(&st, &name) {
+        Ok(path) => path,
+        Err(error) => return IpcResponse::error(error),
+    };
     if !path.exists() {
         return IpcResponse::error(format!("profile '{name}' not found"));
     }
@@ -115,15 +129,42 @@ pub fn apply(
         return IpcResponse::error(format!("profile '{name}' not found"));
     };
     profile.device_id = device_id.clone();
-    let config = st.config.get_or_insert_with(Default::default);
-    profile.apply_to_config(config);
-    let config_snapshot = config.clone();
-    let config_path = st.config_path.clone();
-    drop(st);
-    if let Err(e) = super::write_config(&config_path, &config_snapshot) {
-        return IpcResponse::error(format!("failed to write config: {e}"));
+    let mut config = st.config.clone().unwrap_or_default();
+    profile.apply_to_config(&mut config);
+    super::persist_and_notify(&mut st, &tx, "ApplyProfile", config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lianli_shared::config::AppConfig;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    #[test]
+    fn profile_names_cannot_overwrite_or_delete_the_main_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let config = AppConfig::default();
+        crate::persistence::write_config(&path, &config).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut daemon = DaemonState::new(path.clone());
+        daemon.config = Some(config);
+        let state = Arc::new(Mutex::new(daemon));
+        let (tx, _) = std::sync::mpsc::channel();
+        for name in ["../config", "/tmp/config", "..\\config", "", ".", ".."] {
+            assert!(matches!(
+                save(&state, tx.clone(), name.into(), "test".into()),
+                IpcResponse::Error { .. }
+            ));
+            assert!(matches!(
+                delete(&state, tx.clone(), name.into()),
+                IpcResponse::Error { .. }
+            ));
+        }
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert!(profile_path(&state.lock(), "Quiet gaming")
+            .unwrap()
+            .ends_with("profiles/Quiet gaming.json"));
     }
-    let _ = tx.send(DaemonEvent::IpcUpdate);
-    info!("Device profile '{name}' applied to {device_id}");
-    IpcResponse::ok(serde_json::json!(null))
 }

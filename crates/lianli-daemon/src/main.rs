@@ -123,9 +123,14 @@ fn main() -> anyhow::Result<()> {
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .init();
 
-    let _pidlock = pidlock::PidLock::acquire(system)?;
+    let _pidlock = pidlock::PidLock::acquire()?;
 
-    let mut manager = service::ServiceManager::new(config, socket)?;
+    let mode = if system {
+        lianli_shared::daemon::DaemonMode::System
+    } else {
+        lianli_shared::daemon::DaemonMode::User
+    };
+    let mut manager = service::ServiceManager::new(config, socket, mode)?;
     let restart = manager.run()?;
 
     if restart {

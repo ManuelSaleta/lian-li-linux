@@ -107,6 +107,11 @@ function onHidBackend(v: "hidraw" | "rusb") {
         </span>
       </div>
       <div class="kv"><span class="muted">Socket</span><span class="mono">{{ daemon.socketPath || "—" }}</span></div>
+      <div class="kv"><span class="muted">Daemon version</span><span>{{ daemon.version || "Unavailable" }}</span></div>
+      <template v-if="daemon.info">
+        <div class="kv"><span class="muted">Configuration mode</span><span>{{ daemon.info.mode }}</span></div>
+        <div class="kv"><span class="muted">Configuration file</span><span class="mono">{{ daemon.info.config_path }}</span></div>
+      </template>
     </section>
 
     <!-- Configuration -->

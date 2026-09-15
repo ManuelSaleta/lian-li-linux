@@ -7,7 +7,7 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import { useLcdStore } from "@/stores/lcd";
 import { DONGLE_FAMILIES } from "@/constants";
-import type { SensorInfo } from "@/types";
+import type { DaemonInfo, SensorInfo } from "@/types";
 
 function findTemp(sensors: SensorInfo[], kind: "cpu" | "gpu"): number | null {
   const match = sensors.find((s) => {
@@ -22,12 +22,6 @@ function findTemp(sensors: SensorInfo[], kind: "cpu" | "gpu"): number | null {
   return match?.current_value ?? null;
 }
 
-/**
- * Owns the 2s polling loop and connection state. Each tick runs
- * Ping + ListDevices + GetTelemetry, then fans the results out to the
- * devices store and (on reconnect / device-count change) triggers a config
- * reload — matching the Slint backend thread behaviour.
- */
 export const useDaemonStore = defineStore("daemon", () => {
   const ipc = useIpc();
   const devices = useDevicesStore();
@@ -38,7 +32,10 @@ export const useDaemonStore = defineStore("daemon", () => {
   const connected = ref(false);
   const socketPath = ref("");
   const streamingActive = ref(false);
-  const version = ref("");
+  const info = ref<DaemonInfo | null>(null);
+  const writeError = ref<string | null>(null);
+  const canWrite = computed(() => connected.value && !writeError.value);
+  const version = computed(() => info.value?.version ?? "");
   const openrgbRunning = ref(false);
   const openrgbError = ref("");
   const openrgbPort = ref<number | null>(null);
@@ -51,7 +48,11 @@ export const useDaemonStore = defineStore("daemon", () => {
   async function tick() {
     try {
       const result = await ipc.poll();
+      const previousInstance = info.value?.instance_id;
+      const previousSocket = socketPath.value;
+      info.value = result.daemon_info ?? null;
       connected.value = result.connected;
+      writeError.value = result.write_error ?? null;
       socketPath.value = result.socket_path;
       streamingActive.value = result.telemetry.streaming_active;
       openrgbRunning.value = result.telemetry.openrgb_status.running;
@@ -65,12 +66,8 @@ export const useDaemonStore = defineStore("daemon", () => {
         const visible = result.devices.filter(
           (d) => !DONGLE_FAMILIES.includes(d.family),
         ).length;
-        if (!wasConnected) {
-          // Daemon reconnected — full config reload.
-          await config.load();
-        } else if (visible !== lastDeviceCount) {
-          // Device set changed while connected — daemon may still be opening
-          // devices, so reload config + capabilities.
+        if (!wasConnected || previousInstance !== info.value?.instance_id ||
+            previousSocket !== result.socket_path || visible !== lastDeviceCount) {
           await config.load();
         }
         lastDeviceCount = visible;
@@ -87,6 +84,9 @@ export const useDaemonStore = defineStore("daemon", () => {
       wasConnected = result.connected;
     } catch (e) {
       connected.value = false;
+      info.value = null;
+      writeError.value = null;
+      wasConnected = false;
       // eslint-disable-next-line no-console
       console.warn("poll failed", e);
     }
@@ -108,9 +108,12 @@ export const useDaemonStore = defineStore("daemon", () => {
 
   return {
     connected,
+    writeError,
+    canWrite,
     socketPath,
     streamingActive,
     version,
+    info,
     openrgbRunning,
     openrgbError,
     openrgbPort,

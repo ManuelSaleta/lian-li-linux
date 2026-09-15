@@ -9,6 +9,7 @@ import { useThemeStore } from "@/stores/theme";
 import { LCD_TEMPLATES_CHANGED_EVENT } from "@/stores/lcd";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppHeader from "@/components/layout/AppHeader.vue";
+import CompatibilityNotice from "@/components/common/CompatibilityNotice.vue";
 
 const daemon = useDaemonStore();
 const config = useConfigStore();
@@ -105,6 +106,7 @@ onUnmounted(() => {
       <n-dialog-provider>
         <n-notification-provider>
           <template v-if="isSecondaryWindow">
+            <CompatibilityNotice />
             <router-view v-slot="{ Component }">
               <transition name="page" mode="out-in">
                 <component :is="Component" />
@@ -116,6 +118,7 @@ onUnmounted(() => {
               <AppSidebar />
               <div class="main">
                 <AppHeader />
+                <CompatibilityNotice />
                 <div class="content">
                   <router-view v-slot="{ Component }">
                     <transition name="page" mode="out-in">

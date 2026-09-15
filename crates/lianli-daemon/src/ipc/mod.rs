@@ -40,19 +40,16 @@ pub(crate) use crate::persistence::{write_config, write_rgb_presets};
 /// Type alias for the shared state reference handlers receive.
 pub(crate) type SharedState = Arc<Mutex<DaemonState>>;
 
-/// Persist `state.config` to disk and notify the daemon's event loop that
-/// something changed. Used by every IPC handler that mutates config.
 pub(crate) fn persist_and_notify(
     state: &mut DaemonState,
     tx: &Sender<DaemonEvent>,
     label: &str,
+    config: lianli_shared::config::AppConfig,
 ) -> IpcResponse {
     use tracing::info;
-    let Some(config) = state.config.as_ref() else {
-        return IpcResponse::error("no config loaded");
-    };
-    match write_config(&state.config_path, config) {
+    match write_config(&state.config_path, &config) {
         Ok(()) => {
+            state.config = Some(config);
             let _ = tx.send(DaemonEvent::IpcUpdate);
             info!("{label}: config persisted, notified daemon");
             IpcResponse::ok(serde_json::json!(null))

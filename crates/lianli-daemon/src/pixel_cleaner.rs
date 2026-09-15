@@ -26,6 +26,20 @@ pub struct PixelCleanSession {
 }
 
 fn send_ipc(socket_path: &PathBuf, request: &IpcRequest) -> Result<IpcResponse> {
+    let guarded;
+    let request = if request.is_read_only() {
+        request
+    } else {
+        let info = response_data(send_ipc(socket_path, &IpcRequest::GetDaemonInfo)?)?;
+        let info: lianli_shared::daemon::DaemonInfo = serde_json::from_value(info)?;
+        guarded = IpcRequest::Guarded {
+            guard: info
+                .write_guard(env!("CARGO_PKG_VERSION"))
+                .map_err(anyhow::Error::msg)?,
+            request: Box::new(request.clone()),
+        };
+        &guarded
+    };
     let mut stream = UnixStream::connect(socket_path).with_context(|| {
         format!(
             "Failed to connect to lianli-daemon socket at {}",

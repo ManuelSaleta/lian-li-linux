@@ -11,6 +11,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum IpcRequest {
+    Guarded {
+        guard: crate::daemon::WriteGuard,
+        request: Box<IpcRequest>,
+    },
     ListDevices,
     GetConfig,
     /// Replace the entire config (daemon writes to disk + reloads).
@@ -134,6 +138,7 @@ pub enum IpcRequest {
         height: u32,
     },
     Ping,
+    GetDaemonInfo,
     SetLcdBrightness {
         device_id: String,
         brightness: u8,
@@ -189,6 +194,77 @@ pub enum IpcRequest {
     GetPixelCleanPreparation {
         session_id: u64,
     },
+}
+
+impl IpcRequest {
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            Self::ListDevices
+            | Self::GetConfig
+            | Self::GetTelemetry
+            | Self::GetRgbCapabilities
+            | Self::GetZoneColors { .. }
+            | Self::ListRgbPresets
+            | Self::GetWirelessOperation { .. }
+            | Self::ListSensors
+            | Self::ListPwmHeaders
+            | Self::GetLcdTemplates
+            | Self::RenderTemplatePreview { .. }
+            | Self::Ping
+            | Self::GetDaemonInfo
+            | Self::GetChannel
+            | Self::GetMergeLightingConfig
+            | Self::ListDeviceProfiles
+            | Self::GetPixelCleanStatus
+            | Self::GetPixelCleanPreparation { .. } => true,
+            Self::Guarded { .. }
+            | Self::SetConfig { .. }
+            | Self::SetLcdMedia { .. }
+            | Self::SetFanConfig { .. }
+            | Self::SetRgbEffect { .. }
+            | Self::SetRgbDirect { .. }
+            | Self::SetRgbFrames { .. }
+            | Self::SetLedColor { .. }
+            | Self::SaveRgbPreset { .. }
+            | Self::DeleteRgbPreset { .. }
+            | Self::ApplyRgbPreset { .. }
+            | Self::SetMbRgbSync { .. }
+            | Self::SetFanDirection { .. }
+            | Self::SetRgbConfig { .. }
+            | Self::SwitchDisplayMode { .. }
+            | Self::BindWirelessDevice { .. }
+            | Self::UnbindWirelessDevice { .. }
+            | Self::SetEne6k77FanQuantity { .. }
+            | Self::SetLcdTemplates { .. }
+            | Self::InstallTemplate { .. }
+            | Self::SetLcdBrightness { .. }
+            | Self::PingDevice { .. }
+            | Self::RebootWirelessLcd { .. }
+            | Self::DisableLc217Wifi { .. }
+            | Self::BindAllWireless
+            | Self::UnbindAllWireless
+            | Self::SetMergeLightingConfig { .. }
+            | Self::SaveDeviceProfile { .. }
+            | Self::DeleteDeviceProfile { .. }
+            | Self::ApplyDeviceProfile { .. }
+            | Self::StartPixelClean { .. }
+            | Self::StopPixelClean { .. } => false,
+        }
+    }
+
+    pub fn authorize(self, daemon: &crate::daemon::DaemonInfo) -> Result<Self, String> {
+        match self {
+            Self::Guarded { guard, request } => {
+                guard.validate(daemon)?;
+                if matches!(*request, Self::Guarded { .. }) {
+                    return Err("Nested guarded requests are not supported".into());
+                }
+                Ok(*request)
+            }
+            request if request.is_read_only() => Ok(request),
+            _ => Err("Changes require a compatible client. Update the GUI/client and daemon together, then restart the selected daemon cleanly.".into()),
+        }
+    }
 }
 
 fn default_pixel_clean_minutes() -> u16 {
