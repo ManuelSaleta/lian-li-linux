@@ -6,7 +6,7 @@ use crate::openrgb_server;
 use crate::persistence;
 use crate::template_store;
 use lianli_devices::crypto::PacketBuilder;
-use lianli_devices::detect::enumerate_devices;
+use lianli_devices::detect::{enumerate_devices, DetectedDevice};
 use lianli_devices::registry;
 use lianli_devices::traits::FanDevice;
 use lianli_shared::config::{AppConfig, HidBackend};
@@ -145,7 +145,6 @@ impl ServiceManager {
     /// One enumeration snapshot with the derived id and topology sets.
     /// Callers must treat `Err` as "poll skipped", never as "no devices".
     fn snapshot_wired(&self) -> Result<(HashSet<String>, HashSet<String>), anyhow::Error> {
-        use lianli_shared::device_id::DeviceFamily;
         fn is_wired_controller(family: DeviceFamily) -> bool {
             lianli_shared::device_id::uses_hid(family)
                 || matches!(family, DeviceFamily::UniversalScreenLighting)
@@ -329,16 +328,7 @@ impl ServiceManager {
 
         const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-        let mut pending: Vec<(
-            String,
-            String,
-            &str,
-            DeviceFamily,
-            u16,
-            u16,
-            Option<String>,
-            std::sync::mpsc::Receiver<anyhow::Result<registry::OpenedDevice>>,
-        )> = Vec::new();
+        let mut pending = Vec::new();
 
         for det in &usb_devs {
             if det.family == lianli_shared::device_id::DeviceFamily::TlLcd
@@ -368,10 +358,8 @@ impl ServiceManager {
                 hid_backend: self.hid_backend(),
             };
             let name = det.name;
-            let family = det.family;
             let vid = det.vid;
             let pid = det.pid;
-            let serial = det.serial.clone();
             let topology_key = det.topology_key();
 
             let (tx, rx) =
@@ -384,7 +372,7 @@ impl ServiceManager {
                 })
                 .ok();
 
-            pending.push((base_id, topology_key, name, family, vid, pid, serial, rx));
+            pending.push((base_id, topology_key, det, rx));
             debug!("Spawned open thread for {label}");
         }
 
@@ -392,7 +380,8 @@ impl ServiceManager {
         // devices waste at most OPEN_TIMEOUT total, not N × OPEN_TIMEOUT.
         let deadline = std::time::Instant::now() + OPEN_TIMEOUT;
         let mut failed_ids: HashSet<String> = HashSet::new();
-        for (base_id, topology_key, name, family, vid, pid, serial, rx) in pending {
+        for (base_id, topology_key, det, rx) in pending {
+            let DetectedDevice { name, vid, pid, .. } = det;
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 warn!("Skipped {name} ({vid:04x}:{pid:04x}) — global open deadline exceeded");
@@ -414,11 +403,7 @@ impl ServiceManager {
                     self.register_opened_device(
                         base_id,
                         topology_key,
-                        name,
-                        family,
-                        vid,
-                        pid,
-                        serial.as_deref(),
+                        det,
                         opened,
                         &mut fan_devices,
                         &mut wired_rgb,
@@ -479,16 +464,21 @@ impl ServiceManager {
         &mut self,
         base_id: String,
         topology_key: String,
-        name: &str,
-        family: DeviceFamily,
-        vid: u16,
-        pid: u16,
-        serial: Option<&str>,
+        device: &DetectedDevice,
         mut opened: registry::OpenedDevice,
         fan_devices: &mut HashMap<String, Box<dyn FanDevice>>,
         wired_rgb: &mut HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>>,
     ) {
-        // Register fan controller.
+        let DetectedDevice {
+            name,
+            family,
+            vid,
+            pid,
+            serial,
+            ..
+        } = device;
+        let (family, vid, pid) = (*family, *vid, *pid);
+        let serial = serial.as_deref();
         if let Some(fan_ctrl) = opened.fan {
             info!("Opened {name} as fan device: {base_id}");
             let supports_quantity = fan_ctrl.supports_fan_quantity();

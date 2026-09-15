@@ -17,7 +17,13 @@ pub(super) fn render(effect: &RgbEffect, fans: usize, bottom: bool) -> Result<Ve
             for counter in 0..phase_frames {
                 let color = fade_in(color, counter);
                 let mut frame = vec![[0; 3]; fans * LEDS_PER_FAN];
-                for (fan, points) in matrix.points.chunks_exact(LEDS_PER_FAN).enumerate() {
+                for (fan, points) in matrix
+                    .points
+                    .as_chunks::<LEDS_PER_FAN>()
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     let left_is_lit = (fan % 2 == 0) != is_back;
                     for (led, point) in points.iter().enumerate() {
                         if (point.x < matrix.center_x) == left_is_lit {

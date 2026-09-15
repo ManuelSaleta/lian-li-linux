@@ -484,8 +484,8 @@ pub(super) fn poll_and_discover(
             let off_time = (indicator & 0x7F) as u16;
             let on_time = response[3] as u16;
             let denominator = off_time + on_time;
-            if denominator > 0 {
-                let pwm = (255u16 * on_time / denominator).min(255);
+            if let Some(duty) = (255u16 * on_time).checked_div(denominator) {
+                let pwm = duty.min(255);
                 receiver.pwm.store(pwm, Ordering::Relaxed);
             } else {
                 receiver.pwm.store(0xFFFF, Ordering::Relaxed);
@@ -644,7 +644,7 @@ fn sweep(
     let now = Instant::now();
     let mut health = health_map.lock();
     let mut changed = false;
-    for (_, h) in health.iter_mut() {
+    for h in health.values_mut() {
         if !h.dead && now.duration_since(h.last_seen) > LIVENESS_TIMEOUT {
             h.dead = true;
             changed = true;
@@ -1017,7 +1017,7 @@ mod tests {
         let stale = Instant::now()
             .checked_sub(LIVENESS_TIMEOUT + Duration::from_secs(1))
             .expect("uptime too short for test");
-        for (_, h) in health.lock().iter_mut() {
+        for h in health.lock().values_mut() {
             h.last_seen = stale;
         }
 

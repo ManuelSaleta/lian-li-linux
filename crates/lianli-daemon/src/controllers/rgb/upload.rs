@@ -261,6 +261,12 @@ fn same_command(left: &Command, right: &Command) -> bool {
     }
 }
 
+impl Drop for UploadWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{same_command, Command, Inflight, Job, Pending, MAX_PENDING_DEVICES};
@@ -356,11 +362,5 @@ mod tests {
         assert!(pending.jobs.is_empty());
         assert!(pending.inflight.is_none());
         assert_ne!(pending.generation, generation);
-    }
-}
-
-impl Drop for UploadWorker {
-    fn drop(&mut self) {
-        self.stop();
     }
 }

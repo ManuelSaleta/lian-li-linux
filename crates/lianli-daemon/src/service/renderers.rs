@@ -12,7 +12,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-// ── Encoder restart policy ───────────────────────────────────────────────────
 /// Don't restart if the encoder crashed within this period — likely systemic.
 const MIN_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
 /// Max restart attempts before giving up.
@@ -20,17 +19,21 @@ const MAX_RESTARTS: u32 = 3;
 /// Reset the restart counter after this long healthy streak.
 const HEALTHY_RESET: Duration = Duration::from_secs(300);
 
+struct EncoderSettings<'a> {
+    width: u32,
+    height: u32,
+    fps: f32,
+    rotation_deg: u16,
+    screen: &'a ScreenInfo,
+}
+
 /// Attempt to respawn the encoder and restart the h264 stream after a write
 /// failure. Returns `true` if the caller should continue the render loop.
 fn try_restart_encoder(
     encoder: &Arc<Mutex<LiveH264Encoder>>,
     restarter: &StreamRestarter,
     stop: &Arc<AtomicBool>,
-    canvas_w: u32,
-    canvas_h: u32,
-    fps: f32,
-    rotation_deg: u16,
-    screen: &ScreenInfo,
+    settings: EncoderSettings<'_>,
     restart_count: &mut u32,
     started_at: &mut Instant,
 ) -> bool {
@@ -42,7 +45,6 @@ fn try_restart_encoder(
         return false;
     }
 
-    // Reset counter if the encoder was healthy for a long stretch.
     if started_at.elapsed() > HEALTHY_RESET {
         *restart_count = 0;
     }
@@ -62,7 +64,6 @@ fn try_restart_encoder(
         *restart_count
     );
 
-    // Backoff sleep — interruptible by stop flag.
     let mut remaining = Duration::from_secs(backoff_secs);
     while remaining > Duration::ZERO {
         if stop.load(Ordering::Relaxed) {
@@ -73,14 +74,20 @@ fn try_restart_encoder(
         remaining -= step;
     }
 
-    let mut new_encoder =
-        match LiveH264Encoder::spawn(canvas_w, canvas_h, fps, rotation_deg, screen) {
-            Ok(enc) => enc,
-            Err(e) => {
-                warn!("h264 encoder respawn failed: {e}");
-                return false;
-            }
-        };
+    let EncoderSettings {
+        width,
+        height,
+        fps,
+        rotation_deg,
+        screen,
+    } = settings;
+    let mut new_encoder = match LiveH264Encoder::spawn(width, height, fps, rotation_deg, screen) {
+        Ok(enc) => enc,
+        Err(e) => {
+            warn!("h264 encoder respawn failed: {e}");
+            return false;
+        }
+    };
 
     if stop.load(Ordering::Relaxed) {
         return false;
@@ -405,11 +412,13 @@ impl AsyncCustomH264Renderer {
                             &encoder_clone,
                             &restarter,
                             &stop_clone,
-                            canvas_w,
-                            canvas_h,
-                            fps,
-                            rotation_deg,
-                            &screen_clone,
+                            EncoderSettings {
+                                width: canvas_w,
+                                height: canvas_h,
+                                fps,
+                                rotation_deg,
+                                screen: &screen_clone,
+                            },
                             &mut restart_count,
                             &mut encoder_started_at,
                         ) {
@@ -523,11 +532,13 @@ impl AsyncSensorH264Renderer {
                                 &encoder_clone,
                                 &restarter,
                                 &stop_clone,
-                                canvas_w,
-                                canvas_h,
-                                fps,
-                                0,
-                                &screen_clone,
+                                EncoderSettings {
+                                    width: canvas_w,
+                                    height: canvas_h,
+                                    fps,
+                                    rotation_deg: 0,
+                                    screen: &screen_clone,
+                                },
                                 &mut restart_count,
                                 &mut encoder_started_at,
                             ) {

@@ -168,6 +168,71 @@ fn write_fd_timed(
     }
 }
 
+impl HidTransport for HidrawTransport {
+    fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        self.with_reopen(|s| s.write_timed(data, WRITE_TIMEOUT), "write")
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError> {
+        self.with_reopen(
+            |s| {
+                s.device
+                    .read_timeout(buf, timeout_ms)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "read_timeout",
+        )
+    }
+
+    fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        self.with_reopen(
+            |s| {
+                s.device
+                    .send_feature_report(data)
+                    .map_err(|e| TransportError::Write(e.to_string()))?;
+                Ok(data.len())
+            },
+            "send_feature_report",
+        )
+    }
+
+    fn get_feature_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        self.with_reopen(
+            |s| {
+                s.device
+                    .get_feature_report(buf)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "get_feature_report",
+        )
+    }
+
+    fn get_input_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        self.with_reopen(
+            |s| {
+                s.device
+                    .get_input_report(buf)
+                    .map_err(|e| TransportError::Read(e.to_string()))
+            },
+            "get_input_report",
+        )
+    }
+
+    fn read_flush(&mut self) {
+        let mut buf = [0u8; 64];
+        loop {
+            match self.device.read_timeout(&mut buf, 5) {
+                Ok(n) if n > 0 => continue,
+                _ => break,
+            }
+        }
+    }
+
+    fn reopen_count(&self) -> u64 {
+        HidrawTransport::reopen_count(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,11 +246,9 @@ mod tests {
 
         let chunk = [0u8; 4096];
         let mut filled = 0usize;
-        loop {
-            match tx.write(&chunk) {
-                Ok(n) => filled += n,
-                Err(_) => break,
-            }
+        while let Ok(n) = tx.write(&chunk) {
+            assert!(n > 0, "socket stopped accepting writes without an error");
+            filled += n;
         }
         assert!(filled > 0, "socket buffer never filled?");
 
@@ -256,70 +319,5 @@ mod tests {
             elapsed < std::time::Duration::from_millis(2_000),
             "exceeded deadline: {elapsed:?}"
         );
-    }
-}
-
-impl HidTransport for HidrawTransport {
-    fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-        self.with_reopen(|s| s.write_timed(data, WRITE_TIMEOUT), "write")
-    }
-
-    fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError> {
-        self.with_reopen(
-            |s| {
-                s.device
-                    .read_timeout(buf, timeout_ms)
-                    .map_err(|e| TransportError::Read(e.to_string()))
-            },
-            "read_timeout",
-        )
-    }
-
-    fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-        self.with_reopen(
-            |s| {
-                s.device
-                    .send_feature_report(data)
-                    .map_err(|e| TransportError::Write(e.to_string()))?;
-                Ok(data.len())
-            },
-            "send_feature_report",
-        )
-    }
-
-    fn get_feature_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.with_reopen(
-            |s| {
-                s.device
-                    .get_feature_report(buf)
-                    .map_err(|e| TransportError::Read(e.to_string()))
-            },
-            "get_feature_report",
-        )
-    }
-
-    fn get_input_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.with_reopen(
-            |s| {
-                s.device
-                    .get_input_report(buf)
-                    .map_err(|e| TransportError::Read(e.to_string()))
-            },
-            "get_input_report",
-        )
-    }
-
-    fn read_flush(&mut self) {
-        let mut buf = [0u8; 64];
-        loop {
-            match self.device.read_timeout(&mut buf, 5) {
-                Ok(n) if n > 0 => continue,
-                _ => break,
-            }
-        }
-    }
-
-    fn reopen_count(&self) -> u64 {
-        HidrawTransport::reopen_count(self)
     }
 }

@@ -1,5 +1,6 @@
 use super::controller::WirelessController;
 use super::convergence::AckSignal;
+use super::DiscoveredDevice;
 use super::{
     RF_217_CLOSE_WIFI, RF_DATA_SIZE, RF_REBOOT_LCD, RF_SELECT, RF_SELECTED_GROUP, RF_SEND_PIC,
 };
@@ -122,10 +123,9 @@ impl WirelessController {
             let end = (start + PIC_CHUNK_SIZE).min(image.len());
             let next_seq = self.send_pic_chunk(
                 tx,
-                &device.mac,
+                &device,
                 &master_mac,
                 master_ch,
-                device.rx_type,
                 chunk_idx,
                 &image[start..end],
             )?;
@@ -138,10 +138,9 @@ impl WirelessController {
         term_payload[1] = (len & 0xFF) as u8;
         let next_seq = self.send_pic_chunk(
             tx,
-            &device.mac,
+            &device,
             &master_mac,
             master_ch,
-            device.rx_type,
             PIC_TERMINATOR,
             &term_payload,
         )?;
@@ -159,13 +158,13 @@ impl WirelessController {
     fn send_pic_chunk(
         &self,
         tx: &super::transport::SharedTransport,
-        mac: &[u8; 6],
+        device: &DiscoveredDevice,
         master_mac: &[u8; 6],
         channel: u8,
-        rx_type: u8,
         chunk_idx: u8,
         data: &[u8],
     ) -> Result<u8> {
+        let mac = &device.mac;
         let current_seq = self.device_by_mac(mac).map(|d| d.cmd_seq).unwrap_or(0);
         let next_seq = current_seq.wrapping_add(1).max(1);
 
@@ -174,7 +173,7 @@ impl WirelessController {
         rf_data[1] = RF_SEND_PIC;
         rf_data[2..8].copy_from_slice(mac);
         rf_data[8..14].copy_from_slice(master_mac);
-        rf_data[14] = rx_type;
+        rf_data[14] = device.rx_type;
         rf_data[15] = channel;
         rf_data[17] = next_seq;
         rf_data[18] = chunk_idx;

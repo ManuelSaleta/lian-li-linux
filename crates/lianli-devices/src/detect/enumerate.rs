@@ -6,8 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, warn};
 
-/// Enumerate all Lian Li USB devices on the system, sorted by (bus, address).
-
 /// Devices whose live EP0 serial probe already failed once. The enumeration
 /// runs every poll, so without this cache a device that has no kernel cached
 /// serial and does not answer string descriptor requests would be probed

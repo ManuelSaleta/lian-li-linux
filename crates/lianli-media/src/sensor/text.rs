@@ -24,8 +24,7 @@ pub(super) fn draw_sensor_text_ttf(
 ) {
     draw_text_centered(
         image,
-        width,
-        height,
+        (width, height),
         params.value_text,
         params.value_size,
         params.color,
@@ -34,8 +33,7 @@ pub(super) fn draw_sensor_text_ttf(
     );
     draw_text_centered(
         image,
-        width,
-        height,
+        (width, height),
         params.unit,
         params.unit_size,
         params.color,
@@ -44,8 +42,7 @@ pub(super) fn draw_sensor_text_ttf(
     );
     draw_text_centered(
         image,
-        width,
-        height,
+        (width, height),
         params.label,
         params.label_size,
         params.color,
@@ -56,8 +53,7 @@ pub(super) fn draw_sensor_text_ttf(
 
 fn draw_text_centered(
     image: &mut RgbImage,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
     text: &str,
     size: f32,
     color: [u8; 3],
@@ -165,16 +161,21 @@ fn draw_text_center_bitmap(
 
     for (i, bitmap) in glyphs.iter().enumerate() {
         let base_x = start_x + i as i32 * (glyph_width as i32 + spacing as i32);
-        draw_bitmap_character(image, width, height, base_x, start_y, *bitmap, scale, color);
+        draw_bitmap_character(
+            image,
+            (width, height),
+            (base_x, start_y),
+            *bitmap,
+            scale,
+            color,
+        );
     }
 }
 
 fn draw_bitmap_character(
     image: &mut RgbImage,
-    width: u32,
-    height: u32,
-    base_x: i32,
-    base_y: i32,
+    (width, height): (u32, u32),
+    (base_x, base_y): (i32, i32),
     bitmap: [u8; 7],
     scale: u32,
     color: [u8; 3],

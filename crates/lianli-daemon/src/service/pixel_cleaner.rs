@@ -576,7 +576,6 @@ mod tests {
             let asset = asset(&format!("original-{index}"));
             let target = ActiveTarget::new(
                 index,
-                asset.config_key.clone(),
                 format!("hid:device-{index}"),
                 LcdBackend::HidLcd(Arc::new(HidLcd::new(Box::new(TestLcd)))),
                 asset.clone(),

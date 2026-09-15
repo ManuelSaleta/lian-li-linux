@@ -224,12 +224,12 @@ fn handle_request(
                 }
             }
             let mut state = state.lock();
-            state.config = Some(config);
+            state.config = Some(*config);
             super::persist_and_notify(&mut state, &tx, "SetConfig")
         }
 
         IpcRequest::SetLcdMedia { device_id, config } => {
-            super::config::set_lcd_media(state, tx, device_id, config)
+            super::config::set_lcd_media(state, tx, device_id, *config)
         }
         IpcRequest::SetFanConfig { config } => super::config::set_fan_config(state, tx, config),
 

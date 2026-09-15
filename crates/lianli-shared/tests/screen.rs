@@ -11,8 +11,10 @@ fn hs2_oled_curve_has_correct_flags() {
 
 #[test]
 fn disabled_h264_screens_are_false() {
-    assert!(!ScreenInfo::LANCOOL_207.h264);
-    assert!(!ScreenInfo::VISION_9P2.h264);
+    const {
+        assert!(!ScreenInfo::LANCOOL_207.h264);
+        assert!(!ScreenInfo::VISION_9P2.h264);
+    }
 }
 
 #[test]

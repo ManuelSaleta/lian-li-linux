@@ -290,7 +290,12 @@ pub fn fast_overlay(dst: &mut RgbaImage, src: &RgbaImage, tl_x: i64, tl_y: i64) 
         let src_row =
             &src_buf[sy * src_stride + src_x0_bytes..sy * src_stride + src_x0_bytes + row_bytes];
 
-        for (dpx, spx) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+        for (dpx, spx) in dst_row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src_row.as_chunks::<4>().0.iter())
+        {
             let sa = spx[3] as u32;
             if sa == 0 {
                 continue;

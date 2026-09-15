@@ -153,16 +153,17 @@ fn empty(fans: usize) -> PlaneAnimation {
 }
 
 fn combine(mut outer: PlaneAnimation, mut center: PlaneAnimation) -> Result<Animation> {
-    let initial_interval = if center.interval_base_ticks > 0 {
-        let speed_multiplier = if outer.interval_base_ticks > 0 {
-            outer.interval_ticks / outer.interval_base_ticks
-        } else {
-            center.interval_ticks / center.interval_base_ticks
-        };
-        speed_multiplier * center.interval_base_ticks
-    } else {
-        outer.interval_ticks
-    };
+    let initial_interval = center
+        .interval_ticks
+        .checked_div(center.interval_base_ticks)
+        .map(|center_multiplier| {
+            outer
+                .interval_ticks
+                .checked_div(outer.interval_base_ticks)
+                .unwrap_or(center_multiplier)
+                * center.interval_base_ticks
+        })
+        .unwrap_or(outer.interval_ticks);
     if outer.frames.len() >= center.frames.len() {
         repeat_short_animation(&mut center.frames, outer.frames.len());
         let center_len = center.frames.len();

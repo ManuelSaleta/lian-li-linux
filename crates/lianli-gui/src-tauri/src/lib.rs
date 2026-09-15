@@ -125,7 +125,7 @@ async fn open_editor_window(
         _ => "#/editor".to_string(),
     };
     if let Some(existing) = app.get_webview_window("editor") {
-        let _ = existing.eval(&format!("window.location.hash = '{hash}';"));
+        let _ = existing.eval(format!("window.location.hash = '{hash}';"));
         let _ = existing.set_focus();
         return Ok(());
     }
@@ -159,11 +159,11 @@ fn open_secondary_window(
         .min_inner_size(640.0, 420.0)
         .resizable(true);
 
-    builder = builder.initialization_script(&format!("window.__LIANLI_WINDOW__ = '{label}';"));
+    builder = builder.initialization_script(format!("window.__LIANLI_WINDOW__ = '{label}';"));
 
     builder
         .build()
-        .inspect(|win| apply_platform_decorations(win))
+        .inspect(apply_platform_decorations)
         .map(|_| ())
         .map_err(|e| format!("failed to create {label} window: {e}"))
 }

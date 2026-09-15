@@ -111,16 +111,13 @@ fn run(
 ) {
     let all_sensors = enumerate_sensors();
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
-    let mut switched: HashMap<[u8; 6], ThemeSwitch> = HashMap::new();
-    // Last-sent speeds for wireless slots that resolve to "no target"
-    // (off / missing curve / sensor failure): hold instead of dropping to 0.
-    let mut wireless_hold: HashMap<[u8; 6], [u8; 4]> = HashMap::new();
+    let mut wireless_state = WirelessAioState::default();
 
     while !stop_flag.load(Ordering::Relaxed) {
         let cfg = {
             let mut s = state.lock();
             if s.needs_reinit {
-                switched.clear();
+                wireless_state.switched.clear();
                 s.needs_reinit = false;
             }
             s.config.clone()
@@ -138,8 +135,7 @@ fn run(
             &devices,
             &cfg,
             &curves,
-            &mut switched,
-            &mut wireless_hold,
+            &mut wireless_state,
             &mut sensor_cache,
             &all_sensors,
         );
@@ -153,8 +149,10 @@ fn run(
         );
 
         let live_macs: HashSet<[u8; 6]> = devices.iter().map(|d| d.mac).collect();
-        switched.retain(|m, _| live_macs.contains(m));
-        wireless_hold.retain(|m, _| live_macs.contains(m));
+        wireless_state.switched.retain(|m, _| live_macs.contains(m));
+        wireless_state
+            .held_speeds
+            .retain(|m, _| live_macs.contains(m));
 
         thread::sleep(TICK);
     }
@@ -168,16 +166,26 @@ struct ThemeSwitch {
     acknowledged: bool,
 }
 
+#[derive(Default)]
+struct WirelessAioState {
+    switched: HashMap<[u8; 6], ThemeSwitch>,
+    // Keep the last speeds when a curve or sensor cannot resolve a new target.
+    held_speeds: HashMap<[u8; 6], [u8; 4]>,
+}
+
 fn control_wireless(
     wireless: &WirelessController,
     devices: &[DiscoveredDevice],
     cfg: &AppConfig,
     curves: &HashMap<String, FanCurve>,
-    switched: &mut HashMap<[u8; 6], ThemeSwitch>,
-    wireless_hold: &mut HashMap<[u8; 6], [u8; 4]>,
+    state: &mut WirelessAioState,
     sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
     all_sensors: &[SensorInfo],
 ) {
+    let WirelessAioState {
+        switched,
+        held_speeds: wireless_hold,
+    } = state;
     for device in devices {
         if !device.is_aio() {
             continue;
@@ -602,10 +610,8 @@ fn resolve_pump_rpm(
         FanSpeed::Curve(name) => {
             let curve = curves.get(name)?;
             let source = curve.effective_source();
-            match resolve_and_read(&source, sensor_cache, all_sensors) {
-                Some(temp) => interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0),
-                None => return None,
-            }
+            let temp = resolve_and_read(&source, sensor_cache, all_sensors)?;
+            interpolate_curve(&curve.curve, temp).clamp(0.0, 100.0)
         }
     };
     let span = (max_rpm - min_rpm) as f32;

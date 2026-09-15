@@ -164,7 +164,7 @@ fn render_region(region: &RgbRegionConfig, fans: usize, bottom: bool) -> Result<
     }?;
     if region.flip {
         for frame in &mut frames {
-            for fan in frame.chunks_exact_mut(26) {
+            for fan in frame.as_chunks_mut::<26>().0.iter_mut() {
                 let (top, bottom) = fan.split_at_mut(13);
                 top.swap_with_slice(bottom);
             }

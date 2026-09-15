@@ -15,11 +15,11 @@ pub enum IpcRequest {
     GetConfig,
     /// Replace the entire config (daemon writes to disk + reloads).
     SetConfig {
-        config: AppConfig,
+        config: Box<AppConfig>,
     },
     SetLcdMedia {
         device_id: String,
-        config: LcdConfig,
+        config: Box<LcdConfig>,
     },
     SetFanConfig {
         config: FanConfig,

@@ -51,29 +51,18 @@ impl FanController {
     }
 
     pub fn start(&mut self) {
-        let config = self.config.clone();
-        let curves = self.curves.clone();
-        let wireless = self.wireless.clone();
-        let wired = Arc::clone(&self.wired_devices);
-        let stop_flag = Arc::clone(&self.stop_flag);
-        let daemon_tx = self.daemon_tx.clone();
-        let rgb_drift_enabled = self.rgb_drift_enabled;
-        let rgb_drift_interval = self.rgb_drift_interval;
-        let all_sensors = lianli_shared::sensors::enumerate_sensors();
-
-        let thread = thread::spawn(move || {
-            fan_control_thread(
-                config,
-                curves,
-                wireless,
-                wired,
-                stop_flag,
-                daemon_tx,
-                &all_sensors,
-                rgb_drift_enabled,
-                rgb_drift_interval,
-            );
-        });
+        let inputs = FanControlInputs {
+            config: self.config.clone(),
+            curves: self.curves.clone(),
+            wireless: self.wireless.clone(),
+            wired: Arc::clone(&self.wired_devices),
+            stop_flag: Arc::clone(&self.stop_flag),
+            daemon_tx: self.daemon_tx.clone(),
+            all_sensors: lianli_shared::sensors::enumerate_sensors(),
+            rgb_drift_enabled: self.rgb_drift_enabled,
+            rgb_drift_interval: self.rgb_drift_interval,
+        };
+        let thread = thread::spawn(move || fan_control_thread(inputs));
 
         self.thread = Some(thread);
     }
@@ -86,17 +75,31 @@ impl FanController {
     }
 }
 
-fn fan_control_thread(
+struct FanControlInputs {
     config: FanConfig,
     curves: HashMap<String, FanCurve>,
     wireless: Option<Arc<WirelessController>>,
     wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
     stop_flag: Arc<AtomicBool>,
     daemon_tx: Option<Sender<DaemonEvent>>,
-    all_sensors: &[SensorInfo],
+    all_sensors: Vec<SensorInfo>,
     rgb_drift_enabled: bool,
     rgb_drift_interval: Duration,
-) {
+}
+
+fn fan_control_thread(inputs: FanControlInputs) {
+    let FanControlInputs {
+        config,
+        curves,
+        wireless,
+        wired,
+        stop_flag,
+        daemon_tx,
+        all_sensors,
+        rgb_drift_enabled,
+        rgb_drift_interval,
+    } = inputs;
+    let all_sensors = all_sensors.as_slice();
     let update_interval = Duration::from_millis(config.update_interval_ms);
     let heartbeat_interval = Duration::from_secs(1);
     let mut last_update = Instant::now() - update_interval;
@@ -308,9 +311,11 @@ fn fan_control_thread(
                 &mut sensor_cache,
                 &mut temp_ema,
                 all_sensors,
-                fan_states.get(&group_idx),
-                config.hysteresis_temp,
-                config.hysteresis_pwm,
+                FanHysteresis {
+                    previous: fan_states.get(&group_idx),
+                    temperature: config.hysteresis_temp,
+                    pwm: config.hysteresis_pwm,
+                },
                 &wired,
             ) {
                 Ok(speeds) => speeds,
@@ -500,15 +505,19 @@ fn apply_hysteresis(
     }
 }
 
+struct FanHysteresis<'a> {
+    previous: Option<&'a FanState>,
+    temperature: f32,
+    pwm: u8,
+}
+
 fn calculate_fan_speeds(
     fan_speeds: &[FanSpeed; 4],
     curves: &HashMap<String, FanCurve>,
     sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
     temp_ema: &mut HashMap<SensorSource, f32>,
     all_sensors: &[SensorInfo],
-    prev_state: Option<&FanState>,
-    hysteresis_temp: f32,
-    hysteresis_pwm: u8,
+    hysteresis: FanHysteresis<'_>,
     wired: &HashMap<String, Box<dyn FanDevice>>,
 ) -> Result<[u8; 4]> {
     let mut pwm_values = [0u8; 4];
@@ -530,14 +539,14 @@ fn calculate_fan_speeds(
                 let speed_percent = interpolate_curve(&curve.curve, temp);
                 let target_pwm = (speed_percent * 2.55) as u8;
 
-                let pwm = match prev_state {
+                let pwm = match hysteresis.previous {
                     Some(state) => apply_hysteresis(
                         target_pwm,
                         temp,
                         i,
                         state,
-                        hysteresis_temp,
-                        hysteresis_pwm,
+                        hysteresis.temperature,
+                        hysteresis.pwm,
                     ),
                     None => target_pwm,
                 };

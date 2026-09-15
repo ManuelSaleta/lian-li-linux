@@ -431,7 +431,6 @@ impl ServiceManager {
                             screen_info_for(candidate.family).unwrap_or(ScreenInfo::WIRELESS_LCD);
                         let target = ActiveTarget::new(
                             cfg_idx,
-                            cfg_key,
                             candidate.device_id.clone(),
                             lcd,
                             Arc::clone(&asset),
@@ -539,6 +538,25 @@ fn lcd_backend_kind(family: DeviceFamily) -> Option<LcdBackendKind> {
     })
 }
 
+fn hid_id_norm(s: &str) -> &str {
+    s.strip_prefix("hid:").unwrap_or(s)
+}
+
+pub(super) fn lcd_id_matches(serial: &str, device_id: &str) -> bool {
+    hid_id_norm(serial) == hid_id_norm(device_id)
+}
+
+/// Whether a device family is a wired AIO LCD that may benefit from alias matching.
+fn is_wired_aio_lcd(family: DeviceFamily) -> bool {
+    matches!(
+        family,
+        DeviceFamily::HydroShiftLcd
+            | DeviceFamily::Galahad2Lcd
+            | DeviceFamily::HydroShift2Lcd
+            | DeviceFamily::HydroShift2OledCurveLcd
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use lianli_shared::device_id::KNOWN_DEVICES;
@@ -559,23 +577,4 @@ mod tests {
             }
         }
     }
-}
-
-fn hid_id_norm(s: &str) -> &str {
-    s.strip_prefix("hid:").unwrap_or(s)
-}
-
-pub(super) fn lcd_id_matches(serial: &str, device_id: &str) -> bool {
-    hid_id_norm(serial) == hid_id_norm(device_id)
-}
-
-/// Whether a device family is a wired AIO LCD that may benefit from alias matching.
-fn is_wired_aio_lcd(family: DeviceFamily) -> bool {
-    matches!(
-        family,
-        DeviceFamily::HydroShiftLcd
-            | DeviceFamily::Galahad2Lcd
-            | DeviceFamily::HydroShift2Lcd
-            | DeviceFamily::HydroShift2OledCurveLcd
-    )
 }

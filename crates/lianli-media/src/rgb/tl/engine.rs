@@ -81,7 +81,13 @@ impl Matrix {
                 point.x = original_max_x - point.x;
             }
             let even_fan_count = fans.is_multiple_of(2);
-            for (fan, fan_points) in self.points.chunks_exact_mut(LEDS_PER_FAN).enumerate() {
+            for (fan, fan_points) in self
+                .points
+                .as_chunks_mut::<LEDS_PER_FAN>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 if if even_fan_count {
                     fan % 2 == 0
                 } else {
@@ -93,7 +99,13 @@ impl Matrix {
                 }
             }
         } else {
-            for (fan, fan_points) in self.points.chunks_exact_mut(LEDS_PER_FAN).enumerate() {
+            for (fan, fan_points) in self
+                .points
+                .as_chunks_mut::<LEDS_PER_FAN>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 if fan % 2 != 0 {
                     for point in fan_points {
                         point.y = original_max_y - point.y;
@@ -139,7 +151,13 @@ impl Matrix {
 
     pub fn transform_racing(&mut self) {
         let original_max_y = self.max_y;
-        for (fan, fan_points) in self.points.chunks_exact_mut(LEDS_PER_FAN).enumerate() {
+        for (fan, fan_points) in self
+            .points
+            .as_chunks_mut::<LEDS_PER_FAN>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             if fan % 2 != 0 {
                 for point in fan_points {
                     point.y = original_max_y - point.y;
@@ -211,7 +229,7 @@ pub(super) fn select_side(frame: &[Color], fans: usize, bottom: bool) -> Vec<Col
 pub(super) fn place_side_track(track: &[Color], fans: usize, bottom: bool) -> Vec<Color> {
     let mut frame = vec![[0; 3]; fans * LEDS_PER_FAN];
     let side_offset = usize::from(bottom) * 13;
-    for (fan, colors) in track.chunks_exact(13).enumerate() {
+    for (fan, colors) in track.as_chunks::<13>().0.iter().enumerate() {
         let start = fan * LEDS_PER_FAN + side_offset;
         frame[start..start + 13].copy_from_slice(colors);
     }

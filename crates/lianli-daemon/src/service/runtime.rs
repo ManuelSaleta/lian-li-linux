@@ -864,7 +864,6 @@ fn spawn_recovery_thread(
 impl ActiveTarget {
     pub(super) fn new(
         index: usize,
-        key: ConfigKey,
         device_identity: String,
         lcd: LcdBackend,
         asset: Arc<MediaAsset>,
@@ -872,6 +871,7 @@ impl ActiveTarget {
         custom_h264: bool,
         tx: Option<Sender<DaemonEvent>>,
     ) -> Self {
+        let key = asset.config_key.clone();
         let media: Box<dyn FrameSource> = Box::new(NoopFrameSource);
         let recovery_stop = Arc::new(AtomicBool::new(false));
         let recovery_thread = match &lcd {
@@ -1735,7 +1735,6 @@ mod tests {
         });
         let mut target = ActiveTarget::new(
             0,
-            asset.config_key.clone(),
             "test".into(),
             LcdBackend::WinUsb(sender),
             asset.clone(),
@@ -1906,7 +1905,6 @@ mod tests {
             });
             let mut target = ActiveTarget::new(
                 0,
-                asset.config_key.clone(),
                 "test".into(),
                 LcdBackend::HidLcd(device),
                 asset,
