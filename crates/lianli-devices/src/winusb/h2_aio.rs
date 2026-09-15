@@ -49,6 +49,7 @@ fn h2_playback_fields(frame_count: usize, timing: RgbPlaybackTiming) -> Result<(
 /// Telemetry parsed from GetH2Params response.
 #[derive(Clone)]
 pub struct H2Params {
+    pub observed_at: std::time::Instant,
     pub cpu_temp: u8,
     pub cpu_load: u8,
     pub gpu_temp: u8,
@@ -57,6 +58,30 @@ pub struct H2Params {
     pub fan_rpm: [u16; 3],
     pub coolant_temp: u8,
     pub mac: Option<[u8; 6]>,
+}
+
+fn selected_duties(mut previous: [u8; 3], duties: &[Option<u8>]) -> [u8; 3] {
+    for (previous, selected) in previous.iter_mut().zip(duties) {
+        if let Some(duty) = selected {
+            *previous = *duty;
+        }
+    }
+    previous
+}
+
+#[cfg(test)]
+mod selected_duty_tests {
+    #[test]
+    fn fallback_preserves_unselected_fans_and_ignores_the_pump_slot() {
+        assert_eq!(
+            super::selected_duties([50, 80, 120], &[None, Some(255), None, Some(0)]),
+            [50, 255, 120]
+        );
+        assert_eq!(
+            super::selected_duties([50, 80, 120], &[Some(0), None, None]),
+            [0, 80, 120]
+        );
+    }
 }
 
 /// After LCD play mode the device ignores control commands until this
@@ -334,6 +359,7 @@ impl H2AioController {
         }
 
         let parsed = H2Params {
+            observed_at: std::time::Instant::now(),
             cpu_temp: 0,
             cpu_load: 0,
             gpu_temp: 0,
@@ -347,7 +373,7 @@ impl H2AioController {
             coolant_temp: buf[13],
             mac,
         };
-        *self.params_cache.lock() = Some((std::time::Instant::now(), parsed.clone()));
+        *self.params_cache.lock() = Some((parsed.observed_at, parsed.clone()));
         Ok(parsed)
     }
 
@@ -626,6 +652,19 @@ impl FanDevice for H2AioController {
         self.sync_pump_fan(*self.last_pump_duty.lock(), fan_duties)
     }
 
+    fn set_selected_fan_speeds(&self, duties: &[Option<u8>]) -> Result<()> {
+        if !duties.iter().take(3).any(Option::is_some) {
+            return Ok(());
+        }
+        let fan_duties = {
+            let mut previous = self.last_fan_duties.lock();
+            *previous = selected_duties(*previous, duties);
+            *previous
+        };
+        let pump_duty = *self.last_pump_duty.lock();
+        self.sync_pump_fan(pump_duty, fan_duties)
+    }
+
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
         if self.is_wireless_mode() {
             return Ok(Vec::new());
@@ -643,10 +682,21 @@ impl FanDevice for H2AioController {
     }
 
     fn poll_coolant_temp(&self) -> Option<f32> {
+        self.poll_coolant_reading()
+            .filter(|reading| reading.observed_at.elapsed() < Duration::from_secs(5))
+            .map(|reading| reading.value)
+    }
+
+    fn poll_coolant_reading(&self) -> Option<lianli_shared::sensors::SensorReading> {
         if self.is_wireless_mode() {
             return None;
         }
-        self.get_h2_params().ok().map(|p| p.coolant_temp as f32)
+        self.get_h2_params()
+            .ok()
+            .map(|p| lianli_shared::sensors::SensorReading {
+                value: f32::from(p.coolant_temp),
+                observed_at: p.observed_at,
+            })
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {

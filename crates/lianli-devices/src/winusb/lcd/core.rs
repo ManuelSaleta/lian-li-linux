@@ -29,6 +29,15 @@ pub struct PendingCmd {
     pub ring_key: Option<(Vec<u8>, u8)>,
 }
 
+fn queue_control(queue: &mut Vec<PendingCmd>, mut command: PendingCmd) {
+    if let Some(previous) = queue.iter().find(|pending| pending.label == command.label) {
+        // Repeated PWM updates must not postpone the safe-window relaxation deadline.
+        command.queued_at = previous.queued_at;
+    }
+    queue.retain(|pending| pending.label != command.label);
+    queue.push(command);
+}
+
 /// USB bulk handle shared by the LCD stream and the HydroShift II control
 /// channel (pump/fan/ring RGB), plus the coordination that keeps control
 /// commands off the wire while the panel's ingest buffer is full.
@@ -261,9 +270,7 @@ impl LcdLink {
     /// Queue a control command for the stream thread. Latest wins per label:
     /// an older SyncPumpFan still waiting is replaced, not appended.
     pub fn defer(&self, cmd: PendingCmd) {
-        let mut q = self.pending.lock();
-        q.retain(|c| c.label != cmd.label);
-        q.push(cmd);
+        queue_control(&mut self.pending.lock(), cmd);
     }
 
     pub fn has_pending(&self) -> bool {
@@ -1285,6 +1292,30 @@ fn read_stream_chunk(
 
 #[cfg(test)]
 mod file_stream_tests {
+    #[test]
+    fn replacement_cooling_commands_keep_the_original_wait_deadline() {
+        use super::{queue_control, PendingCmd, CONTROL_RELAX_AFTER};
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut queue = Vec::new();
+        for second in 0..5 {
+            queue_control(
+                &mut queue,
+                PendingCmd {
+                    label: "SyncPumpFan",
+                    packet: vec![second as u8],
+                    reply_wait: Duration::from_millis(250),
+                    queued_at: now + Duration::from_secs(second),
+                    play_safe: true,
+                    ring_key: None,
+                },
+            );
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].packet, vec![second as u8]);
+            assert_eq!(queue[0].queued_at, now);
+        }
+        assert!(now + Duration::from_secs(4) - queue[0].queued_at >= CONTROL_RELAX_AFTER);
+    }
     use super::*;
     use std::io::Cursor;
 

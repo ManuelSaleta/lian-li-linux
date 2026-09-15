@@ -5,5 +5,6 @@
 //! - [`rgb`] — RGB effect engine + direct-color writer + wireless RGB streaming.
 
 pub mod aio;
+pub(crate) mod cooling;
 pub mod fan;
 pub mod rgb;

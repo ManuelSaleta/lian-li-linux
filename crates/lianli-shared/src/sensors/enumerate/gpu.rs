@@ -3,6 +3,8 @@
 use crate::sensors::{NvidiaMetric, SensorInfo, SensorSource, Unit};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Emit `SensorInfo` records for every NVIDIA GPU reported by `nvidia-smi`.
 ///
@@ -113,18 +115,89 @@ pub fn enumerate_amd(gpu_names: &HashMap<String, String>, sensors: &mut Vec<Sens
     }
 }
 
-/// Build the `pci_id → friendly name` map for AMD GPUs via `lspci`.
-///
-/// Strips the common prefix when multiple AMD GPUs are present (e.g. two
-/// "AMD Radeon RX 7900 XT" become "RX 7900 XT").
-pub fn get_amd_gpu_names() -> HashMap<String, String> {
-    let mut gpus = HashMap::new();
+#[derive(Default)]
+struct GpuNames {
+    names: HashMap<String, String>,
+    topology: Option<Vec<std::ffi::OsString>>,
+    checked: Option<Instant>,
+    running: bool,
+}
 
-    let output = match Command::new("lspci").output() {
-        Ok(o) => o,
-        Err(_) => return gpus,
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
+impl GpuNames {
+    fn needs_refresh(&self, topology: &[std::ffi::OsString]) -> bool {
+        !self.running && self.topology.as_deref() != Some(topology)
+    }
+
+    fn finish(
+        &mut self,
+        topology: Vec<std::ffi::OsString>,
+        names: anyhow::Result<HashMap<String, String>>,
+    ) {
+        if let Ok(names) = names {
+            self.names = names;
+            self.topology = Some(topology);
+        }
+        self.running = false;
+    }
+}
+
+static GPU_NAMES: OnceLock<Mutex<GpuNames>> = OnceLock::new();
+
+/// Returns cached labels while changed PCI topology is refreshed in the background.
+pub fn get_amd_gpu_names() -> HashMap<String, String> {
+    let cache = GPU_NAMES.get_or_init(|| Mutex::new(GpuNames::default()));
+    let mut state = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if state.running
+        || state
+            .checked
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+    {
+        return state.names.clone();
+    }
+    state.checked = Some(Instant::now());
+    let names = state.names.clone();
+    drop(state);
+    let topology = std::fs::read_dir("/sys/bus/pci/devices").and_then(|entries| {
+        let mut topology = entries
+            .take(4096)
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        topology.sort();
+        Ok(topology)
+    });
+    let Ok(topology) = topology else { return names };
+    let mut state = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if !state.needs_refresh(&topology) {
+        return names;
+    }
+    state.running = true;
+    drop(state);
+    // A kernel-stuck PCI query must not block control or shutdown. Keep at most one worker until it can be reaped.
+    if let Err(error) = std::thread::Builder::new()
+        .name("pci-labels".into())
+        .spawn(move || {
+            let result = load_amd_gpu_names();
+            cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .finish(topology, result);
+        })
+    {
+        cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .running = false;
+        tracing::warn!("Cannot refresh GPU labels: {error}");
+    }
+    names
+}
+
+fn load_amd_gpu_names() -> anyhow::Result<HashMap<String, String>> {
+    let mut command = Command::new("lspci");
+    command.args(["-d", "1002:"]).env("LC_ALL", "C");
+    let output = crate::sensors::command::output(command)?;
+    let stdout = String::from_utf8_lossy(&output);
+    let mut gpus = HashMap::new();
 
     for line in stdout.lines() {
         let line_lower = line.to_lowercase();
@@ -142,7 +215,7 @@ pub fn get_amd_gpu_names() -> HashMap<String, String> {
         }
     }
 
-    clean_common_prefixes(gpus)
+    Ok(clean_common_prefixes(gpus))
 }
 
 fn clean_common_prefixes(mut gpus: HashMap<String, String>) -> HashMap<String, String> {
@@ -167,4 +240,32 @@ fn clean_common_prefixes(mut gpus: HashMap<String, String>) -> HashMap<String, S
     }
 
     gpus
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn topology_changes_refresh_labels_without_losing_successful_results_on_failure() {
+        let first = vec!["0000:01:00.0".into()];
+        let second = vec!["0000:02:00.0".into()];
+        let mut cache = GpuNames::default();
+        assert!(cache.needs_refresh(&first));
+        cache.running = true;
+        assert!(!cache.needs_refresh(&second));
+        let names = HashMap::from([("01:00.0".into(), "AMD GPU".into())]);
+        cache.finish(first.clone(), Ok(names.clone()));
+        assert_eq!(cache.names, names);
+        assert!(!cache.needs_refresh(&first));
+        assert!(cache.needs_refresh(&second));
+        cache.running = true;
+        cache.finish(second.clone(), Err(anyhow::anyhow!("query timed out")));
+        assert_eq!(cache.names, names);
+        assert_eq!(cache.topology, Some(first));
+        assert!(cache.needs_refresh(&second));
+        cache.finish(second.clone(), Ok(HashMap::new()));
+        assert!(cache.names.is_empty());
+        assert!(!cache.needs_refresh(&second));
+    }
 }

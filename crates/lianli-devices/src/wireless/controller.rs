@@ -616,6 +616,21 @@ impl WirelessController {
             .collect()
     }
 
+    pub fn coolant_reading(&self, mac: &[u8; 6]) -> Option<lianli_shared::sensors::SensorReading> {
+        let health = self.device_health.lock();
+        let entry = health.get(mac)?;
+        if entry.dead {
+            return None;
+        }
+        entry
+            .published
+            .coolant_temp_c
+            .map(|value| lianli_shared::sensors::SensorReading {
+                value: f32::from(value),
+                observed_at: entry.last_seen,
+            })
+    }
+
     /// Snapshot of devices available for binding (observed foreign, no intent).
     pub fn unbound_devices(&self) -> Vec<DiscoveredDevice> {
         let local_mac = *self.master_mac.lock();
@@ -1202,6 +1217,27 @@ mod tests {
 
     fn mac() -> [u8; 6] {
         [1, 2, 3, 4, 5, 6]
+    }
+
+    #[test]
+    fn coolant_snapshot_retains_receiver_observation_time() {
+        let mut health = entry([9; 6]);
+        health.published.coolant_temp_c = Some(42);
+        let observed_at = std::time::Instant::now() - Duration::from_secs(10);
+        health.last_seen = observed_at;
+        let controller = controller_with_health(vec![(mac(), health)]);
+        for _ in 0..2 {
+            let reading = controller.coolant_reading(&mac()).unwrap();
+            assert_eq!(reading.value, 42.0);
+            assert_eq!(reading.observed_at, observed_at);
+        }
+        controller
+            .device_health
+            .lock()
+            .get_mut(&mac())
+            .unwrap()
+            .dead = true;
+        assert!(controller.coolant_reading(&mac()).is_none());
     }
 
     #[test]

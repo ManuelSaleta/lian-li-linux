@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod command;
+pub use command::CommandSampler;
 pub mod enumerate;
 pub mod picker;
 pub mod read;
@@ -22,8 +24,10 @@ pub use enumerate::{
 pub use picker::{
     find_default_cpu_temp, find_default_gpu_temp, infer_sensor_category, pick_source_for_category,
 };
-pub use read::{get_mem_usage, read_sensor_value};
-pub use resolve::{coolant_runtime_path, resolve_sensor, write_coolant_temp};
+pub use read::{get_mem_usage, read_sensor_reading, read_sensor_value, SensorReading};
+pub use resolve::{
+    coolant_runtime_path, resolve_sensor, write_coolant_reading, write_coolant_temp,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

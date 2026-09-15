@@ -1,5 +1,7 @@
+use super::cooling::TemperatureState;
+#[cfg(test)]
+use super::cooling::TEMPERATURE_GRACE;
 use crate::service::DaemonEvent;
-use anyhow::{Context, Result};
 use lianli_devices::traits::FanDevice;
 use lianli_devices::wireless::{build_payload, SensorSnapshot, WirelessController};
 use lianli_shared::fan::{interpolate_curve, FanConfig, FanCurve, FanSpeed};
@@ -87,6 +89,13 @@ struct FanControlInputs {
     rgb_drift_interval: Duration,
 }
 
+#[derive(Default)]
+struct FanSensors {
+    resolved: HashMap<SensorSource, ResolvedSensor>,
+    commands: sensors::CommandSampler,
+    missing_curves: HashMap<String, TemperatureState>,
+}
+
 fn fan_control_thread(inputs: FanControlInputs) {
     let FanControlInputs {
         config,
@@ -100,7 +109,7 @@ fn fan_control_thread(inputs: FanControlInputs) {
         rgb_drift_interval,
     } = inputs;
     let all_sensors = all_sensors.as_slice();
-    let update_interval = Duration::from_millis(config.update_interval_ms);
+    let update_interval = Duration::from_millis(config.update_interval_ms.clamp(100, 10_000));
     let heartbeat_interval = Duration::from_secs(1);
     let mut last_update = Instant::now() - update_interval;
     let mut last_heartbeat = Instant::now() - heartbeat_interval;
@@ -125,8 +134,8 @@ fn fan_control_thread(inputs: FanControlInputs) {
         config.speeds.len()
     );
 
-    let mut temp_ema: HashMap<SensorSource, f32> = HashMap::new();
-    let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
+    let mut temperatures: HashMap<SensorSource, TemperatureState> = HashMap::new();
+    let mut sensor_cache = FanSensors::default();
     let mut fan_states: HashMap<usize, FanState> = HashMap::new();
     let mut unavailable_wireless = HashSet::new();
 
@@ -243,7 +252,8 @@ fn fan_control_thread(inputs: FanControlInputs) {
         }
 
         let since_last = now.duration_since(last_update);
-        if since_last < update_interval {
+        if since_last < update_interval && !temperatures.values().any(|state| state.needs_poll(now))
+        {
             thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -279,8 +289,9 @@ fn fan_control_thread(inputs: FanControlInputs) {
                 }
             }
 
-            // Wired MB sync: hardware handles it natively, skip
-            if !is_wireless && group.speeds.iter().any(|s| s.is_mb_sync()) {
+            if group.speeds.iter().any(FanSpeed::is_off)
+                || (!is_wireless && group.speeds.iter().any(|s| s.is_mb_sync()))
+            {
                 continue;
             }
 
@@ -305,30 +316,26 @@ fn fan_control_thread(inputs: FanControlInputs) {
                 }
             }
 
-            let speeds = match calculate_fan_speeds(
+            let speeds = calculate_fan_speeds(
                 &group.speeds,
                 &curves,
                 &mut sensor_cache,
-                &mut temp_ema,
+                &mut temperatures,
                 all_sensors,
                 FanHysteresis {
                     previous: fan_states.get(&group_idx),
                     temperature: config.hysteresis_temp,
                     pwm: config.hysteresis_pwm,
+                    now: tick_start,
                 },
                 &wired,
-            ) {
-                Ok(speeds) => speeds,
-                Err(err) => {
-                    warn!("Fan speed calculation failed for group {group_idx}: {err}");
-                    continue;
-                }
-            };
+            );
 
             let group_temp = group.speeds.iter().find_map(|s| match s {
                 FanSpeed::Curve(name) => curves
                     .get(name)
-                    .and_then(|c| temp_ema.get(&c.effective_source()).copied()),
+                    .and_then(|c| temperatures.get(&c.effective_source()))
+                    .and_then(|state| state.current),
                 _ => None,
             });
 
@@ -411,6 +418,10 @@ fn fan_control_thread(inputs: FanControlInputs) {
             }
         }
 
+        temperatures.retain(|_, state| state.checked_at == Some(tick_start));
+        sensor_cache
+            .missing_curves
+            .retain(|_, state| state.checked_at == Some(tick_start));
         let tick_elapsed = tick_start.elapsed();
         if tick_elapsed >= update_interval {
             debug!(
@@ -450,10 +461,6 @@ fn apply_wireless_by_id(
         false
     }
 }
-
-/// EMA smoothing factor. Lower = smoother/slower response.
-/// 0.3 means ~70% of the smoothed value comes from history.
-const TEMP_EMA_ALPHA: f32 = 0.3;
 
 /// Per-group state for PWM hysteresis. EMA smooths sensor noise; this
 /// suppresses PWM chatter when temp oscillates around a curve breakpoint.
@@ -509,17 +516,18 @@ struct FanHysteresis<'a> {
     previous: Option<&'a FanState>,
     temperature: f32,
     pwm: u8,
+    now: Instant,
 }
 
 fn calculate_fan_speeds(
     fan_speeds: &[FanSpeed; 4],
     curves: &HashMap<String, FanCurve>,
-    sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
-    temp_ema: &mut HashMap<SensorSource, f32>,
+    sensor_cache: &mut FanSensors,
+    temperatures: &mut HashMap<SensorSource, TemperatureState>,
     all_sensors: &[SensorInfo],
     hysteresis: FanHysteresis<'_>,
     wired: &HashMap<String, Box<dyn FanDevice>>,
-) -> Result<[u8; 4]> {
+) -> [u8; 4] {
     let mut pwm_values = [0u8; 4];
 
     for (i, fan_speed) in fan_speeds.iter().enumerate() {
@@ -529,26 +537,48 @@ fn calculate_fan_speeds(
                 software_sync_pwm(fan_speed, lianli_shared::sensors::read_pwm_header)
             }
             FanSpeed::Curve(curve_name) => {
-                let curve = curves
-                    .get(curve_name)
-                    .ok_or_else(|| anyhow::anyhow!("Curve '{curve_name}' not found"))?;
+                let Some(curve) = curves.get(curve_name) else {
+                    super::cooling::missing_curve(
+                        &mut sensor_cache.missing_curves,
+                        curve_name,
+                        hysteresis.now,
+                    );
+                    pwm_values[i] = 255;
+                    continue;
+                };
 
                 let source = curve.effective_source();
-                let temp =
-                    smoothed_temperature(&source, sensor_cache, temp_ema, all_sensors, wired)?;
+                let state = temperatures.entry(source.clone()).or_default();
+                if state.checked_at != Some(hysteresis.now) {
+                    let previous_fallback = state.fallback;
+                    let reading = read_temperature(&source, sensor_cache, all_sensors, wired);
+                    state.update_reading(reading, hysteresis.now, 0.3);
+                    if state.fallback && !previous_fallback {
+                        warn!(
+                            ?source,
+                            "Temperature unavailable. Affected cooling channels use 100% speed"
+                        );
+                    } else if state.recovered {
+                        info!(?source, "Temperature recovered. Resuming cooling curves");
+                    }
+                }
+                let Some(temp) = state.current else {
+                    pwm_values[i] = 255;
+                    continue;
+                };
                 let speed_percent = interpolate_curve(&curve.curve, temp);
                 let target_pwm = (speed_percent * 2.55) as u8;
 
                 let pwm = match hysteresis.previous {
-                    Some(state) => apply_hysteresis(
+                    Some(previous) if !state.recovered => apply_hysteresis(
                         target_pwm,
                         temp,
                         i,
-                        state,
+                        previous,
                         hysteresis.temperature,
                         hysteresis.pwm,
                     ),
-                    None => target_pwm,
+                    _ => target_pwm,
                 };
 
                 debug!("Fan {i}: Temp {temp:.1}C, Speed {speed_percent:.0}%, PWM {pwm}");
@@ -557,92 +587,76 @@ fn calculate_fan_speeds(
         };
     }
 
-    Ok(pwm_values)
+    pwm_values
 }
 
-fn smoothed_temperature(
+fn read_temperature(
     source: &SensorSource,
-    cache: &mut HashMap<SensorSource, ResolvedSensor>,
-    ema: &mut HashMap<SensorSource, f32>,
+    cache: &mut FanSensors,
     all_sensors: &[SensorInfo],
     wired: &HashMap<String, Box<dyn FanDevice>>,
-) -> Result<f32> {
-    // Wired AIO coolant: poll the device directly, bypass sensor resolver.
-    // Fan curves reference this via SensorSource::WirelessCoolant { device_id }
-    // where device_id is the wired device's ID (e.g. "hid:serial123").
+) -> Option<lianli_shared::sensors::SensorReading> {
     if let SensorSource::WirelessCoolant { device_id } = source {
         if let Some(dev) = wired.get(device_id) {
-            if let Some(temp) = dev.poll_coolant_temp() {
-                if temp > 0.0 && temp <= 100.0 {
-                    let smoothed = match ema.get(source) {
-                        Some(&prev) => TEMP_EMA_ALPHA * temp + (1.0 - TEMP_EMA_ALPHA) * prev,
-                        None => temp,
-                    };
-                    ema.insert(source.clone(), smoothed);
-                    return Ok(smoothed);
-                }
-                debug!("Wired coolant out of range: {temp:.1}°C for {device_id}");
-            }
-            // Poll failed or out of range — use last EMA value (keeps fans at
-            // last commanded speed rather than spiking to 0 or 100%).
-            return ema
-                .get(source)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("Coolant telemetry unavailable for {device_id}"));
+            return dev.poll_coolant_reading();
         }
     }
 
-    let resolved = match cache.get(source) {
+    let resolved = match cache.resolved.get(source) {
         Some(r) => r.clone(),
         None => {
             let sensor_info = all_sensors.iter().find(|s| s.source == *source);
             let divider = sensor_info.map_or(1, |s| s.divider);
-            let r = sensors::resolve_sensor(source, divider).context("sensor not found")?;
-            cache.insert(source.clone(), r.clone());
+            let r = sensors::resolve_sensor(source, divider)?;
+            cache.resolved.insert(source.clone(), r.clone());
             r
         }
     };
 
-    match sensors::read_sensor_value(&resolved) {
-        Ok(temp) if temp > 0.0 && temp <= 100.0 => {
-            let smoothed = match ema.get(source) {
-                Some(&prev) => TEMP_EMA_ALPHA * temp + (1.0 - TEMP_EMA_ALPHA) * prev,
-                None => temp,
-            };
-            ema.insert(source.clone(), smoothed);
-        }
-        Ok(temp) => {
-            debug!("Ignoring out-of-range temperature {temp:.1}°C");
-        }
+    let reading = match &resolved {
+        ResolvedSensor::ShellCommand(command) => cache.commands.reading(command),
+        _ => sensors::read_sensor_reading(&resolved),
+    };
+    match reading {
+        Ok(temp) => Some(temp),
         Err(err) => {
             debug!("Sensor read failed: {err}");
-            cache.remove(source);
+            cache.resolved.remove(source);
+            None
         }
     }
-
-    ema.get(source)
-        .copied()
-        .context("no valid temperature readings yet")
 }
 
 fn resolve_and_read(
     source: &SensorSource,
-    cache: &mut HashMap<SensorSource, ResolvedSensor>,
+    cache: &mut FanSensors,
     all_sensors: &[SensorInfo],
 ) -> Option<f32> {
-    let resolved = cache.get(source).cloned().or_else(|| {
+    let resolved = cache.resolved.get(source).cloned().or_else(|| {
         let divider = all_sensors
             .iter()
             .find(|s| s.source == *source)
             .map_or(1, |s| s.divider);
         let r = sensors::resolve_sensor(source, divider)?;
-        cache.insert(source.clone(), r.clone());
+        cache.resolved.insert(source.clone(), r.clone());
         Some(r)
     })?;
-    match sensors::read_sensor_value(&resolved) {
+    let reading = match &resolved {
+        ResolvedSensor::ShellCommand(command) => {
+            cache.commands.reading(command).and_then(|reading| {
+                anyhow::ensure!(
+                    reading.observed_at.elapsed() < super::cooling::TEMPERATURE_GRACE,
+                    "Sensor command reading expired"
+                );
+                Ok(reading.value)
+            })
+        }
+        _ => sensors::read_sensor_value(&resolved),
+    };
+    match reading {
         Ok(v) => Some(v),
         Err(_) => {
-            cache.remove(source);
+            cache.resolved.remove(source);
             None
         }
     }
@@ -655,6 +669,126 @@ fn software_sync_pwm(speed: &FanSpeed, read: impl FnOnce(&str) -> Option<u8>) ->
 #[cfg(test)]
 mod sync_tests {
     use super::*;
+
+    #[test]
+    fn missing_curve_keeps_constant_slots_and_requests_full_speed_for_affected_slots() {
+        let speeds = [
+            FanSpeed::Constant(64),
+            FanSpeed::Curve("missing".into()),
+            FanSpeed::Constant(0),
+            FanSpeed::Constant(128),
+        ];
+        let result = calculate_fan_speeds(
+            &speeds,
+            &HashMap::new(),
+            &mut FanSensors::default(),
+            &mut HashMap::new(),
+            &[],
+            FanHysteresis {
+                previous: None,
+                temperature: 100.0,
+                pwm: 255,
+                now: Instant::now(),
+            },
+            &HashMap::new(),
+        );
+        assert_eq!(result, [64, 255, 0, 128]);
+    }
+
+    #[test]
+    fn missing_temperatures_expire_and_recover_without_stale_smoothing() {
+        let now = Instant::now();
+        let mut state = TemperatureState::default();
+        state.update(None, now);
+        assert!(state.fallback);
+        assert_eq!(state.current, None);
+        state.update(Some(40.0), now);
+        assert!(state.recovered);
+        assert_eq!(state.current, Some(40.0));
+        for reading in [
+            None,
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            Some(0.0),
+            Some(101.0),
+        ] {
+            state.update(reading, now + Duration::from_millis(4999));
+            assert_eq!(state.current, Some(40.0));
+            assert!(!state.fallback);
+        }
+        state.update(None, now + TEMPERATURE_GRACE);
+        assert!(state.fallback);
+        assert_eq!(state.current, None);
+        assert!(!state.needs_poll(now + Duration::from_millis(5999)));
+        assert!(state.needs_poll(now + Duration::from_secs(6)));
+        state.update(Some(80.0), now + Duration::from_secs(6));
+        assert!(state.recovered);
+        assert_eq!(state.current, Some(80.0));
+        assert!(!state.needs_poll(now + Duration::from_millis(10_999)));
+        assert!(state.needs_poll(now + Duration::from_secs(11)));
+        state.update(Some(80.0), now + Duration::from_secs(7));
+        assert!(!state.recovered);
+    }
+
+    #[test]
+    fn unavailable_curve_only_drives_affected_slots_to_full_speed() {
+        let source = SensorSource::Hwmon {
+            name: "lianli-nonexistent-test-sensor".into(),
+            label: "missing".into(),
+            device_path: String::new(),
+        };
+        let curve = FanCurve {
+            name: "test".into(),
+            temp_source: Some(source.clone()),
+            temp_command: String::new(),
+            curve: vec![(20.0, 20.0), (100.0, 100.0)],
+        };
+        let curves = HashMap::from([("test".into(), curve)]);
+        let mut temperatures = HashMap::new();
+        let speeds = [
+            FanSpeed::Constant(64),
+            FanSpeed::Curve("test".into()),
+            FanSpeed::Constant(0),
+            FanSpeed::Curve("test".into()),
+        ];
+        let now = Instant::now();
+        let result = calculate_fan_speeds(
+            &speeds,
+            &curves,
+            &mut FanSensors::default(),
+            &mut temperatures,
+            &[],
+            FanHysteresis {
+                previous: None,
+                temperature: 100.0,
+                pwm: 255,
+                now,
+            },
+            &HashMap::new(),
+        );
+        assert_eq!(result, [64, 255, 0, 255]);
+        let recovered_at = now + Duration::from_secs(6);
+        temperatures
+            .get_mut(&source)
+            .unwrap()
+            .update(Some(40.0), recovered_at);
+        let previous = FanState::new(result, Some(40.0));
+        let recovered = calculate_fan_speeds(
+            &speeds,
+            &curves,
+            &mut FanSensors::default(),
+            &mut temperatures,
+            &[],
+            FanHysteresis {
+                previous: Some(&previous),
+                temperature: 100.0,
+                pwm: 255,
+                now: recovered_at,
+            },
+            &HashMap::new(),
+        );
+        assert_eq!(recovered, [64, 102, 0, 102]);
+    }
 
     #[test]
     fn missing_software_pwm_source_runs_full_speed() {

@@ -123,6 +123,7 @@ impl ScreenRotation {
 /// Handshake response: RPM + temperature.
 #[derive(Debug, Clone)]
 pub struct AioHandshake {
+    pub observed_at: std::time::Instant,
     pub fan_rpm: u16,
     pub pump_rpm: u16,
     pub temp_valid: bool,

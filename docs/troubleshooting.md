@@ -27,3 +27,11 @@ For an OpenRGB SDK port conflict, free the configured port and choose **Retry
 OpenRGB** in Settings. Retry uses saved settings and does not save other pending
 edits. The daemon bounds simultaneous clients and closes them when the server
 restarts or stops.
+
+## Missing temperature readings
+
+Software-controlled fans and pumps request 100% speed after five seconds without
+a valid temperature reading, or immediately if no valid reading has arrived.
+They resume their curves when readings recover. Hardware-managed and motherboard
+sync channels keep their existing control. Check the selected sensor and daemon
+logs when the fallback remains active.

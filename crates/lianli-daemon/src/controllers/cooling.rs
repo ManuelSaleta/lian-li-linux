@@ -1,0 +1,154 @@
+use lianli_shared::sensors::SensorReading;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+pub(super) const TEMPERATURE_GRACE: Duration = Duration::from_secs(5);
+
+pub(super) struct TemperatureState {
+    last_valid: Option<(Instant, f32)>,
+    pub checked_at: Option<Instant>,
+    pub current: Option<f32>,
+    pub fallback: bool,
+    pub recovered: bool,
+}
+
+static TRACKED: AtomicUsize = AtomicUsize::new(0);
+static FALLBACK: AtomicUsize = AtomicUsize::new(0);
+
+impl Default for TemperatureState {
+    fn default() -> Self {
+        TRACKED.fetch_add(1, Ordering::Relaxed);
+        Self {
+            last_valid: None,
+            checked_at: None,
+            current: None,
+            fallback: false,
+            recovered: false,
+        }
+    }
+}
+
+impl Drop for TemperatureState {
+    fn drop(&mut self) {
+        if self.fallback {
+            FALLBACK.fetch_sub(1, Ordering::Relaxed);
+        }
+        TRACKED.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub(super) fn missing_curve(
+    states: &mut HashMap<String, TemperatureState>,
+    name: &str,
+    now: Instant,
+) -> f32 {
+    let state = states.entry(name.into()).or_default();
+    if !state.fallback {
+        tracing::warn!(
+            curve = name,
+            "Cooling curve is missing. Affected channels request 100% speed"
+        );
+    }
+    state.update_reading(None, now, 1.0);
+    100.0
+}
+
+impl TemperatureState {
+    pub fn needs_poll(&self, now: Instant) -> bool {
+        if self.fallback {
+            self.checked_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))
+        } else {
+            self.last_valid
+                .is_none_or(|(at, _)| now.saturating_duration_since(at) >= TEMPERATURE_GRACE)
+        }
+    }
+
+    #[cfg(test)]
+    pub fn update(&mut self, reading: Option<f32>, now: Instant) {
+        self.update_smoothed(reading, now, 0.3);
+    }
+
+    #[cfg(test)]
+    pub fn update_smoothed(&mut self, reading: Option<f32>, now: Instant, alpha: f32) {
+        self.update_reading(
+            reading.map(|value| SensorReading {
+                value,
+                observed_at: now,
+            }),
+            now,
+            alpha,
+        );
+    }
+
+    pub fn update_reading(&mut self, reading: Option<SensorReading>, now: Instant, alpha: f32) {
+        let reading = reading.filter(|reading| {
+            reading.value.is_finite()
+                && reading.value > 0.0
+                && reading.value <= 100.0
+                && now.saturating_duration_since(reading.observed_at) < TEMPERATURE_GRACE
+        });
+        self.recovered = self.fallback && reading.is_some();
+        if let Some(reading) = reading.filter(|reading| {
+            self.last_valid
+                .is_none_or(|(at, _)| reading.observed_at > at)
+        }) {
+            let temp = reading.value;
+            let smoothed = self
+                .last_valid
+                .filter(|(at, _)| now.saturating_duration_since(*at) < TEMPERATURE_GRACE)
+                .map_or(temp, |(_, previous)| {
+                    alpha * temp + (1.0 - alpha) * previous
+                });
+            self.last_valid = Some((reading.observed_at, smoothed));
+        }
+        self.current = self
+            .last_valid
+            .filter(|(at, _)| now.saturating_duration_since(*at) < TEMPERATURE_GRACE)
+            .map(|(_, value)| value);
+        let fallback = self.current.is_none();
+        if fallback != self.fallback {
+            if fallback {
+                FALLBACK.fetch_add(1, Ordering::Relaxed);
+            } else {
+                FALLBACK.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        self.fallback = fallback;
+        self.checked_at = Some(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_samples_cannot_extend_grace_or_repeat_smoothing() {
+        let now = Instant::now();
+        let sample = SensorReading {
+            value: 40.0,
+            observed_at: now,
+        };
+        let mut state = TemperatureState::default();
+        for elapsed in [0, 1000, 2000, 4999] {
+            state.update_reading(Some(sample), now + Duration::from_millis(elapsed), 0.3);
+            assert_eq!(state.current, Some(40.0));
+        }
+        state.update_reading(Some(sample), now + TEMPERATURE_GRACE, 0.3);
+        assert!(state.fallback);
+        assert_eq!(state.current, None);
+        let fresh = SensorReading {
+            value: 80.0,
+            observed_at: now + Duration::from_secs(6),
+        };
+        state.update_reading(Some(fresh), fresh.observed_at, 0.3);
+        assert!(state.recovered);
+        assert_eq!(state.current, Some(80.0));
+        state.update_reading(Some(sample), fresh.observed_at, 0.3);
+        assert_eq!(state.current, Some(80.0));
+        state.update_reading(Some(fresh), fresh.observed_at + TEMPERATURE_GRACE, 0.3);
+        assert!(state.fallback);
+    }
+}

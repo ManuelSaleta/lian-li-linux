@@ -1,9 +1,54 @@
 use super::{DiskDirection, NetDirection, NvidiaMetric, RateState, ResolvedSensor, SensorSource};
 use crate::systeminfo::SysSensor;
 use std::collections::HashMap;
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug)]
+pub struct SensorReading {
+    pub value: f32,
+    pub observed_at: Instant,
+}
+
+pub fn read_sensor_reading(resolved: &ResolvedSensor) -> anyhow::Result<SensorReading> {
+    if let ResolvedSensor::NvidiaGpu { index, metric } = resolved {
+        return nvidia_cache_get(*index, *metric);
+    }
+    if let ResolvedSensor::RuntimeFile(path) = resolved {
+        return read_runtime_reading(path);
+    }
+    let observed_at = Instant::now();
+    Ok(SensorReading {
+        value: read_sensor_value(resolved)?,
+        observed_at,
+    })
+}
+
+fn read_runtime_reading(path: &std::path::Path) -> anyhow::Result<SensorReading> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= 64,
+        "Invalid coolant runtime file"
+    );
+    let modified = metadata.modified()?;
+    let age = std::time::SystemTime::now().duration_since(modified)?;
+    let observed_at = Instant::now()
+        .checked_sub(age)
+        .ok_or_else(|| anyhow::anyhow!("Coolant reading predates the monotonic clock"))?;
+    let mut content = String::new();
+    file.take(64).read_to_string(&mut content)?;
+    Ok(SensorReading {
+        value: content.trim().parse()?,
+        observed_at,
+    })
+}
 
 pub fn read_sensor_value(resolved: &ResolvedSensor) -> anyhow::Result<f32> {
     match resolved {
@@ -37,37 +82,25 @@ pub fn read_sensor_value(resolved: &ResolvedSensor) -> anyhow::Result<f32> {
             }
             _ => anyhow::bail!("unexpected virtual sensor source"),
         },
-        ResolvedSensor::NvidiaGpu { index, metric } => Ok(nvidia_cache_get(*index, *metric)),
+        ResolvedSensor::NvidiaGpu { index, metric } => {
+            let reading = nvidia_cache_get(*index, *metric)?;
+            anyhow::ensure!(
+                reading.observed_at.elapsed() < Duration::from_secs(5),
+                "NVIDIA sensor reading expired"
+            );
+            Ok(reading.value)
+        }
         ResolvedSensor::RuntimeFile(path) => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-            let temp: f32 = content
-                .trim()
-                .parse()
-                .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
-            Ok(temp)
+            let reading = read_runtime_reading(path)?;
+            anyhow::ensure!(
+                reading.observed_at.elapsed() < Duration::from_secs(5),
+                "Coolant sensor reading expired"
+            );
+            Ok(reading.value)
         }
         ResolvedSensor::ShellCommand(cmd) => {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .output()
-                .map_err(|e| anyhow::anyhow!("executing command: {e}"))?;
-            if !output.status.success() {
-                anyhow::bail!("command failed with status {}", output.status);
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let temp_str = stdout
-                .split_whitespace()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("empty output"))?;
-            let temp: f32 = temp_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("parsing '{temp_str}': {e}"))?;
-            if !temp.is_finite() {
-                anyhow::bail!("value '{temp}' is not finite");
-            }
-            Ok(temp)
+            super::command::reading(cmd, &std::sync::atomic::AtomicBool::new(false))
+                .map(|reading| reading.value)
         }
         ResolvedSensor::Constant(value) => Ok(*value),
         ResolvedSensor::NetworkRate {
@@ -91,17 +124,21 @@ pub fn read_sensor_value(resolved: &ResolvedSensor) -> anyhow::Result<f32> {
     }
 }
 
-type NvidiaCache = Arc<Mutex<HashMap<(u32, NvidiaMetric), f32>>>;
+type NvidiaCache = Arc<Mutex<HashMap<(u32, NvidiaMetric), SensorReading>>>;
 
 static NVIDIA_CACHE: OnceLock<NvidiaCache> = OnceLock::new();
 
-fn nvidia_cache_get(index: u32, metric: NvidiaMetric) -> f32 {
+fn nvidia_cache_get(index: u32, metric: NvidiaMetric) -> anyhow::Result<SensorReading> {
     let cache = NVIDIA_CACHE.get_or_init(|| {
         let cache: NvidiaCache = Arc::new(Mutex::new(HashMap::new()));
         let cache_clone = Arc::clone(&cache);
         std::thread::spawn(move || loop {
+            let observed_at = Instant::now();
             if let Ok(values) = query_nvidia_smi_all() {
-                *cache_clone.lock().unwrap() = values;
+                *cache_clone.lock().unwrap() = values
+                    .into_iter()
+                    .map(|(key, value)| (key, SensorReading { value, observed_at }))
+                    .collect();
             }
             std::thread::sleep(Duration::from_secs(1));
         });
@@ -112,21 +149,17 @@ fn nvidia_cache_get(index: u32, metric: NvidiaMetric) -> f32 {
         .unwrap()
         .get(&(index, metric))
         .copied()
-        .unwrap_or(0.0)
+        .ok_or_else(|| anyhow::anyhow!("NVIDIA sensor reading unavailable"))
 }
 
 fn query_nvidia_smi_all() -> anyhow::Result<HashMap<(u32, NvidiaMetric), f32>> {
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=index,temperature.gpu,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("nvidia-smi: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!("nvidia-smi failed");
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=index,temperature.gpu,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]);
+    let output = super::command::output(command)?;
+    let stdout = String::from_utf8_lossy(&output);
     let mut map = HashMap::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();

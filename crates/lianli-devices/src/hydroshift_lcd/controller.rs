@@ -81,6 +81,43 @@ pub fn pace_frame(next_deadline: &mut Instant, interval: Duration) {
     }
 }
 
+fn read_access_units(
+    reader: &mut dyn Read,
+    stop: &AtomicBool,
+    mut send: impl FnMut(&[u8], bool) -> Result<()>,
+) -> Result<()> {
+    const MAX_AU_BYTES: usize = 4 * 1024 * 1024;
+    let mut read_buf = vec![0u8; 64 * 1024];
+    let mut accum = Vec::with_capacity(256 * 1024);
+    while !stop.load(Ordering::Relaxed) {
+        let n = reader
+            .read(&mut read_buf)
+            .context("AIO LCD: read h264 stream")?;
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if n == 0 {
+            if !accum.is_empty() {
+                send(&accum, true)?;
+            }
+            return Ok(());
+        }
+        anyhow::ensure!(
+            n <= MAX_AU_BYTES - accum.len(),
+            "AIO LCD H.264 access unit exceeds 4 MiB"
+        );
+        accum.extend_from_slice(&read_buf[..n]);
+        while let Some(split) = find_au_split(&accum) {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            send(&accum[..split], false)?;
+            accum.drain(..split);
+        }
+    }
+    Ok(())
+}
+
 fn write_a_command_raw(dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
     let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
     if data.len() > max_payload {
@@ -117,6 +154,7 @@ fn try_parse_handshake(buf: &[u8]) -> Option<AioHandshake> {
         0.0
     };
     Some(AioHandshake {
+        observed_at: Instant::now(),
         fan_rpm: u16::from_be_bytes([data[0], data[1]]),
         pump_rpm: u16::from_be_bytes([data[2], data[3]]),
         temp_valid,
@@ -312,6 +350,7 @@ impl HydroShiftLcdController {
         };
 
         let hs = AioHandshake {
+            observed_at: Instant::now(),
             fan_rpm: u16::from_be_bytes([data[0], data[1]]),
             pump_rpm: u16::from_be_bytes([data[2], data[3]]),
             temp_valid,
@@ -380,32 +419,14 @@ impl HydroShiftLcdController {
             .clamp(1.0, ScreenInfo::AIO_LCD_480.max_fps as f32);
         self.video_fps.store(fps as u8, Ordering::Relaxed);
         let frame_interval = Duration::from_secs_f32(1.0 / fps);
-        let mut read_buf = vec![0u8; 64 * 1024];
-        let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         let mut next_deadline = Instant::now() + frame_interval;
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
+        read_access_units(reader, stop, |au, final_unit| {
+            self.send_h264_frame(au)?;
+            if !final_unit {
+                pace_frame(&mut next_deadline, frame_interval);
             }
-            let n = reader
-                .read(&mut read_buf)
-                .context("AIO LCD: read h264 stream")?;
-            if n == 0 {
-                break;
-            }
-            accum.extend_from_slice(&read_buf[..n]);
-            while let Some(split) = find_au_split(&accum) {
-                let au: Vec<u8> = accum.drain(..split).collect();
-                if !au.is_empty() {
-                    self.send_h264_frame(&au)?;
-                    pace_frame(&mut next_deadline, frame_interval);
-                }
-            }
-        }
-        if !accum.is_empty() {
-            self.send_h264_frame(&accum)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn variant(&self) -> AioLcdVariant {
@@ -853,6 +874,12 @@ impl FanDevice for HydroShiftLcdController {
     }
 
     fn poll_coolant_temp(&self) -> Option<f32> {
+        self.poll_coolant_reading()
+            .filter(|reading| reading.observed_at.elapsed() < Duration::from_secs(5))
+            .map(|reading| reading.value)
+    }
+
+    fn poll_coolant_reading(&self) -> Option<lianli_shared::sensors::SensorReading> {
         self.last_handshake
             .lock()
             .as_ref()
@@ -861,7 +888,10 @@ impl FanDevice for HydroShiftLcdController {
                     // Reject startup placeholder (1.0°C, 0 RPM fan + pump)
                     && !(hs.coolant_temp == 1.0 && hs.fan_rpm == 0 && hs.pump_rpm == 0)
             })
-            .map(|hs| hs.coolant_temp)
+            .map(|hs| lianli_shared::sensors::SensorReading {
+                value: hs.coolant_temp,
+                observed_at: hs.observed_at,
+            })
     }
 
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
@@ -1043,7 +1073,45 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
 
 #[cfg(test)]
 mod tests {
-    use super::find_au_split;
+    use super::{find_au_split, read_access_units};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn reader_bounds_unframed_data_and_preserves_final_access_unit() {
+        let stop = AtomicBool::new(false);
+        let mut unframed = std::io::repeat(0xff).take(4 * 1024 * 1024 + 1);
+        let error = read_access_units(&mut unframed, &stop, |_, _| {
+            panic!("Unbounded unit was sent")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 4 MiB"));
+        let first = nal(5, &[1, 2, 3]);
+        let last = nal(1, &[4, 5]);
+        let input = [first.clone(), last.clone()].concat();
+        let mut sent = Vec::new();
+        read_access_units(&mut input.as_slice(), &stop, |unit, final_unit| {
+            sent.push((unit.to_vec(), final_unit));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, vec![(first, false), (last, true)]);
+    }
+
+    #[test]
+    fn cancellation_discards_buffered_access_units() {
+        let stop = AtomicBool::new(false);
+        let input = [nal(5, &[1]), nal(1, &[2]), nal(1, &[3])].concat();
+        let mut sent = Vec::new();
+        read_access_units(&mut input.as_slice(), &stop, |unit, _| {
+            sent.push(unit.to_vec());
+            stop.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, vec![nal(5, &[1])]);
+    }
+
+    use std::io::Read;
 
     const SC4: &[u8] = &[0, 0, 0, 1];
 

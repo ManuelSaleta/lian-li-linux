@@ -13,6 +13,18 @@ use std::sync::Arc;
 pub trait FanDevice: Send + Sync {
     fn set_fan_speed(&self, slot: u8, duty: u8) -> Result<()>;
     fn set_fan_speeds(&self, duties: &[u8]) -> Result<()>;
+    fn set_selected_fan_speeds(&self, duties: &[Option<u8>]) -> Result<()> {
+        for (slot, duty) in duties
+            .iter()
+            .take(self.fan_slot_count() as usize)
+            .enumerate()
+        {
+            if let Some(duty) = duty {
+                self.set_fan_speed(slot as u8, *duty)?;
+            }
+        }
+        Ok(())
+    }
     fn read_fan_rpm(&self) -> Result<Vec<u16>>;
     fn fan_slot_count(&self) -> u8;
 
@@ -90,6 +102,12 @@ pub trait FanDevice: Send + Sync {
         None
     }
 
+    fn poll_coolant_reading(&self) -> Option<lianli_shared::sensors::SensorReading> {
+        let observed_at = std::time::Instant::now();
+        self.poll_coolant_temp()
+            .map(|value| lianli_shared::sensors::SensorReading { value, observed_at })
+    }
+
     /// Whether this device exposes a per-port daisy-chain "fan quantity" override.
     fn supports_fan_quantity(&self) -> bool {
         false
@@ -127,6 +145,9 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn set_fan_speeds(&self, duties: &[u8]) -> Result<()> {
         (**self).set_fan_speeds(duties)
+    }
+    fn set_selected_fan_speeds(&self, duties: &[Option<u8>]) -> Result<()> {
+        (**self).set_selected_fan_speeds(duties)
     }
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
         (**self).read_fan_rpm()
@@ -166,6 +187,9 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn poll_coolant_temp(&self) -> Option<f32> {
         (**self).poll_coolant_temp()
+    }
+    fn poll_coolant_reading(&self) -> Option<lianli_shared::sensors::SensorReading> {
+        (**self).poll_coolant_reading()
     }
     fn supports_fan_quantity(&self) -> bool {
         (**self).supports_fan_quantity()

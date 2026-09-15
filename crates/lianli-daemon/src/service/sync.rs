@@ -307,9 +307,17 @@ impl ServiceManager {
             }
             fan_rpms.insert(device_id.clone(), rpms);
 
-            if let Some(temp) = dev.coolant_temp_c {
-                coolant_temps.insert(device_id.clone(), temp as f32);
-                lianli_shared::sensors::write_coolant_temp(&device_id, temp as f32);
+            if let Some(reading) = self
+                .wireless
+                .coolant_reading(&dev.mac)
+                .filter(|reading| reading.observed_at.elapsed() < std::time::Duration::from_secs(5))
+            {
+                coolant_temps.insert(device_id.clone(), reading.value);
+                if let Err(error) =
+                    lianli_shared::sensors::write_coolant_reading(&device_id, reading)
+                {
+                    tracing::debug!(%device_id, %error, "Could not publish coolant reading");
+                }
             }
         }
 
@@ -395,9 +403,15 @@ impl ServiceManager {
             // Coolant telemetry for wired AIOs (HydroShift LCD family),
             // mirroring the wireless path: publish via IPC and register as a
             // fan-curve sensor source.
-            if let Some(temp) = dev.poll_coolant_temp() {
-                coolant_temps.insert(base_id.clone(), temp);
-                lianli_shared::sensors::write_coolant_temp(base_id, temp);
+            if let Some(reading) = dev
+                .poll_coolant_reading()
+                .filter(|reading| reading.observed_at.elapsed() < std::time::Duration::from_secs(5))
+            {
+                coolant_temps.insert(base_id.clone(), reading.value);
+                if let Err(error) = lianli_shared::sensors::write_coolant_reading(base_id, reading)
+                {
+                    tracing::debug!(%base_id, %error, "Could not publish coolant reading");
+                }
             }
             if let Ok(all_rpms) = dev.read_fan_rpm() {
                 let ports = dev.fan_port_info();

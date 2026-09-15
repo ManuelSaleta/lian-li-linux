@@ -1,5 +1,6 @@
 use super::enumerate::{pci_id_from_path, unit_for};
 use super::{RateState, ResolvedSensor, SensorSource};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -126,6 +127,85 @@ pub fn coolant_runtime_path(device_id: &str) -> PathBuf {
 
 /// Write a coolant temperature value to the runtime file.
 pub fn write_coolant_temp(device_id: &str, temp_c: f32) {
-    let path = coolant_runtime_path(device_id);
-    let _ = std::fs::write(&path, format!("{temp_c}"));
+    let _ = write_coolant_reading(
+        device_id,
+        super::SensorReading {
+            value: temp_c,
+            observed_at: std::time::Instant::now(),
+        },
+    );
+}
+
+pub fn write_coolant_reading(device_id: &str, reading: super::SensorReading) -> anyhow::Result<()> {
+    write_runtime_reading(&coolant_runtime_path(device_id), reading)
+}
+
+fn write_runtime_reading(path: &Path, reading: super::SensorReading) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Missing coolant runtime directory"))?;
+    let modified = std::time::SystemTime::now()
+        .checked_sub(reading.observed_at.elapsed())
+        .ok_or_else(|| anyhow::anyhow!("Invalid coolant observation time"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    write!(file, "{}", reading.value)?;
+    file.as_file().set_modified(modified)?;
+    file.persist(path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod coolant_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn coolant_reader_rejects_nonregular_or_oversized_runtime_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("coolant");
+        let resolved = ResolvedSensor::RuntimeFile(path.clone());
+        std::fs::write(&path, "1".repeat(65)).unwrap();
+        assert!(super::super::read_sensor_reading(&resolved).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(directory.path(), &path).unwrap();
+        assert!(super::super::read_sensor_reading(&resolved).is_err());
+        assert!(
+            super::super::read_sensor_reading(&ResolvedSensor::RuntimeFile(
+                directory.path().to_owned()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn republishing_coolant_preserves_age_and_plain_numeric_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("coolant");
+        let observed_at = Instant::now() - Duration::from_secs(10);
+        let reading = super::super::SensorReading {
+            value: 42.0,
+            observed_at,
+        };
+        for _ in 0..2 {
+            write_runtime_reading(&path, reading).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "42");
+            let resolved = ResolvedSensor::RuntimeFile(path.clone());
+            let sample = super::super::read_sensor_reading(&resolved).unwrap();
+            assert_eq!(sample.value, 42.0);
+            assert!(sample.observed_at.elapsed() >= Duration::from_secs(9));
+            assert!(super::super::read_sensor_value(&resolved).is_err());
+        }
+        write_runtime_reading(
+            &path,
+            super::super::SensorReading {
+                value: 50.0,
+                observed_at: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::read_sensor_value(&ResolvedSensor::RuntimeFile(path)).unwrap(),
+            50.0
+        );
+    }
 }
