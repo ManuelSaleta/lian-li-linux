@@ -64,7 +64,7 @@ pub struct PollResult {
     pub telemetry: TelemetrySnapshot,
 }
 
-fn send_raw(request: IpcRequest) -> Result<IpcResponse, String> {
+fn send_raw(request: IpcRequest, expected: Option<&str>) -> Result<IpcResponse, String> {
     let mut last_err: Option<String> = None;
 
     for path in candidate_paths() {
@@ -75,7 +75,7 @@ fn send_raw(request: IpcRequest) -> Result<IpcResponse, String> {
                 continue;
             }
         };
-        let request = prepare_request(request, || {
+        let request = prepare_request_for(request, expected, || {
             exchange(&stream, r#"{"method":"GetDaemonInfo"}"#, false)
         })?;
         let json = serde_json::to_string(&request).map_err(|error| error.to_string())?;
@@ -95,18 +95,33 @@ fn send_raw(request: IpcRequest) -> Result<IpcResponse, String> {
     Err(last_err.unwrap_or_else(|| "no daemon socket candidates".to_string()))
 }
 
+#[cfg(test)]
 fn prepare_request(
     request: IpcRequest,
+    read_info: impl FnOnce() -> Result<IpcResponse, String>,
+) -> Result<IpcRequest, String> {
+    prepare_request_for(request, None, read_info)
+}
+
+fn prepare_request_for(
+    request: IpcRequest,
+    expected: Option<&str>,
     read_info: impl FnOnce() -> Result<IpcResponse, String>,
 ) -> Result<IpcRequest, String> {
     if matches!(request, IpcRequest::Guarded { .. }) {
         return Err("The GUI backend supplies compatibility checks".into());
     }
-    if request.is_read_only() {
+    if request.is_read_only() && expected.is_none() {
         return Ok(request);
     }
     let info: DaemonInfo = serde_json::from_value(response_data(read_info()?)?)
         .map_err(|error| format!("Cannot verify daemon compatibility: {error}"))?;
+    if expected.is_some_and(|expected| expected != info.instance_id) {
+        return Err("The daemon changed; review copied settings before saving".into());
+    }
+    if request.is_read_only() {
+        return Ok(request);
+    }
     Ok(IpcRequest::Guarded {
         guard: info.write_guard(env!("CARGO_PKG_VERSION"))?,
         request: Box::new(request),
@@ -158,10 +173,24 @@ fn exchange(stream: &UnixStream, json: &str, finish: bool) -> Result<IpcResponse
 }
 
 pub fn request(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
-    let req = serde_json::from_value(serde_json::json!({ "method": method, "params": params }))
-        .map_err(|error| format!("Unsupported request: {error}"))?;
+    request_expected(method, params, None)
+}
+
+pub fn request_expected(
+    method: &str,
+    params: serde_json::Value,
+    expected: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let req: IpcRequest =
+        serde_json::from_value(serde_json::json!({ "method": method, "params": params }))
+            .map_err(|error| format!("Unsupported request: {error}"))?;
+    if !req.is_read_only() && crate::service_operations::active() {
+        return Err(
+            "Wait for the service operation to finish before changing daemon settings.".into(),
+        );
+    }
     debug!("ipc -> {method}");
-    match send_raw(req)? {
+    match send_raw(req, expected)? {
         IpcResponse::Ok { data } => Ok(data),
         IpcResponse::Error { message } => Err(message),
     }
@@ -303,11 +332,11 @@ mod tests {
             protocol_version: IPC_PROTOCOL_VERSION,
             instance_id: instance.into(),
             pid: 123,
-            mode: DaemonMode::System,
-            config_path: "/var/lib/lianli/config.json".into(),
             ownership_lock: None,
             service_invocation: None,
             service_operation_lock: None,
+            mode: DaemonMode::System,
+            config_path: "/var/lib/lianli/config.json".into(),
             capabilities: vec!["daemon_info".into()],
         }
     }
@@ -328,6 +357,30 @@ mod tests {
             request.authorize(&current).unwrap(),
             IpcRequest::SetLcdTemplates { .. }
         ));
+    }
+
+    #[test]
+    fn copied_selection_requests_reject_a_different_connected_instance() {
+        let mut current = info("current");
+        current.version = env!("CARGO_PKG_VERSION").into();
+        current
+            .capabilities
+            .push(lianli_shared::daemon::GUARDED_WRITES.into());
+        for request in [
+            IpcRequest::GetLcdTemplates,
+            IpcRequest::SetLcdTemplates { templates: vec![] },
+        ] {
+            assert!(
+                prepare_request_for(request.clone(), Some("old"), || Ok(IpcResponse::ok(
+                    &current
+                )))
+                .is_err()
+            );
+            assert!(
+                prepare_request_for(request, Some("current"), || Ok(IpcResponse::ok(&current)))
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

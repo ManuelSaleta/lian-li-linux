@@ -24,11 +24,11 @@ pub struct ServiceWritePermit {
     _slot: PendingWrite,
 }
 
-struct PendingWrite(Arc<AtomicUsize>);
+struct PendingWrite(Arc<AtomicUsize>, usize);
 
 impl Drop for PendingWrite {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Release);
+        self.0.fetch_sub(self.1, Ordering::Release);
     }
 }
 
@@ -75,16 +75,24 @@ impl ServiceWriteGate {
         if request.is_read_only() || matches!(request, IpcRequest::StopService { .. }) {
             return Ok(None);
         }
+        let slots = if matches!(
+            request,
+            IpcRequest::StartCatalogRemoval { .. } | IpcRequest::StartManagedMediaRemoval { .. }
+        ) {
+            MAX_PENDING_WRITES
+        } else {
+            1
+        };
         self.pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_PENDING_WRITES).then_some(count + 1)
+                (count + slots <= MAX_PENDING_WRITES).then_some(count + slots)
             })
             .map_err(|_| {
                 anyhow::anyhow!(
                     "Too many pending settings changes. Wait for them to finish, then retry"
                 )
             })?;
-        let slot = PendingWrite(self.pending.clone());
+        let slot = PendingWrite(self.pending.clone(), slots);
         let identity = self.identity()?;
         let path = self
             .path
@@ -111,6 +119,45 @@ mod tests {
 
     fn write() -> IpcRequest {
         IpcRequest::SetLcdTemplates { templates: vec![] }
+    }
+
+    #[test]
+    fn removal_excludes_pending_saves_and_keeps_read_only_requests_available() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control");
+        std::fs::write(&path, "").unwrap();
+        let gate = gate(path);
+        let save = gate.guard(&write()).unwrap();
+        let removal = IpcRequest::StartCatalogRemoval {
+            operation_id: "reviewed".into(),
+        };
+        assert!(gate.guard(&removal).is_err());
+        drop(save);
+        let removing = gate.guard(&removal).unwrap();
+        assert!(gate.guard(&write()).is_err());
+        assert!(gate.guard(&removal).is_err());
+        assert!(gate
+            .guard(&IpcRequest::GetCatalogReview {
+                operation_id: "reviewed".into()
+            })
+            .unwrap()
+            .is_none());
+        drop(removing);
+        let managed = IpcRequest::StartManagedMediaRemoval {
+            operation_id: "reviewed".into(),
+        };
+        let removing = gate.guard(&managed).unwrap();
+        assert!(gate.guard(&write()).is_err());
+        assert!(gate.guard(&managed).is_err());
+        assert!(gate.guard(&removal).is_err());
+        assert!(gate
+            .guard(&IpcRequest::GetManagedMediaReview {
+                operation_id: "reviewed".into()
+            })
+            .unwrap()
+            .is_none());
+        drop(removing);
+        assert!(gate.guard(&write()).is_ok());
     }
 
     #[test]

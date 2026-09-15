@@ -1,3 +1,4 @@
+mod catalog_references;
 mod controllers;
 mod desktop_display;
 mod ipc;
@@ -8,6 +9,7 @@ mod persistence;
 mod pidlock;
 mod pixel_cleaner;
 mod service;
+mod state_backups;
 mod template_store;
 mod thermal_alert;
 

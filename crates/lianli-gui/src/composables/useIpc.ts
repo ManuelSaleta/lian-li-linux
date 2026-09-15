@@ -11,10 +11,11 @@ import type { PollResult } from "@/types";
  */
 export function useIpc() {
   return {
-    async request<T = unknown>(method: string, params?: object | null): Promise<T> {
+    async request<T = unknown>(method: string, params?: object | null, expectedInstance?: string): Promise<T> {
       return invoke<T>("ipc_request", {
         method,
         params: params ?? null,
+        expectedInstance: expectedInstance ?? null,
       });
     },
     async poll(): Promise<PollResult> {
@@ -33,4 +34,3 @@ export function useIpc() {
     },
   };
 }
-

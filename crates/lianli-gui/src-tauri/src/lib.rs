@@ -1,5 +1,7 @@
 //! Tauri command handlers + multi-window setup for the Lian Li Linux GUI.
 
+mod managed_import;
+
 mod ipc;
 mod service_operations;
 
@@ -58,12 +60,18 @@ fn apply_platform_decorations(window: &WebviewWindow) {
 /// Returns the daemon's `data` payload on success or the daemon's error
 /// message on failure (so the frontend can surface it).
 #[tauri::command]
-async fn ipc_request(method: String, params: Value) -> Result<Value, String> {
+async fn ipc_request(
+    method: String,
+    params: Value,
+    expected_instance: Option<String>,
+) -> Result<Value, String> {
     // Delegate to the blocking socket client on a dedicated thread so the
     // async Tauri runtime is never blocked on socket I/O.
-    let result = tauri::async_runtime::spawn_blocking(move || ipc::request(&method, params))
-        .await
-        .map_err(|e| format!("ipc worker join error: {e}"))??;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ipc::request_expected(&method, params, expected_instance.as_deref())
+    })
+    .await
+    .map_err(|e| format!("ipc worker join error: {e}"))??;
     Ok(result)
 }
 
@@ -183,6 +191,41 @@ async fn service_operation_status(
 }
 
 #[tauri::command]
+async fn managed_import_start(
+    instance: String,
+    lcds: Vec<lianli_shared::config::LcdConfig>,
+    templates: Vec<lianli_shared::template::LcdTemplate>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        managed_import::start(&instance, lcds, templates).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import submission worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn managed_import_status() -> Result<Option<lianli_control::media_import_job::Status>, String>
+{
+    tauri::async_runtime::spawn_blocking(|| {
+        managed_import::status().map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import status worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn managed_import_result(
+    instance: String,
+    id: String,
+) -> Result<lianli_control::media_import::PublishedSelection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        managed_import::result(&instance, &id).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import result worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn service_action(
     app: tauri::AppHandle,
     request: lianli_shared::services::ServiceActionRequest,
@@ -242,6 +285,9 @@ pub fn run() {
             service_report,
             service_operation_status,
             service_action,
+            managed_import_start,
+            managed_import_status,
+            managed_import_result,
             service_change,
         ])
         .setup(|app| {

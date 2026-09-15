@@ -910,7 +910,11 @@ impl ServiceManager {
 
     pub(super) fn load_config(&mut self, tx: Sender<DaemonEvent>) -> bool {
         let templates_path = template_store::templates_path_for(&self.config_path);
-        let user_templates = template_store::load_user_templates(&templates_path);
+        let user_templates =
+            template_store::read_user_templates(&templates_path).unwrap_or_else(|error| {
+                warn!("Failed to load {}: {error:#}", templates_path.display());
+                Vec::new()
+            });
         for t in &user_templates {
             if let Err(e) = t.validate() {
                 warn!("Template: {e}");

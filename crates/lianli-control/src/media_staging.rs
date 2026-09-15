@@ -416,4 +416,8 @@ impl MediaStaging {
         let _ = self.directory.keep();
         Ok(name)
     }
+
+    pub(crate) fn published(self) {
+        let _ = self.directory.keep();
+    }
 }

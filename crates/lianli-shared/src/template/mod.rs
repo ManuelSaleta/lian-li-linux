@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod catalog;
+mod catalog_recovery;
+mod catalog_review;
+mod catalog_storage;
 pub mod widget_kind;
 
 pub use widget_kind::{default_gradient_stops, GradientStop, WidgetKind};

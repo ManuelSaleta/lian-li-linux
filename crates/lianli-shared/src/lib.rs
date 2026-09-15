@@ -1,4 +1,5 @@
 pub mod aio;
+pub mod backups;
 pub mod config;
 pub mod daemon;
 pub mod device_id;

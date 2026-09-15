@@ -9,6 +9,7 @@ impl ServiceManager {
         };
 
         info!("shutdown: begin");
+        self.ipc.state.lock().catalog_control.stop();
         self.media_preparation.cancel();
         lianli_transport::usb::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 

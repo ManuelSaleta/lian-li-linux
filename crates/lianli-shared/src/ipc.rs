@@ -127,10 +127,41 @@ pub enum IpcRequest {
     ListPwmHeaders,
     GetLcdTemplates,
     SetLcdTemplates {
+        #[serde(deserialize_with = "crate::serde_limits::templates")]
         templates: Vec<LcdTemplate>,
+    },
+    MergeLcdTemplates {
+        #[serde(deserialize_with = "crate::serde_limits::templates")]
+        originals: Vec<LcdTemplate>,
+        #[serde(deserialize_with = "crate::serde_limits::templates")]
+        copies: Vec<LcdTemplate>,
     },
     InstallTemplate {
         template: CatalogTemplate,
+    },
+    StartCatalogInstall {
+        template: CatalogTemplate,
+    },
+    GetCatalogInstallStatus,
+    GetCatalogStorage,
+    GetManagedMediaStorage,
+    StartManagedMediaReview {
+        directory: String,
+    },
+    GetManagedMediaReview {
+        operation_id: String,
+    },
+    StartManagedMediaRemoval {
+        operation_id: String,
+    },
+    StartCatalogReview {
+        directory: String,
+    },
+    GetCatalogReview {
+        operation_id: String,
+    },
+    StartCatalogRemoval {
+        operation_id: String,
     },
     /// Returns `{ "jpeg_base64": "..." }` for use in the editor preview.
     RenderTemplatePreview {
@@ -213,6 +244,13 @@ impl IpcRequest {
             | Self::ListSensors
             | Self::ListPwmHeaders
             | Self::GetLcdTemplates
+            | Self::GetCatalogInstallStatus
+            | Self::GetCatalogStorage
+            | Self::GetManagedMediaStorage
+            | Self::StartManagedMediaReview { .. }
+            | Self::GetManagedMediaReview { .. }
+            | Self::StartCatalogReview { .. }
+            | Self::GetCatalogReview { .. }
             | Self::RenderTemplatePreview { .. }
             | Self::Ping
             | Self::GetDaemonInfo
@@ -242,6 +280,10 @@ impl IpcRequest {
             | Self::UnbindWirelessDevice { .. }
             | Self::SetEne6k77FanQuantity { .. }
             | Self::SetLcdTemplates { .. }
+            | Self::MergeLcdTemplates { .. }
+            | Self::StartCatalogRemoval { .. }
+            | Self::StartManagedMediaRemoval { .. }
+            | Self::StartCatalogInstall { .. }
             | Self::InstallTemplate { .. }
             | Self::SetLcdBrightness { .. }
             | Self::PingDevice { .. }

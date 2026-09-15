@@ -96,6 +96,42 @@ enum Command {
         generation: String,
     },
     #[command(hide = true)]
+    SendSelectedMedia {
+        #[arg(long)]
+        selection: std::path::PathBuf,
+    },
+    #[command(hide = true)]
+    ReceiveSelectedMedia {
+        #[arg(long, value_enum)]
+        scope: Scope,
+        #[arg(long, value_parser = lianli_shared::daemon::parse_service_invocation)]
+        operation_id: String,
+        #[arg(long)]
+        expected_config: std::path::PathBuf,
+    },
+    #[command(hide = true)]
+    ImportSelectedMedia {
+        #[arg(long, value_enum)]
+        scope: Scope,
+        #[arg(long)]
+        selection: std::path::PathBuf,
+        #[arg(long)]
+        expected_config: std::path::PathBuf,
+        #[arg(long, value_parser = lianli_shared::daemon::parse_service_invocation)]
+        operation_id: String,
+    },
+    #[command(hide = true)]
+    RunSelectedMediaImport {
+        #[arg(long, value_enum)]
+        scope: Scope,
+        #[arg(long)]
+        selection: std::path::PathBuf,
+        #[arg(long)]
+        expected_config: std::path::PathBuf,
+        #[arg(long, value_parser = lianli_shared::daemon::parse_service_invocation)]
+        operation_id: String,
+    },
+    #[command(hide = true)]
     ReceiveState {
         #[arg(long, value_enum)]
         scope: Scope,
@@ -313,6 +349,64 @@ fn main() -> anyhow::Result<()> {
                     &generation
                 )?)?
             );
+        }
+        Command::SendSelectedMedia { selection } => {
+            lianli_control::media_import_transfer::send_file(&selection)?;
+        }
+        Command::ReceiveSelectedMedia {
+            scope,
+            operation_id,
+            expected_config,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&lianli_control::media_import_transfer::receive_published(
+                    scope,
+                    &operation_id,
+                    &expected_config
+                )?)?
+            );
+        }
+        Command::ImportSelectedMedia {
+            scope,
+            selection,
+            expected_config,
+            operation_id,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&lianli_control::media_import_launch::native(
+                    scope,
+                    &selection,
+                    &expected_config,
+                    &operation_id
+                )?)?
+            );
+        }
+        Command::RunSelectedMediaImport {
+            scope,
+            selection,
+            expected_config,
+            operation_id,
+        } => {
+            let scope = match scope {
+                Scope::User => lianli_shared::services::ServiceScope::User,
+                Scope::System => lianli_shared::services::ServiceScope::System,
+            };
+            lianli_control::media_import_worker::run(
+                scope,
+                &selection,
+                &expected_config,
+                &operation_id,
+            )?;
         }
         Command::ReceiveState {
             scope,

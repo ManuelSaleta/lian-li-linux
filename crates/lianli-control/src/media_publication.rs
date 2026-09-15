@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,11 +99,23 @@ impl MediaPublication {
                 ensure!(
                     fs::symlink_metadata(&source_path)
                         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-                    "Managed media destination already exists; neither directory was replaced"
+                    "Managed media destination already exists. Neither directory was replaced"
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.verify_staged(&root.0)?;
+                check_capacity(
+                    &imports,
+                    &stage.child(&self.media, false)?,
+                    8 * 1024 * 1024 * 1024,
+                )?;
+                crate::media_ownership::record(
+                    &media,
+                    &imports,
+                    &stage.child(&self.media, false)?,
+                    &self.id,
+                    &self.fingerprint,
+                )?;
                 let source = std::ffi::CString::new(self.media.as_bytes())?;
                 let target = std::ffi::CString::new(self.id.as_bytes())?;
                 ensure!(
@@ -140,7 +153,7 @@ impl MediaPublication {
             .child(&self.id, false)?;
         ensure!(
             fingerprint_directory(&media)? == self.fingerprint,
-            "Committed media is missing or changed; inspect the migration before starting hardware"
+            "Committed media is missing or changed. Inspect the migration before starting hardware"
         );
         Ok(())
     }
@@ -150,7 +163,44 @@ pub(crate) fn fingerprint(path: &Path) -> Result<String> {
     fingerprint_directory(&Directory::open(path)?)
 }
 
-fn fingerprint_directory(directory: &Directory) -> Result<String> {
+pub(crate) fn check_capacity(imports: &Directory, staged: &Directory, limit: u64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut objects = std::collections::HashSet::new();
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    let mut scan = |directory: &Directory| -> Result<()> {
+        for entry in fs::read_dir(directory.path())? {
+            entries += 1;
+            ensure!(
+                entries <= 65_536 && Instant::now() < deadline,
+                "Managed media quota inspection exceeded its entry or time limit"
+            );
+            let metadata = fs::symlink_metadata(entry?.path())?;
+            ensure!(metadata.is_file(), "Managed media quota inspection refuses links, nested directories and special files");
+            if objects.insert((metadata.dev(), metadata.ino())) {
+                bytes = bytes
+                    .checked_add(metadata.len())
+                    .context("Managed media size overflow")?;
+                ensure!(bytes <= limit, "Managed media storage exceeds its 8 GiB quota. Remove unused imports before copying more media");
+            }
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Managed media quota inspection exceeded five seconds"
+        );
+        Ok(())
+    };
+    for (index, entry) in fs::read_dir(imports.path())?.enumerate() {
+        ensure!(
+            index < 1023 && Instant::now() < deadline,
+            "Managed media quota inspection exceeds 1024 imports or five seconds"
+        );
+        scan(&Directory::open(&entry?.path())?)?;
+    }
+    scan(staged)
+}
+
+pub(crate) fn fingerprint_directory(directory: &Directory) -> Result<String> {
     let before = directory.0.metadata()?;
     let mut entries = BTreeMap::new();
     let mut objects = BTreeMap::new();
@@ -247,4 +297,27 @@ fn fingerprint_directory(directory: &Directory) -> Result<String> {
         "Managed media directory changed during inspection"
     );
     Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    #[test]
+    fn retained_imports_count_once_per_inode_and_failed_capacity_preserves_all_files() {
+        let root = tempfile::tempdir().unwrap();
+        let root = Directory::open(root.path()).unwrap();
+        let imports = root.child("imports", true).unwrap();
+        let old = imports.child("old", true).unwrap();
+        fs::write(old.path().join("asset"), b"12345").unwrap();
+        fs::hard_link(old.path().join("asset"), old.path().join("asset.png")).unwrap();
+        let staged = root.child("staged", true).unwrap();
+        fs::write(staged.path().join("new"), b"67890").unwrap();
+        assert!(check_capacity(&imports, &staged, 10).is_ok());
+        assert!(check_capacity(&imports, &staged, 9).is_err());
+        assert_eq!(fs::read(old.path().join("asset")).unwrap(), b"12345");
+        assert_eq!(fs::read(staged.path().join("new")).unwrap(), b"67890");
+        std::os::unix::fs::symlink(old.path().join("asset"), staged.path().join("alias")).unwrap();
+        assert!(check_capacity(&imports, &staged, 100).is_err());
+    }
 }

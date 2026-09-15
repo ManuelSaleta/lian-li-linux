@@ -40,13 +40,26 @@ pub fn switch_display_mode(state: &SharedState, tx: EventSender, device_id: Stri
         None => IpcResponse::error(format!("device not found: {device_id}")),
     }
 }
-
 pub fn render_template_preview(
     template: lianli_shared::template::LcdTemplate,
     width: u32,
     height: u32,
     hardware_video: bool,
+    catalog_runtime: &crate::catalog_references::RuntimeReferences,
 ) -> IpcResponse {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let usage = match catalog_runtime.enter(|| {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "Catalog review is busy. Retry this template preview shortly"
+        );
+        Ok(())
+    }) {
+        Ok(usage) => usage,
+        Err(error) => return IpcResponse::error(error.to_string()),
+    };
+    let dependencies = lianli_shared::media_dependencies::template_dependencies(&template);
+    usage.record(&dependencies);
     let preview_screen = ScreenInfo {
         width,
         height,
@@ -59,7 +72,7 @@ pub fn render_template_preview(
         play_count: 0,
     };
     let all_sensors = lianli_shared::sensors::enumerate_sensors();
-    match CustomAsset::new(
+    let response = match CustomAsset::new(
         &template,
         0.0,
         &preview_screen,
@@ -84,5 +97,7 @@ pub fn render_template_preview(
             }
         }
         Err(e) => IpcResponse::error(format!("preview asset creation failed: {e}")),
-    }
+    };
+    usage.record(&dependencies);
+    response
 }

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { RefreshCw, Download, CheckCircle, AlertCircle, Loader2, X, ExternalLink } from "lucide-vue-next";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { getVersion } from "@tauri-apps/api/app";
 import type { CatalogManifest, CatalogTemplate } from "@/types";
 import { useConfigStore } from "@/stores/config";
-import { useLcdStore } from "@/stores/lcd";
+import { useLcdStore, LCD_TEMPLATES_CHANGED_EVENT, type CatalogInstallStatus } from "@/stores/lcd";
+import { emit } from "@tauri-apps/api/event";
+import { boundedFetch } from "@/utils/boundedFetch";
 
 const config = useConfigStore();
 const lcd = useLcdStore();
@@ -20,36 +22,56 @@ const loading = ref(false);
 const error = ref("");
 const templates = ref<CatalogTemplate[]>([]);
 const previewCache = ref<Record<string, string>>({});
+const previewErrors = ref<Record<string, string>>({});
+let downloads = new AbortController();
+let disposed = false;
+function clearPreviews() {
+  for (const url of Object.values(previewCache.value)) URL.revokeObjectURL(url);
+  previewCache.value = {};
+  previewErrors.value = {};
+}
+onUnmounted(() => { disposed = true; downloads.abort(); clearPreviews(); });
 const installState = ref<Record<string, "idle" | "installing" | "installed" | "error">>({});
 
 const installedIds = ref<Set<string>>(new Set());
+const monitoringInstall = ref(false);
+const startingInstall = ref(false);
+const installProgress = ref("");
 
 onMounted(async () => {
   await config.load().catch(() => undefined);
   for (const t of config.templates) installedIds.value.add(t.id);
+  if (!disposed) void checkInstall();
   await fetchCatalog();
 });
 
 async function fetchCatalog() {
+  if (loading.value || disposed) return;
+  downloads.abort();
+  downloads = new AbortController();
+  const controller = downloads;
+  clearPreviews();
   loading.value = true;
   error.value = "";
   try {
-    const resp = await fetch(CATALOG_URL);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const manifest: CatalogManifest = await resp.json();
+    const blob = await boundedFetch(CATALOG_URL, 1024 * 1024, controller.signal);
+    const manifest: CatalogManifest = JSON.parse(await blob.text());
     if (manifest.schema_version !== 1) {
       throw new Error(`unsupported catalog schema version ${manifest.schema_version}`);
     }
+    if (!Array.isArray(manifest.templates) || manifest.templates.length > 128
+      || manifest.templates.some((t) => !t || [t.id, t.name, t.folder, t.preview, t.min_daemon_version].some((value) => typeof value !== "string" || value.length > 512))
+      || new Set(manifest.templates.map((t) => t.id)).size !== manifest.templates.length) {
+      throw new Error("Catalog must contain at most 128 templates with unique IDs and valid metadata");
+    }
     const ver = await getVersion().catch(() => null);
+    if (controller.signal.aborted) return;
     templates.value = ver
       ? manifest.templates.filter((t) => versionGte(ver, t.min_daemon_version))
       : manifest.templates;
-    // Lazily load previews.
-    for (const t of templates.value) {
-      void loadPreview(t);
-    }
+    void loadPreviews(templates.value, controller);
   } catch (e) {
-    error.value = String(e);
+    if (!controller.signal.aborted) error.value = `${e}. Use Refresh to retry.`;
   } finally {
     loading.value = false;
   }
@@ -66,33 +88,81 @@ function versionGte(have: string, need: string): boolean {
   return hh > nh || (hh === nh && (hm > nm || (hm === nm && hp >= np)));
 }
 
-async function loadPreview(t: CatalogTemplate) {
-  if (previewCache.value[t.id]) return;
-  try {
-    const url = `${ASSET_BASE}/${t.folder}/${t.preview}`;
-    const resp = await fetch(url);
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const reader = new FileReader();
-    reader.onload = () => {
-      previewCache.value[t.id] = reader.result as string;
-    };
-    reader.readAsDataURL(blob);
-  } catch {
-    // leave empty
-  }
+async function loadPreviews(items: CatalogTemplate[], controller: AbortController) {
+  let next = 0;
+  let cachedBytes = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (!controller.signal.aborted && next < items.length) {
+      const t = items[next++];
+      try {
+        if (cachedBytes >= 16 * 1024 * 1024) throw new Error("Preview cache limit reached");
+        const blob = await boundedFetch(`${ASSET_BASE}/${t.folder}/${t.preview}`, 1024 * 1024, controller.signal);
+        if (controller.signal.aborted) return;
+        if (cachedBytes + blob.size > 16 * 1024 * 1024) throw new Error("Preview cache limit reached");
+        cachedBytes += blob.size;
+        previewCache.value[t.id] = URL.createObjectURL(blob);
+      } catch (e) {
+        if (!controller.signal.aborted) previewErrors.value[t.id] = `${e}. Use Refresh to retry previews.`;
+      }
+    }
+  }));
 }
 
 async function install(t: CatalogTemplate) {
+  if (startingInstall.value || monitoringInstall.value || installState.value[t.id] === "installing") return;
+  startingInstall.value = true;
   installState.value[t.id] = "installing";
   try {
-    await lcd.installTemplate(t);
-    installedIds.value.add(t.id);
-    installState.value[t.id] = "installed";
-    await config.load();
+    await monitorInstall(await lcd.installTemplate(t));
   } catch (e) {
     installState.value[t.id] = "error";
-    error.value = `Install failed: ${e}`;
+    error.value = `Installation could not be confirmed: ${e}. Use Check install before retrying; daemon work may still finish.`;
+  } finally {
+    startingInstall.value = false;
+  }
+}
+
+async function checkInstall() {
+  if (monitoringInstall.value || disposed) return;
+  try {
+    const status = await lcd.catalogInstallStatus();
+    if (status) await monitorInstall(status);
+    else installProgress.value = "No catalog installation recorded by this daemon.";
+  } catch (e) {
+    installProgress.value = `Install status unavailable: ${e}. Use Check install to retry.`;
+  }
+}
+
+async function monitorInstall(initial: CatalogInstallStatus) {
+  if (monitoringInstall.value || disposed) return;
+  monitoringInstall.value = true;
+  let status = initial;
+  try {
+    while (!disposed) {
+      installState.value[status.template_id] = status.finished
+        ? (status.error ? "error" : "installed") : "installing";
+      if (status.finished) {
+        if (status.error) throw new Error(status.error);
+        installProgress.value = `Saved ${status.template_id}.`;
+        await emit(LCD_TEMPLATES_CHANGED_EVENT);
+        await config.load();
+        installedIds.value = new Set(config.templates.map((template) => template.id));
+        return;
+      }
+      installProgress.value = `Installing ${status.template_id}… Closing this window leaves daemon installation running.`;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (disposed) return;
+      const next = await lcd.catalogInstallStatus();
+      if (!next || next.operation_id !== initial.operation_id) {
+        throw new Error("Daemon or installation changed. Reload templates and check the latest install status");
+      }
+      status = next;
+    }
+  } catch (e) {
+    installState.value[initial.template_id] = "error";
+    installProgress.value = `Installation could not be confirmed: ${e}. Use Check install before retrying.`;
+  } finally {
+    monitoringInstall.value = false;
   }
 }
 
@@ -118,6 +188,7 @@ function previewAspect(t: CatalogTemplate): string {
         <ExternalLink :size="13" /> Publishing Guide
       </button>
       <div class="spacer" />
+      <n-button size="small" quaternary :disabled="monitoringInstall" @click="checkInstall">Check install</n-button>
       <n-button size="small" quaternary :loading="loading" @click="fetchCatalog">
         <template #icon><RefreshCw :size="14" /></template>
         Refresh
@@ -126,6 +197,7 @@ function previewAspect(t: CatalogTemplate): string {
     </div>
 
     <div class="content">
+      <p v-if="installProgress" role="status">{{ installProgress }}</p>
       <div v-if="loading" class="state">
         <Loader2 :size="28" class="spin" />
         <span>Loading catalog…</span>
@@ -144,7 +216,7 @@ function previewAspect(t: CatalogTemplate): string {
         <div v-for="t in templates" :key="t.id" class="card tpl-card">
           <div class="preview" :style="{ aspectRatio: previewAspect(t) }">
             <img v-if="previewCache[t.id]" :src="previewCache[t.id]" alt="" />
-            <div v-else class="preview-ph" />
+            <div v-else class="preview-ph" :title="previewErrors[t.id]">{{ previewErrors[t.id] ? 'Preview unavailable — Refresh to retry' : '' }}</div>
           </div>
           <div class="info">
             <div class="name">{{ t.name }}</div>
@@ -157,7 +229,7 @@ function previewAspect(t: CatalogTemplate): string {
             <n-button
               size="small"
               type="primary"
-              :disabled="installedIds.has(t.id)"
+              :disabled="installedIds.has(t.id) || startingInstall || monitoringInstall"
               :loading="installState[t.id] === 'installing'"
               @click="install(t)"
             >

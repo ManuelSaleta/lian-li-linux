@@ -114,6 +114,7 @@ impl ServiceManager {
             .collect();
         let preparing: HashSet<_> = jobs.iter().map(|job| job.index).collect();
         let generation = self.media_preparation.submit(PreparationRequest {
+            catalog_runtime: self.ipc.state.lock().catalog_runtime.clone(),
             generation: 0,
             jobs,
             templates,

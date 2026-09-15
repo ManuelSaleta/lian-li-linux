@@ -1,4 +1,6 @@
 import { defineStore } from "pinia";
+import { emit } from "@tauri-apps/api/event";
+import { LCD_TEMPLATES_CHANGED_EVENT } from "@/stores/lcd";
 import { computed, reactive, ref } from "vue";
 import { useIpc } from "@/composables/useIpc";
 import type {
@@ -51,6 +53,7 @@ export const useConfigStore = defineStore("config", () => {
   const rgbCaps = ref<RgbDeviceCapabilities[]>([]);
   const sensors = ref<SensorInfo[]>([]);
   const templates = ref<LcdTemplate[]>([]);
+  const imported = ref<{ instance: string; originals: LcdTemplate[]; copies: LcdTemplate[] } | null>(null);
   const presets = ref<RgbPreset[]>([]);
   const pwmHeaders = ref<PwmHeader[]>([]);
 
@@ -63,6 +66,7 @@ export const useConfigStore = defineStore("config", () => {
     Object.assign(config, defaultConfig(), next);
     dirty.value = false;
     loaded.value = true;
+    imported.value = null;
   }
 
   async function load() {
@@ -83,12 +87,45 @@ export const useConfigStore = defineStore("config", () => {
     loaded.value = true;
   }
 
+  async function refreshTemplates() {
+    const current = await ipc.request<LcdTemplate[]>("GetLcdTemplates");
+    const copies = imported.value?.copies ?? [];
+    const ids = new Set(copies.map((item) => item.id));
+    templates.value = [...current.filter((item) => !ids.has(item.id)), ...JSON.parse(JSON.stringify(copies))];
+  }
+
   async function save() {
     // Flush any pending debounced effect requests first.
     flushRegistry.forEach((fn) => fn());
-    await ipc.request("SetConfig", { config });
+    const staged = imported.value;
+    if (staged?.copies.length) {
+      const current = await ipc.request<LcdTemplate[]>("GetLcdTemplates", null, staged.instance);
+      for (const copy of staged.copies) {
+        if (JSON.stringify(current.find((item) => item.id === copy.id)) !== JSON.stringify(staged.originals.find((item) => item.id === copy.id))) {
+          throw new Error("A copied template changed in another window. Reload and review the import before saving.");
+        }
+      }
+      await ipc.request("MergeLcdTemplates", { originals: staged.originals, copies: staged.copies }, staged.instance);
+      staged.originals = JSON.parse(JSON.stringify(staged.copies));
+      await emit(LCD_TEMPLATES_CHANGED_EVENT);
+    }
+    try {
+      await ipc.request("SetConfig", { config }, staged?.instance);
+    } catch (error) {
+      if (staged?.copies.length) throw new Error(`Copied templates were saved, but LCD settings were not confirmed. Retry Save or reload to inspect settings. ${error}`);
+      throw error;
+    }
     dirty.value = false;
     await load();
+  }
+
+  function stageImportedMedia(lcds: LcdConfig[], copies: LcdTemplate[], instance: string) {
+    if (imported.value) throw new Error("Save or reload the previous copied selection first.");
+    imported.value = { instance, originals: JSON.parse(JSON.stringify(templates.value)), copies: JSON.parse(JSON.stringify(copies)) };
+    const ids = new Set(copies.map((item) => item.id));
+    templates.value = [...templates.value.filter((item) => !ids.has(item.id)), ...JSON.parse(JSON.stringify(copies))];
+    config.lcds = JSON.parse(JSON.stringify(lcds));
+    markDirty();
   }
 
   // Registry of flush callbacks invoked before save (debounced RGB/direction).
@@ -168,6 +205,8 @@ export const useConfigStore = defineStore("config", () => {
     rgbCaps,
     sensors,
     templates,
+    imported,
+    stageImportedMedia,
     presets,
     pwmHeaders,
     rgb,
@@ -176,6 +215,7 @@ export const useConfigStore = defineStore("config", () => {
     markDirty,
     replace,
     load,
+    refreshTemplates,
     save,
     registerFlush,
     ensureRgb,

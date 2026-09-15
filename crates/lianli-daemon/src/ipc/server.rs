@@ -51,6 +51,12 @@ pub struct DaemonState {
     pub user_templates: Vec<LcdTemplate>,
     pub rgb_presets: Vec<RgbPreset>,
     pub pixel_clean_states: Vec<PixelCleanState>,
+    pub catalog_install: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogInstallStatus>>>,
+    pub catalog_control: Arc<super::catalog::CatalogControl>,
+    pub catalog_runtime: Arc<crate::catalog_references::RuntimeReferences>,
+    pub catalog_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
+    pub managed_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
+    /// RGB controller, set once devices are opened.
     pub pixel_clean_preparation: Option<(u64, bool, Option<String>)>,
 }
 
@@ -72,6 +78,14 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             "openrgb_retry".into(),
             "media_access".into(),
             "state_recovery".into(),
+            "catalog_install_status".into(),
+            "catalog_storage".into(),
+            "managed_media_storage".into(),
+            "managed_template_merge".into(),
+            "catalog_cleanup_review".into(),
+            "catalog_cleanup_removal".into(),
+            "managed_media_review".into(),
+            "managed_media_removal".into(),
         ],
     }
 }
@@ -90,6 +104,11 @@ impl DaemonState {
             write_gate: Arc::new(lianli_control::write_gate::ServiceWriteGate::new(
                 &lianli_shared::installation::InstallationContext::detect(),
             )),
+            catalog_install: Default::default(),
+            catalog_control: Default::default(),
+            catalog_runtime: Default::default(),
+            catalog_review: Default::default(),
+            managed_review: Default::default(),
             info: DaemonInfo {
                 version: env!("CARGO_PKG_VERSION").into(),
                 protocol_version: IPC_PROTOCOL_VERSION,
@@ -478,18 +497,50 @@ fn handle_request(
 
         IpcRequest::GetLcdTemplates => super::templates::get(state),
         IpcRequest::SetLcdTemplates { templates } => super::templates::set(state, tx, templates),
+        IpcRequest::MergeLcdTemplates { originals, copies } => {
+            super::templates::merge(state, tx, originals, copies)
+        }
         IpcRequest::InstallTemplate { template } => super::catalog::install(state, tx, template),
+        IpcRequest::StartCatalogInstall { template } => super::catalog::start(state, tx, template),
+        IpcRequest::GetCatalogInstallStatus => super::catalog::status(state),
+        IpcRequest::GetCatalogStorage => super::catalog::storage(state, false),
+        IpcRequest::GetManagedMediaStorage => super::catalog::storage(state, true),
+        IpcRequest::StartCatalogReview { directory } => {
+            super::catalog_cleanup::start(state, directory, false)
+        }
+        IpcRequest::GetCatalogReview { operation_id } => {
+            super::catalog_cleanup::status(state, &operation_id, false)
+        }
+        IpcRequest::StartManagedMediaReview { directory } => {
+            super::catalog_cleanup::start(state, directory, true)
+        }
+        IpcRequest::GetManagedMediaReview { operation_id } => {
+            super::catalog_cleanup::status(state, &operation_id, true)
+        }
+        IpcRequest::StartCatalogRemoval { operation_id } => {
+            super::catalog_cleanup::remove(state, &operation_id, tx, false)
+        }
+        IpcRequest::StartManagedMediaRemoval { operation_id } => {
+            super::catalog_cleanup::remove(state, &operation_id, tx, true)
+        }
         IpcRequest::RenderTemplatePreview {
             template,
             width,
             height,
         } => {
+            let catalog_runtime = state.lock().catalog_runtime.clone();
             let hardware_video = state
                 .lock()
                 .config
                 .as_ref()
                 .is_some_and(|config| config.hardware_video);
-            super::lcd::render_template_preview(template, width, height, hardware_video)
+            super::lcd::render_template_preview(
+                template,
+                width,
+                height,
+                hardware_video,
+                &catalog_runtime,
+            )
         }
 
         IpcRequest::SetLedColor {

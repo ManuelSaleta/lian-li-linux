@@ -28,6 +28,7 @@ pub(super) struct PreparationRequest {
     pub templates: Vec<LcdTemplate>,
     pub default_fps: f32,
     pub hardware_video: bool,
+    pub catalog_runtime: Arc<crate::catalog_references::RuntimeReferences>,
 }
 
 pub(super) struct PreparedMedia {
@@ -160,6 +161,12 @@ fn prepare(
     if control.check().is_err() {
         return;
     }
+    let Ok(usage) = request.catalog_runtime.enter(|| {
+        control.check()?;
+        Ok(())
+    }) else {
+        return;
+    };
     let sensors = if request.jobs.iter().any(|job| {
         matches!(
             job.config.media_type,
@@ -176,6 +183,12 @@ fn prepare(
             return;
         }
         let screen = job.target.screen;
+        let dependencies =
+            lianli_shared::media_dependencies::lcd_dependencies(&job.config, &request.templates)
+                .unwrap_or_else(|_| {
+                    lianli_shared::media_dependencies::stored_lcd_dependencies(&job.config)
+                });
+        usage.record(&dependencies);
         let result = prepare_media_asset(
             &job.config,
             request.default_fps,
@@ -205,6 +218,7 @@ fn prepare(
             }))
         })
         .map_err(|error| error.to_string().chars().take(2048).collect());
+        usage.record(&dependencies);
         if !deliver(
             sender,
             PreparedMedia {
@@ -256,6 +270,7 @@ mod tests {
 
     fn request() -> PreparationRequest {
         PreparationRequest {
+            catalog_runtime: Default::default(),
             generation: 0,
             jobs: Vec::new(),
             templates: Vec::new(),

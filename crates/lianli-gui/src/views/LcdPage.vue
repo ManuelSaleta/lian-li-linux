@@ -4,11 +4,16 @@ import { Plus } from "lucide-vue-next";
 import { useConfigStore } from "@/stores/config";
 import { useDevicesStore } from "@/stores/devices";
 import LcdConfigCard from "@/components/lcd/LcdConfigCard.vue";
+import ManagedMediaImport from "@/components/lcd/ManagedMediaImport.vue";
 
 const config = useConfigStore();
 const devices = useDevicesStore();
 
 const entries = computed(() => config.config.lcds);
+const selectedTemplates = computed(() => {
+  const ids = new Set(entries.value.filter((entry) => entry.type === "custom").map((entry) => entry.template_id));
+  return config.templates.filter((template) => ids.has(template.id));
+});
 
 function addLcd() {
   const first = devices.lcdDevices[0];
@@ -35,6 +40,8 @@ function addLcd() {
         No LCD devices detected.
       </span>
     </div>
+
+    <ManagedMediaImport :lcds="entries" :templates="selectedTemplates" />
 
     <LcdConfigCard
       v-for="(entry, i) in entries"

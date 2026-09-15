@@ -10,6 +10,13 @@ import type { CatalogTemplate, LcdConfig, LcdTemplate, PixelCleanStatus } from "
  *  windows (each with their own config store instance) know to reload it. */
 export const LCD_TEMPLATES_CHANGED_EVENT = "lcd-templates-changed";
 
+export interface CatalogInstallStatus {
+  operation_id: string;
+  template_id: string;
+  finished: boolean;
+  error: string | null;
+}
+
 export interface ActiveCleanerSession {
   sessionId?: number | null;
   deviceId?: string | null;
@@ -76,8 +83,11 @@ export const useLcdStore = defineStore("lcd", () => {
   }
 
   async function installTemplate(template: CatalogTemplate) {
-    await ipc.request("InstallTemplate", { template });
-    await emit(LCD_TEMPLATES_CHANGED_EVENT);
+    return ipc.request<CatalogInstallStatus>("StartCatalogInstall", { template });
+  }
+
+  async function catalogInstallStatus() {
+    return ipc.request<CatalogInstallStatus | null>("GetCatalogInstallStatus");
   }
 
   async function setBrightness(deviceId: string, brightness: number) {
@@ -320,6 +330,7 @@ export const useLcdStore = defineStore("lcd", () => {
     setLcdMedia,
     setTemplates,
     installTemplate,
+    catalogInstallStatus,
     setBrightness,
     renderPreview,
     startPixelClean,

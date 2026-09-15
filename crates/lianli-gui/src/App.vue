@@ -91,7 +91,7 @@ onMounted(async () => {
   // template saved in one (e.g. the editor) doesn't update the others on its
   // own — resync on this window's copy of the template list when notified.
   unlistenTemplatesChanged = await listen(LCD_TEMPLATES_CHANGED_EVENT, () => {
-    config.load().catch(() => undefined);
+    config.refreshTemplates().catch(() => undefined);
   });
 });
 

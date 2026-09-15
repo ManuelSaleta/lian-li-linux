@@ -17,6 +17,7 @@ mod server;
 mod service_stop;
 
 pub mod catalog;
+mod catalog_cleanup;
 pub mod config;
 pub mod fan;
 pub mod lcd;

@@ -8,6 +8,7 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import StatusDot from "@/components/common/StatusDot.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
+import CatalogStorage from "@/components/common/CatalogStorage.vue";
 import ServiceStatus from "@/components/common/ServiceStatus.vue";
 import { useIpc } from "@/composables/useIpc";
 
@@ -183,6 +184,8 @@ function onHidBackend(v: "hidraw" | "rusb") {
     </section>
 
     <ServiceStatus />
+    <CatalogStorage />
+    <CatalogStorage managed />
 
     <!-- Thermal alert -->
     <section class="card">
