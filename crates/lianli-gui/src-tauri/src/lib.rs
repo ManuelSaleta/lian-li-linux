@@ -1,6 +1,7 @@
 //! Tauri command handlers + multi-window setup for the Lian Li Linux GUI.
 
 mod ipc;
+mod service_operations;
 
 use ipc::PollResult;
 use serde_json::Value;
@@ -120,6 +121,11 @@ async fn open_editor_window(
     app: tauri::AppHandle,
     template_id: Option<String>,
 ) -> Result<(), String> {
+    if service_operations::active() {
+        return Err(
+            "Wait for the service operation to finish before opening the template editor.".into(),
+        );
+    }
     let hash = match &template_id {
         Some(id) if !id.is_empty() => format!("#/editor?template={id}"),
         _ => "#/editor".to_string(),
@@ -168,6 +174,48 @@ fn open_secondary_window(
         .map_err(|e| format!("failed to create {label} window: {e}"))
 }
 
+#[tauri::command]
+async fn service_operation_status(
+) -> Result<lianli_shared::services::ServiceOperationStatus, String> {
+    tauri::async_runtime::spawn_blocking(service_operations::status)
+        .await
+        .map_err(|error| format!("Service progress check failed: {error}"))
+}
+
+#[tauri::command]
+async fn service_action(
+    app: tauri::AppHandle,
+    request: lianli_shared::services::ServiceActionRequest,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run(request))
+        .await
+        .map_err(|error| format!("Service operation worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn service_change(
+    app: tauri::AppHandle,
+    request: lianli_shared::services::ServiceChangeRequest,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run_change(request))
+        .await
+        .map_err(|error| format!("Service switch submission failed: {error}"))?
+}
+
+/// Identity, devices and telemetry from the selected daemon.
+#[tauri::command]
+async fn service_report() -> Result<lianli_shared::services::ServiceReport, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        lianli_control::services::inspect(
+            &lianli_shared::installation::InstallationContext::detect(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Service check failed: {error}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
@@ -191,8 +239,17 @@ pub fn run() {
             open_editor_window,
             open_browser_window,
             app_version,
+            service_report,
+            service_operation_status,
+            service_action,
+            service_change,
         ])
         .setup(|app| {
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = lianli_control::automatic_recovery::trigger() {
+                    tracing::warn!("Service recovery request failed: {error:#}");
+                }
+            });
             if let Some(win) = app.get_webview_window("main") {
                 apply_platform_decorations(&win);
                 #[cfg(debug_assertions)]

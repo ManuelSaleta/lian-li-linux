@@ -1,0 +1,17 @@
+[Unit]
+Description=Recover an interrupted Lian Li service switch
+After=systemd-tmpfiles-setup.service systemd-user-sessions.service
+ConditionPathExists=/var/lib/lianli-control/switch.json
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lianli-control recover-automatic
+Restart=no
+KillMode=mixed
+SendSIGKILL=no
+TimeoutStartSec=infinity
+TimeoutStopSec=120s
+StandardOutput=journal
+StandardError=journal

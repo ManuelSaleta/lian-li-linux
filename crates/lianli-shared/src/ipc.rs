@@ -140,6 +140,9 @@ pub enum IpcRequest {
     },
     Ping,
     GetDaemonInfo,
+    StopService {
+        invocation_id: String,
+    },
     SetLcdBrightness {
         device_id: String,
         brightness: u8,
@@ -219,6 +222,7 @@ impl IpcRequest {
             | Self::GetPixelCleanStatus
             | Self::GetPixelCleanPreparation { .. } => true,
             Self::Guarded { .. }
+            | Self::StopService { .. }
             | Self::SetConfig { .. }
             | Self::SetLcdMedia { .. }
             | Self::SetFanConfig { .. }

@@ -2526,6 +2526,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "lianli-control"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lianli-shared",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2",
+ "tempfile",
+]
+
+[[package]]
 name = "lianli-daemon"
 version = "0.9.1"
 dependencies = [
@@ -2533,6 +2548,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "image",
+ "lianli-control",
  "lianli-devices",
  "lianli-evdi",
  "lianli-media",
@@ -2592,6 +2608,7 @@ name = "lianli-gui"
 version = "0.9.1"
 dependencies = [
  "anyhow",
+ "lianli-control",
  "lianli-shared",
  "serde",
  "serde_json",

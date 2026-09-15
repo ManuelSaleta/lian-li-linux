@@ -7,6 +7,7 @@ arch=('x86_64')
 url="https://github.com/sgtaziz/lian-li-linux"
 license=('MIT')
 depends=('libusb' 'ffmpeg' 'evdi-dkms' 'webkit2gtk-4.1' 'gtk3' 'glib2' 'libsoup3')
+optdepends=('polkit: administrator authorization for service mode switching')
 makedepends=('git' 'cargo' 'clang' 'cmake' 'nasm' 'npm')
 provides=('lianli-linux')
 conflicts=('lianli-linux')
@@ -42,6 +43,8 @@ package() {
   install -Dm755 target/release/lianli-daemon "$pkgdir/usr/bin/lianli-daemon"
   install -Dm755 target/release/lianli-gui "$pkgdir/usr/bin/lianli-gui"
 
+  install -Dm755 target/release/lianli-control "$pkgdir/usr/bin/lianli-control"
+
   # udev rules
   install -Dm644 packaging/udev/60-lianli.rules "$pkgdir/usr/lib/udev/rules.d/60-lianli.rules"
 
@@ -54,6 +57,12 @@ package() {
   # Systemd services: per-user + system service, user enables either
   install -Dm644 packaging/systemd/lianli-daemon.service "$pkgdir/usr/lib/systemd/user/lianli-daemon.service"
   install -Dm644 packaging/systemd/lianli-daemon-system.service "$pkgdir/usr/lib/systemd/system/lianli-daemon-system.service"
+
+  install -Dm644 packaging/systemd/lianli-control-recovery.service "$pkgdir/usr/lib/systemd/system/lianli-control-recovery.service"
+  install -d "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+  ln -s ../lianli-control-recovery.service "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/lianli-control-recovery.service"
+  install -Dm644 packaging/polkit/49-lianli-recovery.rules "$pkgdir/usr/share/polkit-1/rules.d/49-lianli-recovery.rules"
+  install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop "$pkgdir/etc/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop"
 
   # Auto-load the evdi kernel module at boot so udev can grant user access to it
   install -Dm644 packaging/modules-load.d/lianli-evdi.conf "$pkgdir/usr/lib/modules-load.d/lianli-evdi.conf"

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 lianli-shared = { path = "../lianli-shared" }
+lianli-control = { path = "../lianli-control" }
 lianli-transport = { path = "../lianli-transport" }
 lianli-devices = { path = "../lianli-devices" }
 lianli-evdi = { path = "../lianli-evdi" }

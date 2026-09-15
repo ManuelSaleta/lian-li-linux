@@ -1,7 +1,8 @@
-use super::{DaemonEvent, ServiceManager};
+use super::{DaemonEvent, ServiceManager, SignalMonitor};
 use crate::controllers::aio::AioController;
 use crate::controllers::fan::FanController;
 use crate::controllers::rgb::RgbController;
+use crate::ipc;
 use crate::openrgb_server;
 use crate::persistence;
 use crate::template_store;
@@ -22,7 +23,52 @@ use tracing::{debug, info, warn};
 const MAX_INIT_RETRIES: u32 = 18;
 
 impl ServiceManager {
+    pub(super) fn initialize_runtime(&mut self, tx: Sender<DaemonEvent>, signals: &SignalMonitor) {
+        if signals.requested() {
+            return;
+        }
+        self.load_config(tx.clone());
+        self.sync_ipc_state();
+        if signals.requested() {
+            return;
+        }
+        self.ipc.thread = Some(ipc::start_ipc_server(
+            Arc::clone(&self.ipc.state),
+            Arc::clone(&self.ipc.stop),
+            tx,
+            self.socket_path.clone(),
+        ));
+        if signals.requested() {
+            return;
+        }
+        self.try_wireless();
+        self.wireless_stable_count = self.wireless.devices().len();
+        if self.wireless.has_discovered_devices() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if signals.requested() {
+            return;
+        }
+        self.init_wired_devices();
+        if signals.requested() {
+            return;
+        }
+        self.start_openrgb_server();
+        self.ensure_aio_defaults();
+        if signals.requested() {
+            return;
+        }
+        self.start_fan_control();
+        if signals.requested() {
+            return;
+        }
+        self.start_aio_control();
+    }
+
     pub(super) fn start_fan_control(&mut self) {
+        if lianli_transport::usb::SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(controller) = self.controllers.fan.take() {
             info!("Stopping existing fan controller for reload...");
             controller.stop();
@@ -64,6 +110,9 @@ impl ServiceManager {
     }
 
     pub(super) fn start_aio_control(&mut self) {
+        if lianli_transport::usb::SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(existing) = self.controllers.aio.take() {
             existing.stop();
         }
@@ -286,6 +335,10 @@ impl ServiceManager {
     /// in which case the topology baseline is left untouched so a later
     /// poll retries.
     pub(super) fn init_wired_devices(&mut self) -> bool {
+        self.registry.open_workers.reap_finished();
+        if lianli_transport::usb::SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return false;
+        }
         let already_opened: HashSet<String> = self
             .registry
             .hid_backends
@@ -329,8 +382,12 @@ impl ServiceManager {
         const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
         let mut pending = Vec::new();
+        let mut failed_ids: HashSet<String> = HashSet::new();
 
         for det in &usb_devs {
+            if lianli_transport::usb::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                break;
+            }
             if det.family == lianli_shared::device_id::DeviceFamily::TlLcd
                 || det.family == lianli_shared::device_id::DeviceFamily::HydroShift2OledCurveLcd
             {
@@ -365,21 +422,20 @@ impl ServiceManager {
             let (tx, rx) =
                 std::sync::mpsc::sync_channel::<anyhow::Result<registry::OpenedDevice>>(1);
             let label = format!("{name} ({vid:04x}:{pid:04x})");
-            std::thread::Builder::new()
-                .name(format!("dev-open-{base_id}"))
-                .spawn(move || {
-                    let _ = tx.send(driver.open(&ctx));
-                })
-                .ok();
+            if let Err(error) = self.registry.open_workers.spawn(base_id.clone(), move || {
+                let _ = tx.send(driver.open(&ctx));
+            }) {
+                warn!("Could not begin opening {label}: {error:#}");
+                failed_ids.insert(base_id);
+                continue;
+            }
 
             pending.push((base_id, topology_key, det, rx));
             debug!("Spawned open thread for {label}");
         }
 
-        // Collect results using a single global deadline so that N hung
-        // devices waste at most OPEN_TIMEOUT total, not N × OPEN_TIMEOUT.
+        // A shared deadline bounds startup latency; overdue workers retain ownership until joined.
         let deadline = std::time::Instant::now() + OPEN_TIMEOUT;
-        let mut failed_ids: HashSet<String> = HashSet::new();
         for (base_id, topology_key, det, rx) in pending {
             let DetectedDevice { name, vid, pid, .. } = det;
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -415,7 +471,7 @@ impl ServiceManager {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     warn!(
-                        "Timeout opening {name} ({vid:04x}:{pid:04x}) — skipping; will retry on hotplug"
+                        "Timeout opening {name} ({vid:04x}:{pid:04x}); retry waits for this worker to finish"
                     );
                     failed_ids.insert(base_id);
                 }
@@ -626,6 +682,9 @@ impl ServiceManager {
         &mut self,
         wired_rgb: HashMap<String, std::sync::Arc<dyn lianli_devices::traits::RgbDevice>>,
     ) {
+        if lianli_transport::usb::SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return;
+        }
         let mut all_wired = if let Some(ref rgb) = self.controllers.rgb {
             rgb.lock().drain_wired()
         } else {

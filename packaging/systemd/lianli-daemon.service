@@ -8,6 +8,9 @@ Type=simple
 ExecStart=/usr/bin/lianli-daemon
 Restart=on-failure
 RestartSec=5
+KillMode=mixed
+SendSIGKILL=no
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=default.target

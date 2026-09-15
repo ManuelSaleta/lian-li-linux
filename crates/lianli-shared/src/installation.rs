@@ -2,6 +2,66 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DAEMON_LOCK_PATH: &str = "/run/lianli-daemon.lock";
+pub const SERVICE_OPERATION_LOCK_PATH: &str = "/run/lianli-control.lock";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Passed,
+    Failed,
+    Unavailable,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallationGuide {
+    UsbPermissions,
+    ServiceModes,
+    Distrobox,
+    Troubleshooting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallationFinding {
+    pub code: String,
+    pub state: CheckState,
+    pub severity: FindingSeverity,
+    pub feature: String,
+    pub context: String,
+    pub title: String,
+    pub evidence: String,
+    pub remediation: String,
+    pub guide: InstallationGuide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallationReport {
+    pub context: InstallationContext,
+    #[serde(default)]
+    pub daemon_context: Option<InstallationContext>,
+    pub checked_at_unix_ms: u64,
+    pub findings: Vec<InstallationFinding>,
+    #[serde(default)]
+    pub services: Option<crate::services::ServiceReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInstallationReport {
+    pub instance_id: String,
+    pub uid: u32,
+    #[serde(default)]
+    pub context: Option<InstallationContext>,
+    pub findings: Vec<InstallationFinding>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -41,11 +101,43 @@ impl InstallationContext {
             Self::UnsupportedContainer => None,
         }
     }
+
+    pub fn service_operation_lock_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Native => Some(SERVICE_OPERATION_LOCK_PATH.into()),
+            Self::Distrobox { .. } => {
+                Some(format!("/run/host{SERVICE_OPERATION_LOCK_PATH}").into())
+            }
+            Self::UnsupportedContainer => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_environment_is_optional_for_old_reports_and_independent_of_gui_context() {
+        let old: RuntimeInstallationReport = serde_json::from_value(
+            serde_json::json!({"instance_id":"daemon", "uid":1000, "findings":[]}),
+        )
+        .unwrap();
+        assert!(old.context.is_none());
+        let old_gui: InstallationReport = serde_json::from_value(
+            serde_json::json!({"context":{"kind":"native"}, "checked_at_unix_ms":1, "findings":[]}),
+        )
+        .unwrap();
+        assert!(old_gui.daemon_context.is_none());
+        let mixed: InstallationReport = serde_json::from_value(serde_json::json!({"context":{"kind":"native"}, "daemon_context":{"kind":"distrobox", "name":"fixture"}, "checked_at_unix_ms":1, "findings":[]})).unwrap();
+        assert_eq!(mixed.context, InstallationContext::Native);
+        assert_eq!(
+            mixed.daemon_context,
+            Some(InstallationContext::Distrobox {
+                name: "fixture".into()
+            })
+        );
+    }
 
     #[test]
     fn distrobox_uses_the_host_lock_instead_of_its_private_run_directory() {

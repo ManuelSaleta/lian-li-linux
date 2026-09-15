@@ -1,6 +1,6 @@
 //! Wireless IPC handlers: `BindWirelessDevice`, `UnbindWirelessDevice`.
 
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use super::SharedState;
 use lianli_shared::ipc::{IpcResponse, WirelessOperationStatus};
@@ -78,20 +78,15 @@ pub fn operation(state: &SharedState, id: String) -> IpcResponse {
     }
 }
 
-pub fn bind(state: &SharedState, tx: Sender<DaemonEvent>, mac: String) -> IpcResponse {
+pub fn bind(state: &SharedState, tx: EventSender, mac: String) -> IpcResponse {
     queue_binding(state, tx, mac, true)
 }
 
-pub fn unbind(state: &SharedState, tx: Sender<DaemonEvent>, mac: String) -> IpcResponse {
+pub fn unbind(state: &SharedState, tx: EventSender, mac: String) -> IpcResponse {
     queue_binding(state, tx, mac, false)
 }
 
-fn queue_binding(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    mac: String,
-    bind: bool,
-) -> IpcResponse {
+fn queue_binding(state: &SharedState, tx: EventSender, mac: String, bind: bool) -> IpcResponse {
     if parse_mac(&format!("wireless:{mac}")).is_none() {
         return IpcResponse::error("invalid wireless MAC address");
     }
@@ -120,7 +115,7 @@ fn queue_binding(
     )
 }
 
-pub fn reboot_lcd(tx: Sender<DaemonEvent>, device_id: String) -> IpcResponse {
+pub fn reboot_lcd(tx: EventSender, device_id: String) -> IpcResponse {
     let Some(mac) = parse_mac(&device_id) else {
         return IpcResponse::error("invalid device_id format");
     };
@@ -130,11 +125,7 @@ pub fn reboot_lcd(tx: Sender<DaemonEvent>, device_id: String) -> IpcResponse {
     IpcResponse::ok(serde_json::json!({"message": "LCD reboot queued."}))
 }
 
-pub fn disable_lc217_wifi(
-    tx: Sender<DaemonEvent>,
-    device_id: String,
-    disable: bool,
-) -> IpcResponse {
+pub fn disable_lc217_wifi(tx: EventSender, device_id: String, disable: bool) -> IpcResponse {
     let Some(mac) = parse_mac(&device_id) else {
         return IpcResponse::error("invalid device_id format");
     };
@@ -147,14 +138,14 @@ pub fn disable_lc217_wifi(
     IpcResponse::ok(serde_json::json!({"message": "LC217 wifi toggle queued."}))
 }
 
-pub fn bind_all(tx: Sender<DaemonEvent>) -> IpcResponse {
+pub fn bind_all(tx: EventSender) -> IpcResponse {
     if tx.send(DaemonEvent::BindAll).is_err() {
         return IpcResponse::error("wireless command queue is disconnected");
     }
     IpcResponse::ok(serde_json::json!({"message": "Bind all queued."}))
 }
 
-pub fn unbind_all(tx: Sender<DaemonEvent>) -> IpcResponse {
+pub fn unbind_all(tx: EventSender) -> IpcResponse {
     if tx.send(DaemonEvent::UnbindAll).is_err() {
         return IpcResponse::error("wireless command queue is disconnected");
     }
@@ -229,7 +220,7 @@ mod tests {
         )));
         let (tx, rx) = std::sync::mpsc::channel();
         drop(rx);
-        let result = bind(&state, tx, "01:02:03:04:05:06".into());
+        let result = bind(&state, tx.into(), "01:02:03:04:05:06".into());
         assert!(matches!(result, IpcResponse::Error { .. }));
         assert!(state.lock().wireless_operations.entries.is_empty());
     }

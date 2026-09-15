@@ -1,4 +1,4 @@
-use crate::ipc::{self, DaemonState};
+use crate::ipc::DaemonState;
 use anyhow::Result;
 use lianli_devices::crypto::PacketBuilder;
 use lianli_devices::wireless::WirelessController;
@@ -12,15 +12,17 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use runtime::LcdBackend;
 
 mod aio_lcd_firmware;
 mod display_mode;
 mod init;
+mod lifecycle_monitor;
 mod media;
 mod media_preparation;
+mod open_workers;
 mod pixel_cleaner;
 mod renderers;
 mod runtime;
@@ -31,12 +33,15 @@ mod suspend;
 mod sync;
 
 use aio_lcd_firmware::AioLcdFirmwareTracker;
+use lifecycle_monitor::OperationMonitor;
+pub use lifecycle_monitor::SignalMonitor;
 use subsystems::{Controllers, DeviceRegistry, IpcSubsystem, OpenRgbSubsystem};
 
 use runtime::ActiveTarget;
 
 fn event_label(event: &DaemonEvent) -> &'static str {
     match event {
+        DaemonEvent::Coordinated { .. } => "IpcMutation",
         DaemonEvent::IpcUpdate => "IpcUpdate",
         DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
         DaemonEvent::USBCheck => "USBCheck",
@@ -63,24 +68,6 @@ fn event_label(event: &DaemonEvent) -> &'static str {
     }
 }
 
-struct WatchdogClearGuard(Arc<Mutex<(&'static str, Instant)>>);
-impl Drop for WatchdogClearGuard {
-    fn drop(&mut self) {
-        let mut op = self.0.lock();
-        op.0 = "idle";
-        op.1 = Instant::now();
-    }
-}
-
-/// How long graceful shutdown gets before the process is forced down.
-/// Must exceed the longest blocking USB call, or the device is left mid-transfer.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
-
-/// Set once ServiceManager::shutdown() returns, so the signal-handler watchdog
-/// stands down instead of forcing an exit over a shutdown that already worked.
-pub(crate) static SHUTDOWN_DONE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Parse a colon-separated MAC address string (e.g. `"01:23:45:67:89:AB"`)
 /// into a 6-byte array. Returns `None` on malformed input.
 fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
@@ -102,6 +89,10 @@ const USB_ENUM_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum DaemonEvent {
+    Coordinated {
+        event: Box<DaemonEvent>,
+        permit: Arc<lianli_control::write_gate::ServiceWritePermit>,
+    },
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     RetryOpenRgb,
     USBCheck,
@@ -212,6 +203,16 @@ pub struct ServiceManager {
 }
 
 impl ServiceManager {
+    pub fn set_service_invocation(&mut self, invocation: Option<String>) {
+        self.ipc.state.lock().info.service_invocation = invocation;
+    }
+
+    pub fn set_ownership_lock(&mut self, identity: lianli_shared::daemon::FileIdentity) {
+        let mut state = self.ipc.state.lock();
+        state.info.ownership_lock = Some(identity);
+        state.info.capabilities.push("ownership_lock".into());
+    }
+
     pub fn new(
         config_path: PathBuf,
         socket_path: PathBuf,
@@ -472,7 +473,9 @@ impl ServiceManager {
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.
-    pub fn run(&mut self) -> Result<bool> {
+    pub fn run(&mut self, signals: &SignalMonitor) -> Result<bool> {
+        let mut monitor = OperationMonitor::new()?;
+        let startup = monitor.enter("startup");
         info!("=====================================================================");
         info!("LIAN LI DAEMON");
         info!("=====================================================================");
@@ -500,6 +503,7 @@ impl ServiceManager {
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<DaemonEvent>();
+        signals.attach(tx.clone());
 
         self.tx = Some(tx.clone());
 
@@ -508,28 +512,13 @@ impl ServiceManager {
         tx.send(DaemonEvent::USBCheck).ok();
         tx.send(DaemonEvent::DevicePoll).ok();
 
-        // Load config before IPC starts — prevents GUI from getting empty defaults
-        self.load_config(tx.clone());
-        self.sync_ipc_state();
-
-        // Start IPC server
-        let tx_cloned = tx.clone();
-        self.ipc.thread = Some(ipc::start_ipc_server(
-            Arc::clone(&self.ipc.state),
-            Arc::clone(&self.ipc.stop),
-            tx_cloned,
-            self.socket_path.clone(),
-        ));
-        self.try_wireless();
-        self.wireless_stable_count = self.wireless.devices().len();
-        if self.wireless.has_discovered_devices() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+        self.initialize_runtime(tx.clone(), signals);
+        drop(startup);
+        if signals.requested() {
+            let _shutdown = monitor.enter("shutdown");
+            self.shutdown();
+            return Ok(false);
         }
-        self.init_wired_devices();
-        self.start_openrgb_server();
-        self.ensure_aio_defaults();
-        self.start_fan_control();
-        self.start_aio_control();
 
         // Spawn a thread to regularily check for new USB devices.
         let usb_tx = tx.clone();
@@ -596,102 +585,19 @@ impl ServiceManager {
 
         SysSensor::init();
 
-        let shutdown_tx = tx.clone();
-        thread::spawn(move || {
-            use signal_hook::consts::{SIGINT, SIGTERM};
-            if let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM]) {
-                if let Some(sig) = signals.forever().next() {
-                    info!("received signal {sig}, shutting down");
-                    // Raise this first: worker threads sitting in multi-second
-                    // USB retry loops poll it and bail out, so shutdown()'s
-                    // join() can actually return instead of stalling until the
-                    // grace period forces a mid-transfer exit.
-                    lianli_transport::usb::SHUTTING_DOWN
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = shutdown_tx.send(DaemonEvent::Shutdown);
-                    // Force exit if graceful shutdown stalls (e.g. blocking USB
-                    // call in a worker thread).
-                    //
-                    // FIX: 5s was not enough and the process died with a bulk
-                    // transfer still in flight, which leaves the HydroShift II
-                    // MCU waiting for the rest of a transaction it never gets.
-                    // It then stops servicing its USB stack entirely — no
-                    // descriptors, no bulk — and only a power cycle brings it
-                    // back; a libusb reset does not. Worst case here is the
-                    // interface-claim retry loop (20 x 250ms) plus a 2s read
-                    // timeout, so 5s expired right in the middle of it. Give
-                    // graceful shutdown room to actually finish.
-                    // Only force the process down if graceful shutdown has not
-                    // finished by then; otherwise this watchdog would race the
-                    // re-exec path in main() and kill a daemon that is already
-                    // on its way out cleanly.
-                    let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
-                    while std::time::Instant::now() < deadline {
-                        if SHUTDOWN_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                    // The final sleep can end just after the deadline even
-                    // when shutdown finished during it, so check the flag
-                    // once more before forcing the process down.
-                    if SHUTDOWN_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-                    warn!(
-                        "shutdown exceeded {}s grace period, forcing exit — \
-                         a USB transfer may be left in flight",
-                        SHUTDOWN_GRACE.as_secs()
-                    );
-                    std::process::exit(0);
-                }
-            }
-        });
-
-        let watchdog_op: Arc<Mutex<(&'static str, Instant)>> =
-            Arc::new(Mutex::new(("idle", Instant::now())));
-        {
-            let wd = Arc::clone(&watchdog_op);
-            thread::spawn(move || {
-                let mut warned_5 = false;
-                let mut warned_30 = false;
-                let mut warned_120 = false;
-                loop {
-                    thread::sleep(Duration::from_secs(1));
-                    let (label, since) = *wd.lock();
-                    let elapsed = since.elapsed();
-                    if elapsed >= Duration::from_secs(120) {
-                        if !warned_120 {
-                            error!("WATCHDOG: main loop stuck on '{label}' for 2min+");
-                            warned_120 = true;
-                        }
-                    } else if elapsed >= Duration::from_secs(30) {
-                        if !warned_30 {
-                            warn!("WATCHDOG: main loop stuck on '{label}' for 30s+");
-                            warned_30 = true;
-                        }
-                    } else if elapsed >= Duration::from_secs(5) {
-                        if !warned_5 {
-                            warn!("WATCHDOG: main loop slow: '{label}' taking 5s+");
-                            warned_5 = true;
-                        }
-                    } else {
-                        warned_5 = false;
-                        warned_30 = false;
-                        warned_120 = false;
-                    }
-                }
-            });
-        }
-
         for event in rx {
-            {
-                let mut op = watchdog_op.lock();
-                op.0 = event_label(&event);
-                op.1 = Instant::now();
+            let (event, _write_permit) = match event {
+                DaemonEvent::Coordinated { event, permit } => (*event, Some(permit)),
+                event => (event, None),
+            };
+            if signals.requested() {
+                break;
             }
-            let _watchdog_guard = WatchdogClearGuard(Arc::clone(&watchdog_op));
+            let _operation = monitor.enter(event_label(&event));
             match event {
+                DaemonEvent::Coordinated { .. } => {
+                    warn!("Nested IPC mutation was rejected");
+                }
                 DaemonEvent::Shutdown => {
                     break;
                 }
@@ -953,8 +859,8 @@ impl ServiceManager {
             }
         }
 
+        let _shutdown = monitor.enter("shutdown");
         self.shutdown();
-        SHUTDOWN_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(self.restart_requested)
+        Ok(self.restart_requested && !signals.requested())
     }
 }

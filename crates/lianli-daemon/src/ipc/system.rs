@@ -3,10 +3,7 @@
 
 use lianli_shared::ipc::IpcResponse;
 
-pub fn retry_openrgb(
-    state: &super::SharedState,
-    tx: std::sync::mpsc::Sender<crate::service::DaemonEvent>,
-) -> IpcResponse {
+pub fn retry_openrgb(state: &super::SharedState, tx: super::EventSender) -> IpcResponse {
     let mut state = state.lock();
     let status = &state.telemetry.openrgb_status;
     if !status.enabled || status.running || status.error.is_none() {
@@ -30,7 +27,12 @@ pub fn ping() -> IpcResponse {
 }
 
 pub fn daemon_info(state: &SharedState) -> IpcResponse {
-    IpcResponse::ok(&state.lock().info)
+    let (mut info, gate) = {
+        let state = state.lock();
+        (state.info.clone(), state.write_gate.clone())
+    };
+    info.service_operation_lock = gate.identity().ok();
+    IpcResponse::ok(info)
 }
 
 pub fn list_sensors(state: &SharedState) -> IpcResponse {
@@ -105,7 +107,7 @@ mod tests {
         )));
         let (tx, rx) = mpsc::channel();
         assert!(matches!(
-            retry_openrgb(&state, tx.clone()),
+            retry_openrgb(&state, tx.clone().into()),
             IpcResponse::Error { .. }
         ));
         {
@@ -114,12 +116,12 @@ mod tests {
             state.telemetry.openrgb_status.error = Some("Port in use".into());
         }
         assert!(matches!(
-            retry_openrgb(&state, tx.clone()),
+            retry_openrgb(&state, tx.clone().into()),
             IpcResponse::Ok { .. }
         ));
         assert!(state.lock().openrgb_retry_pending);
         assert!(matches!(
-            retry_openrgb(&state, tx.clone()),
+            retry_openrgb(&state, tx.clone().into()),
             IpcResponse::Error { .. }
         ));
         assert!(matches!(rx.try_recv().unwrap(), DaemonEvent::RetryOpenRgb));
@@ -128,7 +130,7 @@ mod tests {
         state.lock().openrgb_retry_pending = false;
         drop(rx);
         assert!(matches!(
-            retry_openrgb(&state, tx),
+            retry_openrgb(&state, tx.into()),
             IpcResponse::Error { .. }
         ));
         assert!(!state.lock().openrgb_retry_pending);

@@ -1,6 +1,6 @@
 //! LCD IPC handlers: `SwitchDisplayMode`, `RenderTemplatePreview`.
 
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use lianli_media::CustomAsset;
 use lianli_shared::ipc::IpcResponse;
@@ -9,11 +9,7 @@ use lianli_shared::screen::ScreenInfo;
 use crate::ipc::SharedState;
 use crate::service::DaemonEvent;
 
-pub fn switch_display_mode(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    device_id: String,
-) -> IpcResponse {
+pub fn switch_display_mode(state: &SharedState, tx: EventSender, device_id: String) -> IpcResponse {
     let (family, pid) = {
         let state = state.lock();
         match state.devices.iter().find(|d| d.device_id == device_id) {

@@ -1,6 +1,8 @@
 mod controllers;
 mod desktop_display;
 mod ipc;
+mod media_access;
+mod media_decode;
 mod openrgb_server;
 mod persistence;
 mod pidlock;
@@ -54,6 +56,10 @@ struct Cli {
     #[arg(long)]
     system: bool,
 
+    /// Runtime invocation ID supplied by the host service wrapper
+    #[arg(long, hide = true, value_parser = lianli_shared::daemon::parse_service_invocation)]
+    service_invocation: Option<String>,
+
     /// Logging verbosity (error, warn, info, debug, trace)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -64,6 +70,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Print build and IPC capabilities without loading configuration or accessing hardware
+    Capabilities,
+    /// Validate an opened media file without starting hardware control
+    #[command(hide = true)]
+    CheckMediaDecode {
+        #[arg(long, value_enum)]
+        kind: media_decode::Kind,
+        #[arg(long)]
+        extension: Option<String>,
+    },
+    /// Check JSON media dependencies from stdin without starting hardware control
+    #[command(hide = true)]
+    CheckMediaAccess,
     /// LCD utilities and maintenance
     Lcd {
         #[command(subcommand)]
@@ -109,11 +128,21 @@ fn main() -> anyhow::Result<()> {
     let config = cli.config.unwrap_or_else(|| default_config_path(system));
     let socket = cli.socket.unwrap_or_else(|| default_socket_path(system));
 
-    if let Some(Commands::Lcd {
-        command: LcdCommands::Clean { device_id, minutes },
-    }) = cli.command
-    {
-        return pixel_cleaner::run_clean_command(socket, device_id, minutes);
+    match cli.command {
+        Some(Commands::Capabilities) => {
+            serde_json::to_writer(std::io::stdout().lock(), &ipc::build_info())?;
+            return Ok(());
+        }
+        Some(Commands::CheckMediaAccess) => return media_access::run_cli(),
+        Some(Commands::CheckMediaDecode { kind, extension }) => {
+            return media_decode::run(kind, extension.as_deref())
+        }
+        Some(Commands::Lcd {
+            command: LcdCommands::Clean { device_id, minutes },
+        }) => {
+            return pixel_cleaner::run_clean_command(socket, device_id, minutes);
+        }
+        None => {}
     }
 
     tracing_subscriber::fmt()
@@ -123,7 +152,29 @@ fn main() -> anyhow::Result<()> {
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .init();
 
-    let _pidlock = pidlock::PidLock::acquire()?;
+    let signals = service::SignalMonitor::new()?;
+    let context = lianli_shared::installation::InstallationContext::detect();
+    let scope = if system {
+        lianli_shared::services::ServiceScope::System
+    } else {
+        lianli_shared::services::ServiceScope::User
+    };
+    if !lianli_control::service_selection::launch_allowed(&context, scope)? {
+        tracing::info!(
+            "Hardware startup is paused or another service mode/account is selected; this launch is inactive"
+        );
+        return Ok(());
+    }
+    let pidlock = pidlock::PidLock::acquire()?;
+    if !lianli_control::service_selection::launch_allowed(&context, scope)? {
+        tracing::info!(
+            "Hardware service selection changed before startup; this launch is inactive"
+        );
+        return Ok(());
+    }
+    if let Some(backup) = lianli_control::state_transaction::recover(&config)? {
+        tracing::warn!(backup = %backup, "Recovered interrupted state publication before starting hardware control");
+    }
 
     let mode = if system {
         lianli_shared::daemon::DaemonMode::System
@@ -131,9 +182,11 @@ fn main() -> anyhow::Result<()> {
         lianli_shared::daemon::DaemonMode::User
     };
     let mut manager = service::ServiceManager::new(config, socket, mode)?;
-    let restart = manager.run()?;
+    manager.set_ownership_lock(pidlock.identity()?);
+    manager.set_service_invocation(cli.service_invocation);
+    let restart = manager.run(&signals)?;
 
-    if restart {
+    if restart && !signals.requested() {
         use std::os::unix::process::CommandExt;
         let exe = std::env::current_exe()?;
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -149,6 +202,25 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_invocation_is_optional_but_must_be_valid_before_startup() {
+        assert!(Cli::try_parse_from(["lianli-daemon"])
+            .unwrap()
+            .service_invocation
+            .is_none());
+        assert!(Cli::try_parse_from(["lianli-daemon", "--service-invocation", "invalid"]).is_err());
+        let parsed = Cli::try_parse_from([
+            "lianli-daemon",
+            "--service-invocation",
+            "ABCDEF0123456789ABCDEF0123456789",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.service_invocation.as_deref(),
+            Some("abcdef0123456789abcdef0123456789")
+        );
+    }
 
     #[test]
     fn cleaner_duration_rejects_nonpositive_and_invalid_input() {

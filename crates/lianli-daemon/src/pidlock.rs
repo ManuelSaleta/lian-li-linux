@@ -2,13 +2,13 @@ use anyhow::{bail, Context, Result};
 use lianli_shared::installation::InstallationContext;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use tracing::{info, warn};
 
 pub struct PidLock {
-    _file: File,
+    file: File,
 }
 
 #[derive(Debug)]
@@ -26,7 +26,7 @@ impl PidLock {
         match lock_pidfile(&path) {
             Ok(file) => {
                 info!("Acquired shared daemon lock at {}", path.display());
-                Ok(Self { _file: file })
+                Ok(Self { file })
             }
             Err(LockFailure::HeldByAnother(pid)) => bail!(
                 "Another lianli-daemon holds {} (reported PID {}). Stop the active daemon before switching service modes.",
@@ -37,6 +37,14 @@ impl PidLock {
                 path.display()
             )),
         }
+    }
+
+    pub fn identity(&self) -> Result<lianli_shared::daemon::FileIdentity> {
+        let metadata = self.file.metadata()?;
+        Ok(lianli_shared::daemon::FileIdentity {
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+        })
     }
 }
 
@@ -96,6 +104,24 @@ fn lock_pidfile(path: &Path) -> std::result::Result<File, LockFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_identity_tracks_the_held_file_after_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("lock");
+        std::fs::write(&path, "").unwrap();
+        let held = PidLock {
+            file: lock_pidfile(&path).unwrap(),
+        };
+        let original = held.identity().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "123").unwrap();
+        assert_eq!(held.identity().unwrap(), original);
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino().to_string(),
+            original.inode
+        );
+    }
 
     #[test]
     fn independent_opens_cannot_hold_the_same_lock() {

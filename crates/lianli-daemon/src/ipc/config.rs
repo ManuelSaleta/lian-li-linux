@@ -1,6 +1,6 @@
 //! Configuration changes become visible only after successful persistence.
 
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use lianli_shared::config::LcdConfig;
 use lianli_shared::fan::FanConfig;
@@ -8,11 +8,10 @@ use lianli_shared::ipc::IpcResponse;
 use lianli_shared::rgb::RgbAppConfig;
 
 use crate::ipc::{persist_and_notify, SharedState};
-use crate::service::DaemonEvent;
 
 pub fn set_lcd_media(
     state: &SharedState,
-    tx: Sender<DaemonEvent>,
+    tx: EventSender,
     device_id: String,
     config: LcdConfig,
 ) -> IpcResponse {
@@ -30,22 +29,14 @@ pub fn set_lcd_media(
     persist_and_notify(&mut state, &tx, "SetLcdMedia", app_config)
 }
 
-pub fn set_fan_config(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    config: FanConfig,
-) -> IpcResponse {
+pub fn set_fan_config(state: &SharedState, tx: EventSender, config: FanConfig) -> IpcResponse {
     let mut state = state.lock();
     let mut app_config = state.config.clone().unwrap_or_default();
     app_config.fans = Some(config);
     persist_and_notify(&mut state, &tx, "SetFanConfig", app_config)
 }
 
-pub fn set_rgb_config(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    config: RgbAppConfig,
-) -> IpcResponse {
+pub fn set_rgb_config(state: &SharedState, tx: EventSender, config: RgbAppConfig) -> IpcResponse {
     if let Some(response) = super::rgb::validate_config(state, &config) {
         return response;
     }

@@ -12,7 +12,9 @@
 //! - [`templates`] — LCD template CRUD.
 //! - [`presets`] — RGB preset save / load / delete / apply.
 
+mod event_sender;
 mod server;
+mod service_stop;
 
 pub mod catalog;
 pub mod config;
@@ -25,9 +27,8 @@ pub mod system;
 pub mod templates;
 pub mod wireless;
 
-pub use server::{start_ipc_server, DaemonState, PixelCleanState};
-
-use std::sync::mpsc::Sender;
+pub(crate) use event_sender::EventSender;
+pub use server::{build_info, start_ipc_server, DaemonState, PixelCleanState};
 
 use lianli_shared::ipc::IpcResponse;
 use parking_lot::Mutex;
@@ -42,7 +43,7 @@ pub(crate) type SharedState = Arc<Mutex<DaemonState>>;
 
 pub(crate) fn persist_and_notify(
     state: &mut DaemonState,
-    tx: &Sender<DaemonEvent>,
+    tx: &EventSender,
     label: &str,
     config: lianli_shared::config::AppConfig,
 ) -> IpcResponse {

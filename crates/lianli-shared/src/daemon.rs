@@ -3,6 +3,32 @@ use std::path::PathBuf;
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
 pub const GUARDED_WRITES: &str = "guarded_writes";
+pub const GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
+pub const SERVICE_STOP: &str = "service_stop";
+pub const SERVICE_WRITE_GATE: &str = "service_write_gate";
+pub const SERVICE_SELECTION: &str = "service_selection";
+pub const SERVICE_STARTUP_GATE: &str = "service_startup_gate";
+pub const MEDIA_DECODE: &str = "media_decode";
+pub const INSTALLATION_HEALTH: &str = "installation_health";
+pub const DESKTOP_RETRY: &str = "desktop_retry";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonBuildInfo {
+    pub version: String,
+    pub protocol_version: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+pub fn parse_service_invocation(value: &str) -> Result<String, String> {
+    if value.len() != 32
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value.bytes().all(|byte| byte == b'0')
+    {
+        return Err("Service invocation must be a nonzero 32-character hexadecimal ID".into());
+    }
+    Ok(value.to_ascii_lowercase())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteGuard {
@@ -64,6 +90,18 @@ pub struct DaemonInfo {
     pub config_path: PathBuf,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub ownership_lock: Option<FileIdentity>,
+    #[serde(default)]
+    pub service_invocation: Option<String>,
+    #[serde(default)]
+    pub service_operation_lock: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIdentity {
+    pub device: String,
+    pub inode: String,
 }
 
 #[cfg(test)]
@@ -81,7 +119,42 @@ mod tests {
             mode: DaemonMode::User,
             config_path: "/example/config.json".into(),
             capabilities: vec![GUARDED_WRITES.into()],
+            ownership_lock: None,
+            service_invocation: None,
+            service_operation_lock: None,
         }
+    }
+
+    #[test]
+    fn service_invocation_validation_and_legacy_identity_defaults() {
+        let valid = "abcdef0123456789abcdef0123456789";
+        assert_eq!(
+            parse_service_invocation(&valid.to_ascii_uppercase()).unwrap(),
+            valid
+        );
+        for invalid in [
+            "",
+            "0",
+            "00000000000000000000000000000000",
+            "g123456789abcdef0123456789abcdef",
+            " abcdef0123456789abcdef0123456789",
+        ] {
+            assert!(parse_service_invocation(invalid).is_err());
+        }
+        let mut legacy = serde_json::to_value(current()).unwrap();
+        legacy.as_object_mut().unwrap().remove("service_invocation");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("service_operation_lock");
+        let legacy = serde_json::from_value::<DaemonInfo>(legacy).unwrap();
+        assert!(legacy.service_invocation.is_none());
+        assert!(legacy.service_operation_lock.is_none());
+        let request = IpcRequest::StopService {
+            invocation_id: valid.into(),
+        };
+        assert!(!request.is_read_only());
+        assert!(request.authorize(&current()).is_err());
     }
 
     #[test]

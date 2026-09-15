@@ -1,7 +1,7 @@
 //! RGB preset handlers: `SaveRgbPreset`, `DeleteRgbPreset`, `ListRgbPresets`,
 //! `ApplyRgbPreset`.
 
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use lianli_shared::ipc::IpcResponse;
 use lianli_shared::rgb::{RgbDeviceConfig, RgbMode, RgbPreset, RgbPresetZone, RgbZoneConfig};
@@ -10,12 +10,7 @@ use tracing::info;
 use crate::ipc::{DaemonState, SharedState};
 use crate::service::DaemonEvent;
 
-pub fn save(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    name: String,
-    device_id: String,
-) -> IpcResponse {
+pub fn save(state: &SharedState, tx: EventSender, name: String, device_id: String) -> IpcResponse {
     let (zones, regions) = {
         let state = state.lock();
 
@@ -108,7 +103,7 @@ pub fn save(
 
 pub fn delete(
     state: &SharedState,
-    tx: Sender<DaemonEvent>,
+    tx: EventSender,
     name: String,
     device_id: String,
 ) -> IpcResponse {
@@ -127,12 +122,7 @@ pub fn list(state: &SharedState) -> IpcResponse {
     IpcResponse::ok(&state.rgb_presets)
 }
 
-pub fn apply(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    name: String,
-    device_id: String,
-) -> IpcResponse {
+pub fn apply(state: &SharedState, tx: EventSender, name: String, device_id: String) -> IpcResponse {
     let preset = {
         let state = state.lock();
         state
@@ -233,7 +223,7 @@ fn apply_config_and_leds(
 /// Persist the preset list and send an `IpcUpdate` event.
 fn save_and_notify(
     state: &mut DaemonState,
-    tx: &Sender<DaemonEvent>,
+    tx: &EventSender,
     name: &str,
     presets: Vec<RgbPreset>,
 ) -> IpcResponse {

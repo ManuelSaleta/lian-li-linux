@@ -110,6 +110,9 @@ export interface DaemonInfo {
   mode: "user" | "system" | "unknown";
   config_path: string;
   capabilities: string[];
+  ownership_lock?: { device: string; inode: string } | null;
+  service_invocation?: string | null;
+  service_operation_lock?: { device: string; inode: string } | null;
 }
 
 export interface PollResult {

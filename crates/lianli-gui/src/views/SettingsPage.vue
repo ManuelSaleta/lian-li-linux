@@ -8,6 +8,7 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import StatusDot from "@/components/common/StatusDot.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
+import ServiceStatus from "@/components/common/ServiceStatus.vue";
 import { useIpc } from "@/composables/useIpc";
 
 const REPO_URL = "https://github.com/sgtaziz/lian-li-linux";
@@ -180,6 +181,8 @@ function onHidBackend(v: "hidraw" | "rusb") {
       </n-alert>
       <p v-if="daemon.connected && !daemon.info?.capabilities.includes('hardware_video')" class="hint">Update the daemon to manage hardware video from Settings.</p>
     </section>
+
+    <ServiceStatus />
 
     <!-- Thermal alert -->
     <section class="card">

@@ -37,6 +37,7 @@ pub struct PixelCleanState {
 
 /// Shared state between the daemon main loop and the IPC server thread.
 pub struct DaemonState {
+    pub write_gate: Arc<lianli_control::write_gate::ServiceWriteGate>,
     pub info: DaemonInfo,
     pub config: Option<AppConfig>,
     pub config_path: PathBuf,
@@ -53,6 +54,28 @@ pub struct DaemonState {
     pub pixel_clean_preparation: Option<(u64, bool, Option<String>)>,
 }
 
+pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
+    lianli_shared::daemon::DaemonBuildInfo {
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol_version: IPC_PROTOCOL_VERSION,
+        capabilities: vec![
+            lianli_shared::daemon::GUARDED_WRITES.into(),
+            lianli_shared::daemon::GRACEFUL_SHUTDOWN.into(),
+            lianli_shared::daemon::SERVICE_STOP.into(),
+            lianli_shared::daemon::SERVICE_WRITE_GATE.into(),
+            lianli_shared::daemon::SERVICE_SELECTION.into(),
+            lianli_shared::daemon::SERVICE_STARTUP_GATE.into(),
+            lianli_shared::daemon::MEDIA_DECODE.into(),
+            "daemon_info".into(),
+            "hardware_video".into(),
+            "media_preparation".into(),
+            "openrgb_retry".into(),
+            "media_access".into(),
+            "state_recovery".into(),
+        ],
+    }
+}
+
 impl DaemonState {
     pub fn new(config_path: PathBuf) -> Self {
         let presets_path = config_path
@@ -64,6 +87,9 @@ impl DaemonState {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         Self {
+            write_gate: Arc::new(lianli_control::write_gate::ServiceWriteGate::new(
+                &lianli_shared::installation::InstallationContext::detect(),
+            )),
             info: DaemonInfo {
                 version: env!("CARGO_PKG_VERSION").into(),
                 protocol_version: IPC_PROTOCOL_VERSION,
@@ -71,13 +97,10 @@ impl DaemonState {
                 pid: std::process::id(),
                 mode: DaemonMode::User,
                 config_path: config_path.clone(),
-                capabilities: vec![
-                    lianli_shared::daemon::GUARDED_WRITES.into(),
-                    "daemon_info".into(),
-                    "hardware_video".into(),
-                    "media_preparation".into(),
-                    "openrgb_retry".into(),
-                ],
+                ownership_lock: None,
+                service_invocation: None,
+                service_operation_lock: None,
+                capabilities: build_info().capabilities,
             },
             config: None,
             config_path,
@@ -200,6 +223,8 @@ fn handle_connection(
     state: Arc<Mutex<DaemonState>>,
     tx: Sender<DaemonEvent>,
 ) -> anyhow::Result<()> {
+    let peer_uid = super::service_stop::peer_uid(&stream)?;
+    let write_gate = state.lock().write_gate.clone();
     let reader = BufReader::new(&stream);
     let mut writer = &stream;
 
@@ -220,7 +245,28 @@ fn handle_connection(
 
         let authorized = request.authorize(&state.lock().info);
         let response = match authorized {
-            Ok(request) => handle_request(request, &state, tx.clone()),
+            Ok(IpcRequest::StopService { invocation_id }) => {
+                let info = state.lock().info.clone();
+                super::service_stop::request(
+                    &info,
+                    &invocation_id,
+                    peer_uid,
+                    unsafe { libc::geteuid() },
+                    || signal_hook::low_level::raise(signal_hook::consts::SIGTERM),
+                )
+            }
+            Ok(request) => match write_gate.guard(&request) {
+                Ok(permit) => {
+                    let sender = super::EventSender::new(tx.clone(), permit);
+                    let response = handle_request(request, &state, sender.clone());
+                    if sender.delivery_failed() && matches!(response, IpcResponse::Ok { .. }) {
+                        IpcResponse::error("The daemon stopped before applying this request; some changes may already be saved. Reconnect and review settings before retrying")
+                    } else {
+                        response
+                    }
+                }
+                Err(error) => IpcResponse::error(format!("{error:#}")),
+            },
             Err(message) => IpcResponse::error(message),
         };
         write_response(&mut writer, &response)?;
@@ -232,10 +278,13 @@ fn handle_connection(
 fn handle_request(
     request: IpcRequest,
     state: &Arc<Mutex<DaemonState>>,
-    tx: Sender<DaemonEvent>,
+    tx: super::EventSender,
 ) -> IpcResponse {
     match request {
         IpcRequest::Guarded { .. } => IpcResponse::error("Request was not authorized"),
+        IpcRequest::StopService { .. } => {
+            IpcResponse::error("Service stop requires authenticated peer credentials")
+        }
         IpcRequest::Ping => super::system::ping(),
         IpcRequest::RetryOpenRgb => super::system::retry_openrgb(state, tx),
         IpcRequest::GetDaemonInfo => super::system::daemon_info(state),
@@ -493,10 +542,25 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn socket_rejects_legacy_and_stale_writes_before_persistence() {
+    fn socket_serializes_service_operations_with_authorized_config_writes() {
+        use std::os::fd::AsRawFd;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.json");
         let mut daemon = DaemonState::new(path.clone());
+        let control = root.path().join("control.lock");
+        fs::write(&control, "").unwrap();
+        daemon.write_gate = Arc::new(lianli_control::write_gate::ServiceWriteGate::from_path(
+            control.clone(),
+            false,
+        ));
+        let operation = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(control)
+            .unwrap();
+        let reserve =
+            || unsafe { libc::flock(operation.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(reserve(), 0);
         daemon.config = Some(AppConfig::default());
         let info = daemon.info.clone();
         let state = Arc::new(Mutex::new(daemon));
@@ -521,7 +585,7 @@ mod tests {
         };
         let write = IpcRequest::SetConfig {
             config: Box::new(AppConfig {
-                default_fps: 24.0,
+                hardware_video: true,
                 ..Default::default()
             }),
         };
@@ -540,8 +604,20 @@ mod tests {
             IpcResponse::Error { .. }
         ));
         assert!(!path.exists());
-        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 30.0);
+        assert!(!state.lock().config.as_ref().unwrap().hardware_video);
         assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            exchange(IpcRequest::Guarded {
+                guard: info.write_guard(env!("CARGO_PKG_VERSION")).unwrap(),
+                request: Box::new(write.clone()),
+            }),
+            IpcResponse::Error { .. }
+        ));
+        assert!(!path.exists());
+        assert_eq!(
+            unsafe { libc::flock(operation.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
         assert!(matches!(
             exchange(IpcRequest::Guarded {
                 guard: info.write_guard(env!("CARGO_PKG_VERSION")).unwrap(),
@@ -550,8 +626,34 @@ mod tests {
             IpcResponse::Ok { .. }
         ));
         assert!(path.is_file());
-        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 24.0);
-        assert!(matches!(rx.try_recv(), Ok(DaemonEvent::IpcUpdate)));
+        assert!(state.lock().config.as_ref().unwrap().hardware_video);
+        assert_ne!(reserve(), 0);
+        let DaemonEvent::Coordinated { event, permit } = rx.try_recv().unwrap() else {
+            panic!("write permit was not queued")
+        };
+        assert!(matches!(*event, DaemonEvent::IpcUpdate));
+        assert_ne!(reserve(), 0);
+        drop(permit);
+        assert_eq!(reserve(), 0);
+        assert!(matches!(
+            exchange(IpcRequest::GetConfig),
+            IpcResponse::Ok { .. }
+        ));
+        assert_eq!(
+            unsafe { libc::flock(operation.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
+        drop(rx);
+        assert!(matches!(
+            exchange(IpcRequest::Guarded {
+                guard: info.write_guard(env!("CARGO_PKG_VERSION")).unwrap(),
+                request: Box::new(IpcRequest::SetConfig {
+                    config: Box::default()
+                }),
+            }),
+            IpcResponse::Error { .. }
+        ));
+        assert!(!state.lock().config.as_ref().unwrap().hardware_video);
     }
 
     #[test]
@@ -564,7 +666,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::fs::create_dir(&path).unwrap();
         let requested = AppConfig {
-            default_fps: 24.0,
+            hardware_video: true,
             ..Default::default()
         };
         let response = handle_request(
@@ -572,10 +674,10 @@ mod tests {
                 config: Box::new(requested.clone()),
             },
             &state,
-            tx.clone(),
+            tx.clone().into(),
         );
         assert!(matches!(response, IpcResponse::Error { .. }));
-        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 30.0);
+        assert!(!state.lock().config.as_ref().unwrap().hardware_video);
         assert!(rx.try_recv().is_err());
         std::fs::remove_dir(&path).unwrap();
         let response = handle_request(
@@ -583,23 +685,28 @@ mod tests {
                 config: Box::new(requested),
             },
             &state,
-            tx,
+            tx.into(),
         );
         assert!(matches!(response, IpcResponse::Ok { .. }));
-        assert_eq!(state.lock().config.as_ref().unwrap().default_fps, 24.0);
+        assert!(state.lock().config.as_ref().unwrap().hardware_video);
         assert!(matches!(rx.try_recv(), Ok(DaemonEvent::IpcUpdate)));
     }
 
     #[test]
     fn identity_reports_launch_scope_without_changing_ping_or_queueing_work() {
+        let root = tempfile::tempdir().unwrap();
         let mut daemon = DaemonState::new("/custom/config.json".into());
+        daemon.write_gate = Arc::new(lianli_control::write_gate::ServiceWriteGate::from_path(
+            root.path().join("missing"),
+            false,
+        ));
         daemon.info.mode = DaemonMode::System;
         let expected = daemon.info.clone();
         let state = Arc::new(Mutex::new(daemon));
         let (tx, rx) = std::sync::mpsc::channel();
         for _ in 0..2 {
             let IpcResponse::Ok { data } =
-                handle_request(IpcRequest::GetDaemonInfo, &state, tx.clone())
+                handle_request(IpcRequest::GetDaemonInfo, &state, tx.clone().into())
             else {
                 panic!("identity request failed");
             };
@@ -608,7 +715,7 @@ mod tests {
                 expected
             );
         }
-        let IpcResponse::Ok { data } = handle_request(IpcRequest::Ping, &state, tx) else {
+        let IpcResponse::Ok { data } = handle_request(IpcRequest::Ping, &state, tx.into()) else {
             panic!("ping failed");
         };
         assert_eq!(data, "pong");
@@ -631,7 +738,7 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                handle_request(request, &state, tx.clone()),
+                handle_request(request, &state, tx.clone().into()),
                 IpcResponse::Error { .. }
             ));
         }

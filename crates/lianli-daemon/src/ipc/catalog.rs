@@ -1,5 +1,5 @@
+use super::EventSender;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 
 use lianli_shared::ipc::IpcResponse;
 use lianli_shared::template::catalog::{self, CatalogTemplate};
@@ -9,11 +9,7 @@ use crate::ipc::SharedState;
 use crate::service::DaemonEvent;
 use crate::template_store;
 
-pub fn install(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    template: CatalogTemplate,
-) -> IpcResponse {
+pub fn install(state: &SharedState, tx: EventSender, template: CatalogTemplate) -> IpcResponse {
     let config_dir = {
         let s = state.lock();
         s.config_path

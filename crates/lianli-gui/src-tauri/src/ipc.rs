@@ -305,6 +305,9 @@ mod tests {
             pid: 123,
             mode: DaemonMode::System,
             config_path: "/var/lib/lianli/config.json".into(),
+            ownership_lock: None,
+            service_invocation: None,
+            service_operation_lock: None,
             capabilities: vec!["daemon_info".into()],
         }
     }

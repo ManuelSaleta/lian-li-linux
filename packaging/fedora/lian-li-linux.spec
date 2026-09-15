@@ -37,6 +37,8 @@ Requires:       ffmpeg
 # evdi kernel module for desktop-mode devices
 Recommends:     displaylink
 
+Recommends:     polkit
+
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
@@ -71,6 +73,13 @@ install -Dpm644 assets/icons/32x32.png      %{buildroot}%{_datadir}/icons/hicolo
 install -Dpm644 assets/icons/128x128.png    %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/com.sgtaziz.lianlilinux.png
 install -Dpm644 assets/icons/128x128@2x.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/com.sgtaziz.lianlilinux.png
 install -Dpm644 assets/icons/icon.svg       %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.sgtaziz.lianlilinux.svg
+
+install -Dpm755 target/release/lianli-control %{buildroot}%{_bindir}/lianli-control
+install -Dpm644 packaging/systemd/lianli-control-recovery.service %{buildroot}%{_unitdir}/lianli-control-recovery.service
+install -d %{buildroot}%{_unitdir}/multi-user.target.wants
+ln -s ../lianli-control-recovery.service %{buildroot}%{_unitdir}/multi-user.target.wants/lianli-control-recovery.service
+install -Dpm644 packaging/polkit/49-lianli-recovery.rules %{buildroot}%{_datadir}/polkit-1/rules.d/49-lianli-recovery.rules
+install -Dpm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
 
 %pre
 getent group lianli >/dev/null || groupadd -r lianli
@@ -114,6 +123,11 @@ fi
 %license LICENSE
 %{_bindir}/lianli-daemon
 %{_bindir}/lianli-gui
+%{_bindir}/lianli-control
+%{_unitdir}/lianli-control-recovery.service
+%{_unitdir}/multi-user.target.wants/lianli-control-recovery.service
+%{_datadir}/polkit-1/rules.d/49-lianli-recovery.rules
+%config(noreplace) %{_sysconfdir}/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
 %{_udevrulesdir}/60-lianli.rules
 %{_userunitdir}/lianli-daemon.service
 %{_unitdir}/lianli-daemon-system.service

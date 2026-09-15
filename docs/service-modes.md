@@ -54,6 +54,40 @@ Distrobox documents its host filesystem sharing and volume options in
 
 ## Switch native service modes
 
+Open Settings to select User or System service. The GUI shows the current owner,
+disables switching to the current mode, and offers to copy settings and media or use
+the destination account's saved settings. On a fresh installation, select one mode
+to set up its exclusive startup selection. Save or discard edits before switching.
+
+Native switching requires the installed, root-owned `/usr/bin/lianli-control`,
+the supplied systemd units, Polkit/pkexec and a desktop authentication agent.
+The switch runs independently of the GUI in `lianli-control-switch.service`.
+If interrupted, reopen Settings and use Recover switch. Automatic recovery is
+also requested at boot, graphical login and GUI launch. Details are recorded in
+`journalctl -u lianli-control-switch.service` and
+`journalctl -u lianli-control-recovery.service`.
+
+Source installations must also install the control binary and recovery files:
+
+```sh
+sudo install -Dm755 target/release/lianli-control /usr/bin/lianli-control
+sudo install -Dm644 packaging/systemd/lianli-daemon.service /usr/lib/systemd/user/lianli-daemon.service
+sudo install -Dm644 packaging/systemd/lianli-daemon-system.service /usr/lib/systemd/system/lianli-daemon-system.service
+sudo install -Dm644 packaging/systemd/lianli-control-recovery.service /usr/lib/systemd/system/lianli-control-recovery.service
+sudo install -d /usr/lib/systemd/system/multi-user.target.wants
+sudo ln -sf ../lianli-control-recovery.service /usr/lib/systemd/system/multi-user.target.wants/lianli-control-recovery.service
+sudo install -Dm644 packaging/polkit/49-lianli-recovery.rules /usr/share/polkit-1/rules.d/49-lianli-recovery.rules
+sudo install -Dm644 packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop /etc/xdg/autostart/com.sgtaziz.lianlilinux.recovery.desktop
+sudo install -Dm644 packaging/tmpfiles.d/lianli.conf /usr/lib/tmpfiles.d/lianli.conf
+sudo systemd-tmpfiles --create lianli.conf
+sudo systemctl daemon-reload
+systemctl --user daemon-reload
+```
+
+Once the GUI records a service selection, manual starts in the other mode remain
+inactive. Use the GUI to change that selection. The commands below apply to an
+installation without a recorded selection.
+
 Configurations are separate: user mode normally uses `~/.config/lianli/config.json`, while
 system mode uses `/var/lib/lianli/config.json`. Templates, presets and media must also be
 accessible to the destination daemon. Back up both configurations before transferring settings.

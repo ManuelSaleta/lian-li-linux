@@ -53,7 +53,7 @@ fn unchanged_rgb_can_be_saved_when_wireless_is_unavailable() {
     config.hardware_video = true;
     let (tx, rx) = std::sync::mpsc::channel();
     assert!(matches!(
-        crate::ipc::persist_and_notify(&mut state.lock(), &tx, "SetConfig", config),
+        crate::ipc::persist_and_notify(&mut state.lock(), &tx.into(), "SetConfig", config),
         lianli_shared::ipc::IpcResponse::Ok { .. }
     ));
     assert!(matches!(

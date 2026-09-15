@@ -6,6 +6,7 @@ edition = "2021"
 resolver = "2"
 members = [
     "crates/lianli-shared",
+    "crates/lianli-control",
     "crates/lianli-transport",
     "crates/lianli-devices",
     "crates/lianli-evdi",

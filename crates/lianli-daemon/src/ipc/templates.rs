@@ -1,6 +1,6 @@
 //! LCD template IPC handlers: `GetLcdTemplates`, `SetLcdTemplates`.
 
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use lianli_shared::ipc::IpcResponse;
 use lianli_shared::template::LcdTemplate;
@@ -17,11 +17,7 @@ pub fn get(state: &SharedState) -> IpcResponse {
     IpcResponse::ok(&all)
 }
 
-pub fn set(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    templates: Vec<LcdTemplate>,
-) -> IpcResponse {
+pub fn set(state: &SharedState, tx: EventSender, templates: Vec<LcdTemplate>) -> IpcResponse {
     let mut state = state.lock();
     let path = state.templates_path();
     match template_store::save_user_templates(&path, &templates) {

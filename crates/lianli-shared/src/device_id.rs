@@ -216,6 +216,8 @@ impl UsbId {
     }
 }
 
+pub const V2_HID_COMPANION: UsbId = UsbId::new(0x1a86, 0x2107);
+
 /// Known device entry: maps USB IDs to a device family.
 #[derive(Debug, Clone)]
 pub struct DeviceEntry {

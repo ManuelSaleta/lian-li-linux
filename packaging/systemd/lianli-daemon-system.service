@@ -10,6 +10,9 @@ StateDirectory=lianli
 ExecStart=/usr/bin/lianli-daemon --system
 Restart=on-failure
 RestartSec=5
+KillMode=mixed
+SendSIGKILL=no
+TimeoutStopSec=30s
 NoNewPrivileges=true
 
 [Install]

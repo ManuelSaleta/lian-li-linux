@@ -147,13 +147,8 @@ impl Default for Controllers {
 use lianli_devices::traits::{FanDevice, LcdDevice};
 use std::collections::{HashMap, HashSet};
 
-/// Wired USB device registry: shared fan device handles, cached HID backends,
-/// cached USB device list for IPC sync, hot-plug tracking, and TL LCD port
-/// indices.
-///
-/// All five fields move together whenever a device is plugged or unplugged,
-/// so keeping them in one struct makes the lifecycle obvious.
 pub struct DeviceRegistry {
+    pub(super) open_workers: super::open_workers::OpenWorkers,
     /// Per-port `DeviceInfo` for wired fan devices (populated by init).
     pub fan_device_info: Vec<DeviceInfo>,
     /// Shared reference to wired fan device handles (for RPM reading).
@@ -180,6 +175,7 @@ pub struct DeviceRegistry {
 impl DeviceRegistry {
     pub fn new() -> Self {
         Self {
+            open_workers: Default::default(),
             fan_device_info: Vec::new(),
             fan_devices: Arc::new(HashMap::new()),
             hid_backends: HashMap::new(),
@@ -198,6 +194,7 @@ impl DeviceRegistry {
 
     /// Clear all device state (called on shutdown).
     pub fn clear(&mut self) {
+        self.open_workers.finish();
         self.fan_device_info.clear();
         self.fan_devices = Arc::new(HashMap::new());
         self.hid_backends.clear();

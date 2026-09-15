@@ -1,4 +1,4 @@
-use std::sync::mpsc::Sender;
+use super::EventSender;
 
 use lianli_shared::ipc::IpcResponse;
 use lianli_shared::profile::DeviceProfile;
@@ -46,12 +46,7 @@ fn read_all_profiles(state: &DaemonState) -> Vec<DeviceProfile> {
     profiles
 }
 
-pub fn save(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    name: String,
-    device_id: String,
-) -> IpcResponse {
+pub fn save(state: &SharedState, tx: EventSender, name: String, device_id: String) -> IpcResponse {
     let st = state.lock();
     let device = st.devices.iter().find(|d| d.device_id == device_id);
     let family = device
@@ -80,7 +75,7 @@ pub fn save(
     IpcResponse::ok(serde_json::json!(null))
 }
 
-pub fn delete(state: &SharedState, tx: Sender<DaemonEvent>, name: String) -> IpcResponse {
+pub fn delete(state: &SharedState, tx: EventSender, name: String) -> IpcResponse {
     let st = state.lock();
     let path = match profile_path(&st, &name) {
         Ok(path) => path,
@@ -114,12 +109,7 @@ pub fn list(state: &SharedState) -> IpcResponse {
     IpcResponse::ok(entries)
 }
 
-pub fn apply(
-    state: &SharedState,
-    tx: Sender<DaemonEvent>,
-    name: String,
-    device_id: String,
-) -> IpcResponse {
+pub fn apply(state: &SharedState, tx: EventSender, name: String, device_id: String) -> IpcResponse {
     let mut st = state.lock();
     let profile = {
         let profiles = read_all_profiles(&st);
@@ -154,11 +144,11 @@ mod tests {
         let (tx, _) = std::sync::mpsc::channel();
         for name in ["../config", "/tmp/config", "..\\config", "", ".", ".."] {
             assert!(matches!(
-                save(&state, tx.clone(), name.into(), "test".into()),
+                save(&state, tx.clone().into(), name.into(), "test".into()),
                 IpcResponse::Error { .. }
             ));
             assert!(matches!(
-                delete(&state, tx.clone(), name.into()),
+                delete(&state, tx.clone().into(), name.into()),
                 IpcResponse::Error { .. }
             ));
         }
