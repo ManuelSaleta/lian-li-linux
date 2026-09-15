@@ -9,6 +9,7 @@ import { useThemeStore } from "@/stores/theme";
 import { LCD_TEMPLATES_CHANGED_EVENT } from "@/stores/lcd";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppHeader from "@/components/layout/AppHeader.vue";
+import InstallationNotice from "@/components/common/InstallationNotice.vue";
 import CompatibilityNotice from "@/components/common/CompatibilityNotice.vue";
 
 const daemon = useDaemonStore();
@@ -87,9 +88,6 @@ onMounted(async () => {
   await config.load().catch(() => undefined);
   daemon.start();
 
-  // Each window (main/editor/browser) has its own store instance, so a
-  // template saved in one (e.g. the editor) doesn't update the others on its
-  // own — resync on this window's copy of the template list when notified.
   unlistenTemplatesChanged = await listen(LCD_TEMPLATES_CHANGED_EVENT, () => {
     config.refreshTemplates().catch(() => undefined);
   });
@@ -114,6 +112,7 @@ onUnmounted(() => {
             </router-view>
           </template>
           <template v-else>
+            <InstallationNotice />
             <div class="shell">
               <AppSidebar />
               <div class="main">

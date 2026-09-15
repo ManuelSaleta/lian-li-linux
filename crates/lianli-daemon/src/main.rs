@@ -10,6 +10,7 @@ mod pidlock;
 mod pixel_cleaner;
 mod service;
 mod state_backups;
+mod state_health;
 mod template_store;
 mod thermal_alert;
 

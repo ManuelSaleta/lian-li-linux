@@ -1,3 +1,6 @@
+use lianli_shared::installation::{
+    CheckState, FindingSeverity, InstallationFinding, InstallationGuide,
+};
 use lianli_shared::sensors::SensorReading;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,6 +41,13 @@ impl Drop for TemperatureState {
     }
 }
 
+pub(crate) fn finding() -> InstallationFinding {
+    finding_for(
+        TRACKED.load(Ordering::Relaxed),
+        FALLBACK.load(Ordering::Relaxed),
+    )
+}
+
 pub(super) fn missing_curve(
     states: &mut HashMap<String, TemperatureState>,
     name: &str,
@@ -52,6 +62,41 @@ pub(super) fn missing_curve(
     }
     state.update_reading(None, now, 1.0);
     100.0
+}
+
+fn finding_for(tracked: usize, fallback: usize) -> InstallationFinding {
+    let (state, severity, title, evidence, remediation) = if fallback > 0 {
+        (CheckState::Failed, FindingSeverity::Warning, "Cooling fallback active",
+            format!("Unavailable temperature sources: {fallback}. Affected channels request 100% speed."),
+            "Check temperature sources in Fans and AIO settings, then Recheck.")
+    } else if tracked == 0 {
+        (
+            CheckState::NotApplicable,
+            FindingSeverity::Info,
+            "Cooling temperatures",
+            "No active software temperature curves.".into(),
+            "",
+        )
+    } else {
+        (
+            CheckState::Passed,
+            FindingSeverity::Info,
+            "Cooling temperatures",
+            "No cooling fallback is active.".into(),
+            "",
+        )
+    };
+    InstallationFinding {
+        code: "cooling.temperatures".into(),
+        state,
+        severity,
+        feature: "Fan and pump control".into(),
+        context: "Selected daemon".into(),
+        title: title.into(),
+        evidence,
+        remediation: remediation.into(),
+        guide: InstallationGuide::Troubleshooting,
+    }
 }
 
 impl TemperatureState {
@@ -123,6 +168,16 @@ impl TemperatureState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooling_findings_distinguish_fallback_recovery_and_unmanaged_channels() {
+        assert_eq!(finding_for(0, 0).state, CheckState::NotApplicable);
+        let failed = finding_for(3, 1);
+        assert_eq!(failed.state, CheckState::Failed);
+        assert_eq!(failed.severity, FindingSeverity::Warning);
+        assert!(failed.evidence.contains("100%"));
+        assert_eq!(finding_for(3, 0).state, CheckState::Passed);
+    }
 
     #[test]
     fn cached_samples_cannot_extend_grace_or_repeat_smoothing() {

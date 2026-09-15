@@ -29,6 +29,7 @@ impl ServiceManager {
         }
         self.load_config(tx.clone());
         self.sync_ipc_state();
+        self.ipc.state.lock().runtime_hid_backend = Some(self.hid_backend());
         if signals.requested() {
             return;
         }
@@ -373,6 +374,11 @@ impl ServiceManager {
         };
 
         let present_ids: HashSet<String> = usb_devs.iter().map(Self::rusb_device_id).collect();
+        self.ipc
+            .state
+            .lock()
+            .state_health
+            .retain_devices(&present_ids);
         let present_topos: HashSet<String> =
             usb_devs.iter().map(|det| det.topology_key()).collect();
         fan_devices.retain(|id, _| present_ids.contains(id));
@@ -402,6 +408,7 @@ impl ServiceManager {
             let base_id = Self::rusb_device_id(det);
 
             if already_opened.contains(&base_id) {
+                self.ipc.state.lock().state_health.device_opened(&base_id);
                 debug!("Skipping {base_id} — already opened, preserving handle");
                 continue;
             }
@@ -429,6 +436,10 @@ impl ServiceManager {
                 let _ = tx.send(driver.open(&ctx));
             }) {
                 warn!("Could not begin opening {label}: {error:#}");
+                self.ipc.state.lock().state_health.device_open_failed(
+                    &base_id,
+                    &format!("Could not begin opening {label}: {error:#}"),
+                );
                 failed_ids.insert(base_id);
                 continue;
             }
@@ -444,11 +455,16 @@ impl ServiceManager {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 warn!("Skipped {name} ({vid:04x}:{pid:04x}) — global open deadline exceeded");
+                self.ipc.state.lock().state_health.device_open_failed(
+                    &base_id,
+                    "Device opening timed out. Retry will wait for the current worker to finish.",
+                );
                 failed_ids.insert(base_id);
                 continue;
             }
             match rx.recv_timeout(remaining) {
                 Ok(Ok(mut opened)) => {
+                    self.ipc.state.lock().state_health.device_opened(&base_id);
                     let shared_hid = opened.shared_hid.take();
                     if let Some(backend) = shared_hid {
                         self.registry.hid_backends.insert(base_id.clone(), backend);
@@ -470,16 +486,29 @@ impl ServiceManager {
                 }
                 Ok(Err(e)) => {
                     warn!("Failed to open {name} ({vid:04x}:{pid:04x}): {e}");
+                    self.ipc.state.lock().state_health.device_open_failed(
+                        &base_id,
+                        &format!("{name} ({vid:04x}:{pid:04x}): {e:#}"),
+                    );
                     failed_ids.insert(base_id);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     warn!(
                         "Timeout opening {name} ({vid:04x}:{pid:04x}); retry waits for this worker to finish"
                     );
+                    self.ipc.state.lock().state_health.device_open_failed(
+                        &base_id,
+                        "Device open timed out. Retry will wait for the current worker to finish.",
+                    );
                     failed_ids.insert(base_id);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     warn!("Open thread for {name} ({vid:04x}:{pid:04x}) panicked — skipping");
+                    self.ipc
+                        .state
+                        .lock()
+                        .state_health
+                        .device_open_failed(&base_id, "Device open worker exited without a result");
                     failed_ids.insert(base_id);
                 }
             }
@@ -869,6 +898,16 @@ impl ServiceManager {
 
     pub(super) fn try_wireless(&mut self) {
         if !lianli_devices::wireless::tx_dongle_present() {
+            let required = self
+                .configured_wireless_device_ids()
+                .iter()
+                .any(|id| id.starts_with("wireless:"));
+            let mut state = self.ipc.state.lock();
+            if required {
+                state.state_health.wireless_unavailable("Saved settings reference wireless devices, but no transmitter was detected during discovery.");
+            } else {
+                state.state_health.wireless_ready();
+            }
             debug!("[wireless] no TX/RX devices found, skipping wireless");
             return;
         }
@@ -882,6 +921,11 @@ impl ServiceManager {
             .and_then(|()| self.wireless.start_polling());
         if let Err(error) = result {
             let error = format!("{error:#}");
+            self.ipc
+                .state
+                .lock()
+                .state_health
+                .wireless_unavailable(&error);
             if self.wireless_recovery_error.as_ref() != Some(&error) {
                 warn!(%error, "Wireless reconnect failed; existing fan and AIO controllers retained");
                 self.wireless_recovery_error = Some(error);
@@ -891,6 +935,15 @@ impl ServiceManager {
         self.wireless_recovery_error = None;
         if let Err(error) = self.wireless.send_rx_sequence() {
             warn!(%error, "Wireless receiver initialization sequence failed");
+            self.ipc
+                .state
+                .lock()
+                .state_health
+                .wireless_unavailable(&format!(
+                    "Receiver initialization sequence failed: {error:#}"
+                ));
+        } else {
+            self.ipc.state.lock().state_health.wireless_ready();
         }
         info!("Wireless links active");
         if restart_controllers {
@@ -913,17 +966,30 @@ impl ServiceManager {
 
     pub(super) fn load_config(&mut self, tx: Sender<DaemonEvent>) -> bool {
         let templates_path = template_store::templates_path_for(&self.config_path);
-        let user_templates =
-            template_store::read_user_templates(&templates_path).unwrap_or_else(|error| {
-                warn!("Failed to load {}: {error:#}", templates_path.display());
-                Vec::new()
-            });
-        for t in &user_templates {
-            if let Err(e) = t.validate() {
-                warn!("Template: {e}");
+        match template_store::read_user_templates(&templates_path) {
+            Ok(user_templates) => {
+                let warnings: Vec<_> = user_templates
+                    .iter()
+                    .filter_map(|template| template.validate().err().map(|error| error.to_string()))
+                    .collect();
+                for warning in &warnings {
+                    warn!("Template: {warning}");
+                }
+                let mut state = self.ipc.state.lock();
+                state.state_health.templates_loaded(&warnings);
+                state.user_templates = user_templates;
+            }
+            Err(error) => {
+                warn!("Failed to load templates: {error:#}");
+                self.ipc
+                    .state
+                    .lock()
+                    .state_health
+                    .templates_failed(&format!(
+                        "{error:#}. Previously loaded templates, if any, remain in memory."
+                    ));
             }
         }
-        self.ipc.state.lock().user_templates = user_templates;
 
         match AppConfig::load(&self.config_path) {
             Ok((cfg, warnings)) => {
@@ -931,6 +997,11 @@ impl ServiceManager {
                     warn!("Config: {w}");
                 }
                 if !self.force_stop_pixel_cleaning(None) {
+                    self.ipc
+                        .state
+                        .lock()
+                        .state_health
+                        .config_loaded(&warnings, false);
                     self.cleaner_reload_pending = true;
                     return false;
                 }
@@ -938,12 +1009,22 @@ impl ServiceManager {
                 self.desktop_displays
                     .set_video_policy(cfg.hardware_video, cfg.default_fps);
                 self.config = Some(cfg);
+                self.ipc
+                    .state
+                    .lock()
+                    .state_health
+                    .config_loaded(&warnings, true);
                 self.packet_builder = PacketBuilder::new();
                 self.prepare_media_assets(tx);
                 true
             }
             Err(err) => {
                 warn!("Failed to load config: {err}");
+                self.ipc
+                    .state
+                    .lock()
+                    .state_health
+                    .config_failed(&format!("{err:#}"), self.config.is_some());
                 false
             }
         }

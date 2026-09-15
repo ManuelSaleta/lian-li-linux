@@ -13,6 +13,7 @@ import WidgetList from "@/components/editor/WidgetList.vue";
 import WidgetCanvas from "@/components/editor/WidgetCanvas.vue";
 import PropertiesPanel from "@/components/editor/PropertiesPanel.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
+import MediaAccessNotice from "@/components/lcd/MediaAccessNotice.vue";
 import { screenPresets } from "@/constants/screen";
 import { enumerateSensorsAsOptions, inferSensorCategory } from "@/stores/sensorOptions";
 
@@ -502,6 +503,10 @@ function commitName() {
       <n-button size="small" quaternary @click="closeWindow"><template #icon><X :size="14" /></template>Close</n-button>
     </div>
 
+    <div v-if="template" class="template-access">
+      <MediaAccessNotice :lcds="[]" :templates="[template]" />
+    </div>
+
     <div class="panes">
       <div class="pane left">
         <WidgetList
@@ -587,6 +592,13 @@ function commitName() {
   display: flex;
   flex: 1;
   min-height: 0;
+}
+.template-access {
+  flex-shrink: 0;
+  max-height: 25vh;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
 }
 .pane {
   display: flex;

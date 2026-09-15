@@ -1,7 +1,5 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-router";
 
-// Six primary pages + the two secondary-window routes (editor/browser) that
-// share the same frontend bundle. The sidebar only shows the six main pages.
 const routes: RouteRecordRaw[] = [
   { path: "/", redirect: "/devices" },
   { path: "/devices", name: "devices", component: () => import("@/views/DevicesPage.vue") },
@@ -10,6 +8,7 @@ const routes: RouteRecordRaw[] = [
   { path: "/rgb", name: "rgb", component: () => import("@/views/RgbPage.vue") },
   { path: "/aio", name: "aio", component: () => import("@/views/AioPage.vue") },
   { path: "/settings", name: "settings", component: () => import("@/views/SettingsPage.vue") },
+  { path: "/installation", name: "installation", component: () => import("@/views/InstallationPage.vue") },
   // Secondary windows (rendered without the app shell).
   { path: "/editor", name: "editor", component: () => import("@/views/EditorWindow.vue") },
   { path: "/browser", name: "browser", component: () => import("@/views/BrowserWindow.vue") },
@@ -27,4 +26,5 @@ export const MAIN_ROUTES = [
   { name: "rgb", label: "RGB", icon: "palette", to: "/rgb" },
   { name: "aio", label: "AIO", icon: "droplet", to: "/aio" },
   { name: "settings", label: "Settings", icon: "settings", to: "/settings" },
+  { name: "installation", label: "Installation Health", icon: "health", to: "/installation" },
 ] as const;

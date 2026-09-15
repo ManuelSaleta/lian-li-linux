@@ -1,8 +1,9 @@
 //! Tauri command handlers + multi-window setup for the Lian Li Linux GUI.
 
-mod managed_import;
-
+mod diagnostic_export;
+mod installation;
 mod ipc;
+mod managed_import;
 mod service_operations;
 mod session_worker;
 
@@ -80,6 +81,148 @@ async fn ipc_request(
 #[tauri::command]
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+async fn installation_health() -> Result<lianli_shared::installation::InstallationReport, String> {
+    tauri::async_runtime::spawn_blocking(installation::check)
+        .await
+        .map_err(|error| format!("Installation check failed: {error}"))?
+}
+
+#[tauri::command]
+async fn diagnostic_preview(
+    window: WebviewWindow,
+    input: diagnostic_export::Input,
+) -> Result<diagnostic_export::Preview, String> {
+    if window.label() != "main" {
+        return Err("Open diagnostic export from the main window".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        diagnostic_export::preview(input).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn diagnostic_save(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    id: u64,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("Save diagnostic exports from the main window".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        diagnostic_export::save(&app, id).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn diagnostic_preview_file(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    input: diagnostic_export::Input,
+) -> Result<Option<diagnostic_export::Preview>, String> {
+    if window.label() != "main" {
+        return Err("Choose daemon logs from the main window".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        diagnostic_export::preview_file(&app, input).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn service_operation_status(
+) -> Result<lianli_shared::services::ServiceOperationStatus, String> {
+    tauri::async_runtime::spawn_blocking(service_operations::status)
+        .await
+        .map_err(|error| format!("Service progress check failed: {error}"))
+}
+
+#[tauri::command]
+async fn managed_import_start(
+    instance: String,
+    lcds: Vec<lianli_shared::config::LcdConfig>,
+    templates: Vec<lianli_shared::template::LcdTemplate>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        managed_import::start(&instance, lcds, templates).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import submission worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn managed_import_status() -> Result<Option<lianli_control::media_import_job::Status>, String>
+{
+    tauri::async_runtime::spawn_blocking(|| {
+        managed_import::status().map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import status worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn service_action(
+    app: tauri::AppHandle,
+    request: lianli_shared::services::ServiceActionRequest,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run(request))
+        .await
+        .map_err(|error| format!("Service operation worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn managed_import_result(
+    instance: String,
+    id: String,
+) -> Result<lianli_control::media_import::PublishedSelection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        managed_import::result(&instance, &id).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("Import result worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn service_change(
+    app: tauri::AppHandle,
+    request: lianli_shared::services::ServiceChangeRequest,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run_change(request))
+        .await
+        .map_err(|error| format!("Service switch submission failed: {error}"))?
+}
+
+#[tauri::command]
+async fn container_setup_proposal(
+    user_config: Option<std::path::PathBuf>,
+) -> Result<lianli_control::container_deployment::Deployment, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        lianli_control::container_bootstrap::proposal(user_config)
+            .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn container_setup(
+    app: tauri::AppHandle,
+    deployment: lianli_control::container_deployment::Deployment,
+) -> Result<(), String> {
+    let operation = service_operations::Operation::begin(app)?;
+    tauri::async_runtime::spawn_blocking(move || operation.run_setup(deployment))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// Identity, devices and telemetry from the selected daemon.
@@ -183,108 +326,6 @@ fn open_secondary_window(
         .map_err(|e| format!("failed to create {label} window: {e}"))
 }
 
-#[tauri::command]
-async fn service_operation_status(
-) -> Result<lianli_shared::services::ServiceOperationStatus, String> {
-    tauri::async_runtime::spawn_blocking(service_operations::status)
-        .await
-        .map_err(|error| format!("Service progress check failed: {error}"))
-}
-
-#[tauri::command]
-async fn managed_import_start(
-    instance: String,
-    lcds: Vec<lianli_shared::config::LcdConfig>,
-    templates: Vec<lianli_shared::template::LcdTemplate>,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        managed_import::start(&instance, lcds, templates).map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|error| format!("Import submission worker failed: {error}"))?
-}
-
-#[tauri::command]
-async fn managed_import_status() -> Result<Option<lianli_control::media_import_job::Status>, String>
-{
-    tauri::async_runtime::spawn_blocking(|| {
-        managed_import::status().map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|error| format!("Import status worker failed: {error}"))?
-}
-
-#[tauri::command]
-async fn managed_import_result(
-    instance: String,
-    id: String,
-) -> Result<lianli_control::media_import::PublishedSelection, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        managed_import::result(&instance, &id).map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|error| format!("Import result worker failed: {error}"))?
-}
-
-#[tauri::command]
-async fn service_action(
-    app: tauri::AppHandle,
-    request: lianli_shared::services::ServiceActionRequest,
-) -> Result<(), String> {
-    let operation = service_operations::Operation::begin(app)?;
-    tauri::async_runtime::spawn_blocking(move || operation.run(request))
-        .await
-        .map_err(|error| format!("Service operation worker failed: {error}"))?
-}
-
-#[tauri::command]
-async fn service_change(
-    app: tauri::AppHandle,
-    request: lianli_shared::services::ServiceChangeRequest,
-) -> Result<(), String> {
-    let operation = service_operations::Operation::begin(app)?;
-    tauri::async_runtime::spawn_blocking(move || operation.run_change(request))
-        .await
-        .map_err(|error| format!("Service switch submission failed: {error}"))?
-}
-
-/// Identity, devices and telemetry from the selected daemon.
-#[tauri::command]
-async fn container_setup_proposal(
-    user_config: Option<std::path::PathBuf>,
-) -> Result<lianli_control::container_deployment::Deployment, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        lianli_control::container_bootstrap::proposal(user_config)
-            .map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn container_setup(
-    app: tauri::AppHandle,
-    deployment: lianli_control::container_deployment::Deployment,
-) -> Result<(), String> {
-    let operation = service_operations::Operation::begin(app)?;
-    tauri::async_runtime::spawn_blocking(move || operation.run_setup(deployment))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn service_report() -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let services = lianli_control::services::inspect(
-            &lianli_shared::installation::InstallationContext::detect(),
-        );
-        let findings = lianli_control::lingering::finding(&services);
-        serde_json::json!({ "services": services, "findings": findings })
-    })
-    .await
-    .map_err(|error| format!("Service check failed: {error}"))
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
@@ -308,23 +349,26 @@ pub fn run() {
             open_editor_window,
             open_browser_window,
             app_version,
-            service_report,
+            installation_health,
+            diagnostic_preview,
+            diagnostic_save,
+            diagnostic_preview_file,
             service_operation_status,
-            service_action,
             managed_import_start,
             managed_import_status,
             managed_import_result,
+            service_action,
             service_change,
             container_setup_proposal,
             container_setup,
         ])
         .setup(|app| {
-            session_worker::start();
             tauri::async_runtime::spawn_blocking(|| {
                 if let Err(error) = lianli_control::automatic_recovery::trigger() {
-                    tracing::warn!("Service recovery request failed: {error:#}");
+                    tracing::warn!("Pending service recovery: {error:#}");
                 }
             });
+            session_worker::start();
             if let Some(win) = app.get_webview_window("main") {
                 apply_platform_decorations(&win);
                 #[cfg(debug_assertions)]

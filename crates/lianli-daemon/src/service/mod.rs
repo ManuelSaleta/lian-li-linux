@@ -47,7 +47,6 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::IpcUpdate => "IpcUpdate",
         DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
         DaemonEvent::RetryMedia => "RetryMedia",
-        DaemonEvent::RetryDesktopDisplay { .. } => "RetryDesktopDisplay",
         DaemonEvent::USBCheck => "USBCheck",
         DaemonEvent::DevicePoll => "DevicePoll",
         DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
@@ -59,6 +58,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::MediaPrepared => "MediaPrepared",
         DaemonEvent::RecreateMedia { .. } => "RecreateMedia",
         DaemonEvent::RemoveFailedLcd { .. } => "RemoveFailedLcd",
+        DaemonEvent::RetryDesktopDisplay { .. } => "RetryDesktopDisplay",
         DaemonEvent::MediaPlaybackStopped { .. } => "MediaPlaybackStopped",
         DaemonEvent::ResyncWirelessRgb => "ResyncWirelessRgb",
         DaemonEvent::LcdInitComplete { .. } => "LcdInitComplete",
@@ -102,11 +102,6 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     RetryOpenRgb,
     RetryMedia,
-    RetryDesktopDisplay {
-        bus: u8,
-        address: u8,
-        product_id: u16,
-    },
     USBCheck,
     DevicePoll,
     DisplaySwitch {
@@ -130,6 +125,11 @@ pub enum DaemonEvent {
     },
     FrameFinished,
     MediaPrepared,
+    RetryDesktopDisplay {
+        bus: u8,
+        address: u8,
+        product_id: u16,
+    },
     MediaPlaybackStopped {
         target_index: usize,
         key: String,
@@ -149,6 +149,7 @@ pub enum DaemonEvent {
     LcdInitComplete {
         device_id: String,
         attachment: std::sync::Weak<()>,
+        error: Option<String>,
     },
     SystemResumed,
     RebootWirelessLcd {
@@ -787,13 +788,6 @@ impl ServiceManager {
                     }
                     self.ipc.state.lock().openrgb_retry_pending = false;
                 }
-                DaemonEvent::RetryDesktopDisplay {
-                    bus,
-                    address,
-                    product_id,
-                } => {
-                    self.desktop_displays.retry((bus, address), product_id);
-                }
                 DaemonEvent::RetryMedia => {
                     self.poll_prepared_media();
                 }
@@ -827,6 +821,13 @@ impl ServiceManager {
                     error,
                 } => {
                     self.record_playback_failure(target_index, &key, error);
+                }
+                DaemonEvent::RetryDesktopDisplay {
+                    bus,
+                    address,
+                    product_id,
+                } => {
+                    self.desktop_displays.retry((bus, address), product_id);
                 }
                 DaemonEvent::RemoveFailedLcd {
                     target_index,
@@ -876,6 +877,7 @@ impl ServiceManager {
                 DaemonEvent::LcdInitComplete {
                     device_id,
                     attachment,
+                    error,
                 } => {
                     let tx = self.tx.clone();
                     let mut targets = self.targets.lock();
@@ -894,6 +896,11 @@ impl ServiceManager {
                             &mut self.packet_builder,
                         );
                         drop(targets);
+                        self.ipc
+                            .state
+                            .lock()
+                            .state_health
+                            .lcd_initialization(&device_id, error.as_deref());
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {

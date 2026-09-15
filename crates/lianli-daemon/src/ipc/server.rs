@@ -37,14 +37,21 @@ pub struct PixelCleanState {
 
 /// Shared state between the daemon main loop and the IPC server thread.
 pub struct DaemonState {
-    pub write_gate: Arc<lianli_control::write_gate::ServiceWriteGate>,
     pub info: DaemonInfo,
+    pub write_gate: Arc<lianli_control::write_gate::ServiceWriteGate>,
     pub config: Option<AppConfig>,
+    pub runtime_hid_backend: Option<lianli_shared::config::HidBackend>,
+    pub state_health: crate::state_health::StateHealth,
     pub config_path: PathBuf,
     pub presets_path: PathBuf,
     pub devices: Vec<DeviceInfo>,
     pub openrgb_retry_pending: bool,
     pub media_retry_pending: bool,
+    pub catalog_install: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogInstallStatus>>>,
+    pub catalog_control: Arc<super::catalog::CatalogControl>,
+    pub catalog_runtime: Arc<crate::catalog_references::RuntimeReferences>,
+    pub catalog_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
+    pub managed_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
     pub telemetry: TelemetrySnapshot,
     pub wireless_operations: super::wireless::WirelessOperations,
     /// RGB controller, set once devices are opened.
@@ -52,12 +59,6 @@ pub struct DaemonState {
     pub user_templates: Vec<LcdTemplate>,
     pub rgb_presets: Vec<RgbPreset>,
     pub pixel_clean_states: Vec<PixelCleanState>,
-    pub catalog_install: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogInstallStatus>>>,
-    pub catalog_control: Arc<super::catalog::CatalogControl>,
-    pub catalog_runtime: Arc<crate::catalog_references::RuntimeReferences>,
-    pub catalog_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
-    pub managed_review: Arc<Mutex<Option<lianli_shared::template::catalog::CatalogReviewStatus>>>,
-    /// RGB controller, set once devices are opened.
     pub pixel_clean_preparation: Option<(u64, bool, Option<String>)>,
 }
 
@@ -73,25 +74,26 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             lianli_shared::daemon::SERVICE_SELECTION.into(),
             lianli_shared::daemon::SERVICE_STARTUP_GATE.into(),
             lianli_shared::daemon::MEDIA_DECODE.into(),
+            lianli_shared::daemon::INSTALLATION_HEALTH.into(),
+            lianli_shared::daemon::DESKTOP_RETRY.into(),
             "daemon_info".into(),
             "hardware_video".into(),
             "media_preparation".into(),
-            "openrgb_retry".into(),
-            "media_retry".into(),
-            lianli_shared::daemon::DESKTOP_RETRY.into(),
             "media_access".into(),
             "state_recovery".into(),
             "backup_preview".into(),
             "backup_restore".into(),
             "backup_cleanup".into(),
+            "openrgb_retry".into(),
+            "media_retry".into(),
             "catalog_install_status".into(),
             "catalog_storage".into(),
             "managed_media_storage".into(),
-            "managed_template_merge".into(),
-            "catalog_cleanup_review".into(),
-            "catalog_cleanup_removal".into(),
             "managed_media_review".into(),
             "managed_media_removal".into(),
+            "catalog_cleanup_review".into(),
+            "catalog_cleanup_removal".into(),
+            "managed_template_merge".into(),
         ],
     }
 }
@@ -106,33 +108,36 @@ impl DaemonState {
         let started = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
+        let build = build_info();
         Self {
-            write_gate: Arc::new(lianli_control::write_gate::ServiceWriteGate::new(
-                &lianli_shared::installation::InstallationContext::detect(),
-            )),
-            catalog_install: Default::default(),
-            catalog_control: Default::default(),
-            catalog_runtime: Default::default(),
-            catalog_review: Default::default(),
-            managed_review: Default::default(),
             info: DaemonInfo {
-                version: env!("CARGO_PKG_VERSION").into(),
-                protocol_version: IPC_PROTOCOL_VERSION,
+                version: build.version,
+                protocol_version: build.protocol_version,
                 instance_id: format!("{:x}-{:x}", std::process::id(), started.as_nanos()),
                 pid: std::process::id(),
-                mode: DaemonMode::User,
-                config_path: config_path.clone(),
                 ownership_lock: None,
                 service_invocation: None,
                 service_operation_lock: None,
-                capabilities: build_info().capabilities,
+                mode: DaemonMode::User,
+                config_path: config_path.clone(),
+                capabilities: build.capabilities,
             },
             config: None,
+            runtime_hid_backend: None,
+            state_health: Default::default(),
+            write_gate: Arc::new(lianli_control::write_gate::ServiceWriteGate::new(
+                &lianli_shared::installation::InstallationContext::detect(),
+            )),
             config_path,
             presets_path,
             devices: Vec::new(),
             openrgb_retry_pending: false,
             media_retry_pending: false,
+            catalog_install: Default::default(),
+            catalog_control: Default::default(),
+            catalog_runtime: Default::default(),
+            catalog_review: Default::default(),
+            managed_review: Default::default(),
             telemetry: TelemetrySnapshot::default(),
             wireless_operations: Default::default(),
             rgb_controller: None,
@@ -286,7 +291,7 @@ fn handle_connection(
                     let sender = super::EventSender::new(tx.clone(), permit);
                     let response = handle_request(request, &state, sender.clone());
                     if sender.delivery_failed() && matches!(response, IpcResponse::Ok { .. }) {
-                        IpcResponse::error("The daemon stopped before applying this request; some changes may already be saved. Reconnect and review settings before retrying")
+                        IpcResponse::error("The daemon stopped before applying the request. Changes may be saved. Reconnect and check settings before retrying.")
                     } else {
                         response
                     }
@@ -312,17 +317,9 @@ fn handle_request(
             IpcResponse::error("Service stop requires authenticated peer credentials")
         }
         IpcRequest::Ping => super::system::ping(),
-        IpcRequest::RetryDesktopDisplay {
-            bus,
-            address,
-            product_id,
-        } => super::lcd::retry_desktop(state, &tx, bus, address, product_id),
-        IpcRequest::RetryMedia => super::system::retry_media(state, tx),
         IpcRequest::RetryOpenRgb => super::system::retry_openrgb(state, tx),
+        IpcRequest::RetryMedia => super::system::retry_media(state, tx),
         IpcRequest::GetDaemonInfo => super::system::daemon_info(state),
-        IpcRequest::ListSensors => super::system::list_sensors(state),
-        IpcRequest::ListPwmHeaders => super::system::list_pwm_headers(),
-        IpcRequest::ListDevices => super::system::list_devices(state),
         IpcRequest::ListStateBackups => {
             super::backups::run(state, super::backups::Operation::List, tx)
         }
@@ -349,7 +346,27 @@ fn handle_request(
             super::backups::Operation::Restore { target, sha256 },
             tx,
         ),
+        IpcRequest::GetInstallationHealth => super::installation::check(state),
+        IpcRequest::ListSensors => super::system::list_sensors(state),
+        IpcRequest::ListPwmHeaders => super::system::list_pwm_headers(),
+        IpcRequest::ListDevices => super::system::list_devices(state),
         IpcRequest::GetConfig => super::system::get_config(state),
+        IpcRequest::CheckMediaAccess { lcds, templates } => {
+            let config_directory = state
+                .lock()
+                .config_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf();
+            match crate::media_access::check(crate::media_access::Input {
+                lcds,
+                templates,
+                config_directory,
+            }) {
+                Ok(report) => IpcResponse::ok(report),
+                Err(error) => IpcResponse::error(format!("{error:#}")),
+            }
+        }
         IpcRequest::GetTelemetry => super::system::get_telemetry(state),
 
         IpcRequest::SetConfig { config } => {
@@ -397,6 +414,11 @@ fn handle_request(
         IpcRequest::SwitchDisplayMode { device_id } => {
             super::lcd::switch_display_mode(state, tx, device_id)
         }
+        IpcRequest::RetryDesktopDisplay {
+            bus,
+            address,
+            product_id,
+        } => super::lcd::retry_desktop(state, &tx, bus, address, product_id),
 
         IpcRequest::GetWirelessOperation { operation_id } => {
             super::wireless::operation(state, operation_id)

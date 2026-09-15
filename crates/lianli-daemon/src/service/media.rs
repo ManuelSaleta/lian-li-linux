@@ -262,6 +262,11 @@ impl ServiceManager {
         if self.config.as_ref().is_none_or(|cfg| cfg.lcds.is_empty())
             && self.targets.lock().is_empty()
         {
+            self.ipc
+                .state
+                .lock()
+                .state_health
+                .retain_lcds(&HashSet::new());
             return;
         }
 
@@ -316,6 +321,12 @@ impl ServiceManager {
             });
         }
 
+        self.ipc.state.lock().state_health.retain_lcds(
+            &candidates
+                .iter()
+                .map(|candidate| candidate.device_id.clone())
+                .collect(),
+        );
         let mut new_targets = HashMap::new();
         let mut new_media_targets = HashMap::new();
         let mut canonicalize: Vec<(String, String)> = Vec::new();
@@ -532,6 +543,11 @@ impl ServiceManager {
 
                 match backend_result {
                     Ok(lcd) => {
+                        self.ipc
+                            .state
+                            .lock()
+                            .state_health
+                            .lcd_initialization(&candidate.device_id, None);
                         info!(
                             "[devices] LCD[{}] attached (serial: {}, orientation: {:.0}°)",
                             device_cfg.device_id(),
@@ -550,15 +566,17 @@ impl ServiceManager {
                                     .name(format!("lcd-init-{device_id}"))
                                     .spawn(move || {
                                         let mut guard = hid_init.lock();
-                                        if let Err(e) = guard.initialize() {
+                                        let error = guard.initialize().err().map(|e| {
                                             warn!("AIO LCD init failed for {device_id}: {e:#}");
-                                        }
+                                            format!("{e:#}").chars().take(2048).collect()
+                                        });
                                         guard.set_use_c_command(enable_512);
                                         drop(guard);
                                         if let Some(tx) = init_tx {
                                             tx.send(DaemonEvent::LcdInitComplete {
                                                 device_id,
                                                 attachment: hid_init.attachment(),
+                                                error,
                                             })
                                             .ok();
                                         }
@@ -566,6 +584,10 @@ impl ServiceManager {
                                 {
                                     warn!(
                                         "Failed to spawn AIO LCD init thread for {spawn_err_id}: {e}"
+                                    );
+                                    self.ipc.state.lock().state_health.lcd_initialization(
+                                        &spawn_err_id,
+                                        Some(&format!("Could not start LCD initialization: {e}")),
                                     );
                                 }
                                 self.aio_lcd_firmware
@@ -583,6 +605,10 @@ impl ServiceManager {
                                     warn!(
                                         "AIO LCD basic init failed for {}: {e:#}",
                                         candidate.device_id
+                                    );
+                                    self.ipc.state.lock().state_health.lcd_initialization(
+                                        &candidate.device_id,
+                                        Some(&format!("{e:#}")),
                                     );
                                 }
                             }
@@ -618,6 +644,11 @@ impl ServiceManager {
                         }
                     }
                     Err(err) => {
+                        self.ipc
+                            .state
+                            .lock()
+                            .state_health
+                            .lcd_initialization(&candidate.device_id, Some(&format!("{err:#}")));
                         warn!(
                             "[devices] LCD[{}] unavailable during attach: {err}",
                             device_cfg.device_id()

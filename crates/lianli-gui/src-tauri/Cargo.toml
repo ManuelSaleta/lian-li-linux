@@ -14,10 +14,12 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [dependencies]
-lianli-shared = { path = "../../lianli-shared" }
 lianli-control = { path = "../../lianli-control" }
+lianli-shared = { path = "../../lianli-shared" }
 tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-clipboard-manager = { workspace = true }
@@ -27,6 +29,11 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
 
 [features]
 # This feature is used for production builds where the frontend is bundled.

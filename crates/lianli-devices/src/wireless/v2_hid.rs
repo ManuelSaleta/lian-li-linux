@@ -5,8 +5,8 @@ use rusb::GlobalContext;
 use tracing::debug;
 
 /// V2 dongle HID companion interface (CH340 VID `0x1A86`, PID `0x2107`).
-pub const V2_HID_VID: u16 = 0x1A86;
-pub const V2_HID_PID: u16 = 0x2107;
+pub const V2_HID_VID: u16 = lianli_shared::device_id::V2_HID_COMPANION.vid;
+pub const V2_HID_PID: u16 = lianli_shared::device_id::V2_HID_COMPANION.pid;
 
 /// HID command that returns the wireless group MAC paired with this dongle.
 const CMD_GET_HID_NUM: u8 = 0x1C;

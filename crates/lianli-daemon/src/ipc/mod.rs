@@ -13,12 +13,13 @@
 //! - [`presets`] — RGB preset save / load / delete / apply.
 
 mod backups;
+mod catalog_cleanup;
 mod event_sender;
+mod installation;
 mod server;
 mod service_stop;
 
 pub mod catalog;
-mod catalog_cleanup;
 pub mod config;
 pub mod fan;
 pub mod lcd;

@@ -226,6 +226,10 @@ fn install_inner(state: &SharedState, tx: EventSender, template: CatalogTemplate
         );
     };
     if let Err(e) = template_store::install_user_template(&path, installed) {
+        state
+            .lock()
+            .state_health
+            .templates_failed(&format!("{e:#}"));
         prepared.commit();
         return IpcResponse::error(format!("Template save could not be confirmed: {e}. Verified assets were retained because publication may have completed. Reload templates before retrying."));
     }

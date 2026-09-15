@@ -33,6 +33,7 @@ export const useDaemonStore = defineStore("daemon", () => {
   const socketPath = ref("");
   const streamingActive = ref(false);
   const mediaPreparation = ref<NonNullable<TelemetrySnapshot["media_preparation"]>>({});
+  const desktopStreams = ref<NonNullable<TelemetrySnapshot["desktop_streams"]>>([]);
   const info = ref<DaemonInfo | null>(null);
   const writeError = ref<string | null>(null);
   const canWrite = computed(() => connected.value && !writeError.value);
@@ -58,6 +59,7 @@ export const useDaemonStore = defineStore("daemon", () => {
       socketPath.value = result.socket_path;
       streamingActive.value = result.telemetry.streaming_active;
       mediaPreparation.value = result.telemetry.media_preparation ?? {};
+      desktopStreams.value = result.telemetry.desktop_streams ?? [];
       openrgbRunning.value = result.telemetry.openrgb_status.running;
       openrgbEnabled.value = result.telemetry.openrgb_status.enabled;
       openrgbError.value = result.telemetry.openrgb_status.error ?? "";
@@ -89,6 +91,7 @@ export const useDaemonStore = defineStore("daemon", () => {
     } catch (e) {
       connected.value = false;
       mediaPreparation.value = {};
+      desktopStreams.value = [];
       info.value = null;
       writeError.value = null;
       wasConnected = false;
@@ -118,6 +121,7 @@ export const useDaemonStore = defineStore("daemon", () => {
     socketPath,
     streamingActive,
     mediaPreparation,
+    desktopStreams,
     version,
     info,
     openrgbRunning,

@@ -22,6 +22,7 @@ function iconFor(name: string) {
     palette: icons.Palette,
     droplet: icons.Droplet,
     settings: icons.Settings,
+    health: icons.HeartPulse,
   };
   return map[name] ?? icons.Circle;
 }

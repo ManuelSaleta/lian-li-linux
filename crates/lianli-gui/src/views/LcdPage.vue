@@ -4,6 +4,7 @@ import { Plus } from "lucide-vue-next";
 import { useConfigStore } from "@/stores/config";
 import { useDevicesStore } from "@/stores/devices";
 import LcdConfigCard from "@/components/lcd/LcdConfigCard.vue";
+import MediaAccessNotice from "@/components/lcd/MediaAccessNotice.vue";
 import ManagedMediaImport from "@/components/lcd/ManagedMediaImport.vue";
 
 const config = useConfigStore();
@@ -41,6 +42,7 @@ function addLcd() {
       </span>
     </div>
 
+    <MediaAccessNotice :lcds="entries" :templates="selectedTemplates" />
     <ManagedMediaImport :lcds="entries" :templates="selectedTemplates" />
 
     <LcdConfigCard

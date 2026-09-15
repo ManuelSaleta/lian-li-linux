@@ -15,8 +15,17 @@ pub enum IpcRequest {
         guard: crate::daemon::WriteGuard,
         request: Box<IpcRequest>,
     },
+    StopService {
+        invocation_id: String,
+    },
     ListDevices,
     GetConfig,
+    CheckMediaAccess {
+        #[serde(deserialize_with = "crate::serde_limits::lcds")]
+        lcds: Vec<LcdConfig>,
+        #[serde(deserialize_with = "crate::serde_limits::templates")]
+        templates: Vec<LcdTemplate>,
+    },
     /// Replace the entire config (daemon writes to disk + reloads).
     SetConfig {
         config: Box<AppConfig>,
@@ -193,9 +202,7 @@ pub enum IpcRequest {
     },
     Ping,
     GetDaemonInfo,
-    StopService {
-        invocation_id: String,
-    },
+    GetInstallationHealth,
     SetLcdBrightness {
         device_id: String,
         brightness: u8,
@@ -258,8 +265,7 @@ impl IpcRequest {
         match self {
             Self::ListDevices
             | Self::GetConfig
-            | Self::ListStateBackups
-            | Self::PreviewStateBackup { .. }
+            | Self::CheckMediaAccess { .. }
             | Self::GetTelemetry
             | Self::GetRgbCapabilities
             | Self::GetZoneColors { .. }
@@ -268,6 +274,16 @@ impl IpcRequest {
             | Self::ListSensors
             | Self::ListPwmHeaders
             | Self::GetLcdTemplates
+            | Self::RenderTemplatePreview { .. }
+            | Self::Ping
+            | Self::GetDaemonInfo
+            | Self::GetInstallationHealth
+            | Self::GetChannel
+            | Self::GetMergeLightingConfig
+            | Self::ListDeviceProfiles
+            | Self::GetPixelCleanStatus
+            | Self::GetPixelCleanPreparation { .. }
+            | Self::ListStateBackups
             | Self::GetCatalogInstallStatus
             | Self::GetCatalogStorage
             | Self::GetManagedMediaStorage
@@ -275,19 +291,15 @@ impl IpcRequest {
             | Self::GetManagedMediaReview { .. }
             | Self::StartCatalogReview { .. }
             | Self::GetCatalogReview { .. }
-            | Self::RenderTemplatePreview { .. }
-            | Self::Ping
-            | Self::GetDaemonInfo
-            | Self::GetChannel
-            | Self::GetMergeLightingConfig
-            | Self::ListDeviceProfiles
-            | Self::GetPixelCleanStatus
-            | Self::GetPixelCleanPreparation { .. } => true,
+            | Self::PreviewStateBackup { .. } => true,
             Self::Guarded { .. }
-            | Self::StopService { .. }
-            | Self::SetConfig { .. }
+            | Self::StartCatalogRemoval { .. }
+            | Self::StartManagedMediaRemoval { .. }
+            | Self::MergeLcdTemplates { .. }
             | Self::RestoreStateBackup { .. }
             | Self::DeleteStateBackup { .. }
+            | Self::StopService { .. }
+            | Self::SetConfig { .. }
             | Self::SetLcdMedia { .. }
             | Self::SetFanConfig { .. }
             | Self::SetRgbEffect { .. }
@@ -302,17 +314,14 @@ impl IpcRequest {
             | Self::SetRgbConfig { .. }
             | Self::SwitchDisplayMode { .. }
             | Self::RetryDesktopDisplay { .. }
-            | Self::RetryMedia
             | Self::RetryOpenRgb
+            | Self::RetryMedia
             | Self::BindWirelessDevice { .. }
             | Self::UnbindWirelessDevice { .. }
             | Self::SetEne6k77FanQuantity { .. }
             | Self::SetLcdTemplates { .. }
-            | Self::MergeLcdTemplates { .. }
-            | Self::StartCatalogRemoval { .. }
-            | Self::StartManagedMediaRemoval { .. }
-            | Self::StartCatalogInstall { .. }
             | Self::InstallTemplate { .. }
+            | Self::StartCatalogInstall { .. }
             | Self::SetLcdBrightness { .. }
             | Self::PingDevice { .. }
             | Self::RebootWirelessLcd { .. }
@@ -534,7 +543,6 @@ pub struct MediaEncoderStatus {
     pub software_fallback: bool,
 }
 
-/// Snapshot of live telemetry data, returned by GetTelemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopStreamState {

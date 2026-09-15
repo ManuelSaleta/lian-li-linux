@@ -110,6 +110,14 @@ mod tests {
     use crate::ipc::IpcRequest;
     use serde_json::json;
 
+    #[test]
+    fn installation_health_is_a_read_only_request() {
+        let request: crate::ipc::IpcRequest =
+            serde_json::from_str(r#"{"method":"GetInstallationHealth"}"#).unwrap();
+        assert!(request.is_read_only());
+        assert!(request.authorize(&current()).is_ok());
+    }
+
     fn current() -> DaemonInfo {
         DaemonInfo {
             version: "1.0.0".into(),
