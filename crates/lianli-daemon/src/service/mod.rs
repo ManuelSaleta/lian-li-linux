@@ -38,6 +38,7 @@ use runtime::ActiveTarget;
 fn event_label(event: &DaemonEvent) -> &'static str {
     match event {
         DaemonEvent::IpcUpdate => "IpcUpdate",
+        DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
         DaemonEvent::USBCheck => "USBCheck",
         DaemonEvent::DevicePoll => "DevicePoll",
         DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
@@ -102,6 +103,7 @@ const USB_ENUM_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
+    RetryOpenRgb,
     USBCheck,
     DevicePoll,
     DisplaySwitch {
@@ -784,6 +786,18 @@ impl ServiceManager {
 
                         self.device_poll();
                     }
+                }
+                DaemonEvent::RetryOpenRgb => {
+                    let failed = self.openrgb.state.lock().error.is_some()
+                        || self
+                            .openrgb
+                            .thread
+                            .as_ref()
+                            .is_some_and(|thread| thread.is_finished());
+                    if failed {
+                        self.start_openrgb_server();
+                    }
+                    self.ipc.state.lock().openrgb_retry_pending = false;
                 }
                 DaemonEvent::FrameFinished => {
                     // Handled by the polling streaming thread — no action needed.

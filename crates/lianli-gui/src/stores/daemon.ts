@@ -38,6 +38,7 @@ export const useDaemonStore = defineStore("daemon", () => {
   const canWrite = computed(() => connected.value && !writeError.value);
   const version = computed(() => info.value?.version ?? "");
   const openrgbRunning = ref(false);
+  const openrgbEnabled = ref(false);
   const openrgbError = ref("");
   const openrgbPort = ref<number | null>(null);
 
@@ -58,6 +59,7 @@ export const useDaemonStore = defineStore("daemon", () => {
       streamingActive.value = result.telemetry.streaming_active;
       mediaPreparation.value = result.telemetry.media_preparation ?? {};
       openrgbRunning.value = result.telemetry.openrgb_status.running;
+      openrgbEnabled.value = result.telemetry.openrgb_status.enabled;
       openrgbError.value = result.telemetry.openrgb_status.error ?? "";
       openrgbPort.value = result.telemetry.openrgb_status.port;
 
@@ -119,6 +121,7 @@ export const useDaemonStore = defineStore("daemon", () => {
     version,
     info,
     openrgbRunning,
+    openrgbEnabled,
     openrgbError,
     openrgbPort,
     visibleDeviceCount,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink } from "lucide-vue-next";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
@@ -8,11 +8,29 @@ import { useConfigStore } from "@/stores/config";
 import { useThermalStore } from "@/stores/thermal";
 import StatusDot from "@/components/common/StatusDot.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
+import { useIpc } from "@/composables/useIpc";
 
 const REPO_URL = "https://github.com/sgtaziz/lian-li-linux";
 const daemon = useDaemonStore();
 const config = useConfigStore();
 const thermal = useThermalStore();
+const ipc = useIpc();
+const retryingOpenRgb = ref(false);
+const openrgbFeedback = ref("");
+watch(() => daemon.info?.instance_id, () => { openrgbFeedback.value = ""; });
+async function retryOpenRgb() {
+  if (retryingOpenRgb.value || !daemon.canWrite) return;
+  const instance = daemon.info?.instance_id;
+  retryingOpenRgb.value = true;
+  openrgbFeedback.value = "";
+  try {
+    await ipc.request("RetryOpenRgb");
+    if (daemon.info?.instance_id !== instance) return;
+    openrgbFeedback.value = "Retry queued using the saved OpenRGB settings. Check the server status for the result.";
+    await daemon.refresh();
+  } catch (error) { if (daemon.info?.instance_id === instance) openrgbFeedback.value = String(error); }
+  finally { retryingOpenRgb.value = false; }
+}
 
 const appVersion = ref("...");
 onMounted(async () => {
@@ -37,13 +55,14 @@ const openrgbPort = computed({
   },
 });
 const openrgbStatus = computed(() => {
-  if (!openrgbEnabled.value) return "Disabled";
+  if (!daemon.connected) return "Disconnected";
+  if (!daemon.openrgbEnabled) return "Disabled";
   if (daemon.openrgbError) return "Error";
-  if (daemon.openrgbRunning) return `Port ${daemon.openrgbPort ?? rgb.value.openrgb_port}`;
+  if (daemon.openrgbRunning) return daemon.openrgbPort === null ? "Running" : `Port ${daemon.openrgbPort}`;
   return "Starting…";
 });
 const openrgbDot = computed<"danger" | "success" | "warning" | "muted">(() =>
-  !openrgbEnabled.value
+  !daemon.connected || !daemon.openrgbEnabled
     ? "muted"
     : daemon.openrgbError
       ? "danger"
@@ -205,6 +224,10 @@ function onHidBackend(v: "hidraw" | "rusb") {
         <span class="status-tag"><StatusDot :color="openrgbDot" />{{ openrgbStatus }}</span>
       </div>
       <n-checkbox v-model:checked="openrgbEnabled" style="margin-top: 1rem;">Enable OpenRGB SDK server</n-checkbox>
+      <n-alert v-if="daemon.connected && daemon.openrgbEnabled && daemon.openrgbError" type="error" style="margin-top: 1rem;">{{ daemon.openrgbError }}</n-alert>
+      <n-button v-if="daemon.connected && daemon.openrgbEnabled && daemon.openrgbError && !daemon.openrgbRunning" :loading="retryingOpenRgb" :disabled="retryingOpenRgb || !daemon.canWrite || !daemon.info?.capabilities.includes('openrgb_retry')" @click="retryOpenRgb">Retry OpenRGB</n-button>
+      <p v-if="daemon.openrgbError && daemon.connected" class="hint">Retry uses the saved port. Save to apply edits.</p>
+      <p v-if="openrgbFeedback" class="hint">{{ openrgbFeedback }}</p>
       <div class="field" v-if="openrgbEnabled">
         <label class="muted">Port</label>
         <n-input-number v-model:value="openrgbPort" :min="1" :max="65535" size="small" />

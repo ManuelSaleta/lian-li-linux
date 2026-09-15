@@ -107,6 +107,7 @@ pub enum IpcRequest {
     SwitchDisplayMode {
         device_id: String,
     },
+    RetryOpenRgb,
     GetWirelessOperation {
         operation_id: String,
     },
@@ -232,6 +233,7 @@ impl IpcRequest {
             | Self::SetFanDirection { .. }
             | Self::SetRgbConfig { .. }
             | Self::SwitchDisplayMode { .. }
+            | Self::RetryOpenRgb
             | Self::BindWirelessDevice { .. }
             | Self::UnbindWirelessDevice { .. }
             | Self::SetEne6k77FanQuantity { .. }
@@ -390,7 +392,7 @@ pub struct OpenRgbServerStatus {
     pub enabled: bool,
     /// Whether the server is currently listening for connections.
     pub running: bool,
-    /// The actual port the server bound to (may differ from configured if port was in use).
+    /// Configured port of the last startup attempt.
     pub port: Option<u16>,
     /// Error message if the server failed to start.
     pub error: Option<String>,

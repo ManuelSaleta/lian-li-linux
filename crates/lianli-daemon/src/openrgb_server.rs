@@ -17,6 +17,56 @@ use tracing::{debug, error, info, warn};
 
 const MAGIC: &[u8; 4] = b"ORGB";
 const HEADER_SIZE: usize = 16;
+const MAX_CLIENTS: usize = 16;
+const MAX_PACKET_BYTES: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct Clients(Vec<(TcpStream, thread::JoinHandle<()>)>);
+
+impl Clients {
+    fn reap(&mut self) {
+        let mut index = 0;
+        while index < self.0.len() {
+            if self.0[index].1.is_finished() {
+                let (_, client) = self.0.swap_remove(index);
+                if client.join().is_err() {
+                    warn!("OpenRGB client worker panicked");
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+impl Drop for Clients {
+    fn drop(&mut self) {
+        for (stream, _) in &self.0 {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        for (_, client) in self.0.drain(..) {
+            if client.join().is_err() {
+                warn!("OpenRGB client worker panicked during shutdown");
+            }
+        }
+    }
+}
+
+fn read_packet_from(stream: &mut impl Read) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let mut header = [0u8; HEADER_SIZE];
+    stream.read_exact(&mut header)?;
+    anyhow::ensure!(&header[0..4] == MAGIC, "Invalid magic bytes");
+    let dev_idx = u32::from_le_bytes(header[4..8].try_into()?);
+    let pkt_id = u32::from_le_bytes(header[8..12].try_into()?);
+    let pkt_size = u32::from_le_bytes(header[12..16].try_into()?) as usize;
+    anyhow::ensure!(
+        pkt_size <= MAX_PACKET_BYTES,
+        "OpenRGB packet exceeds the 1 MiB limit"
+    );
+    let mut payload = vec![0u8; pkt_size];
+    stream.read_exact(&mut payload)?;
+    Ok((dev_idx, pkt_id, payload))
+}
 /// We support up to protocol version 4 (segments, plugins).
 /// Version 3 adds brightness. Version 4 adds segments.
 const SERVER_PROTOCOL_VERSION: u32 = 4;
@@ -125,10 +175,23 @@ fn run_server(
     }
 
     let client_count = Arc::new(AtomicUsize::new(0));
+    let mut clients = Clients::default();
 
     while !stop_flag.load(Ordering::Relaxed) {
+        clients.reap();
         match listener.accept() {
             Ok((stream, addr)) => {
+                if clients.0.len() >= MAX_CLIENTS {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
+                let control = match stream.try_clone() {
+                    Ok(control) => control,
+                    Err(error) => {
+                        warn!("Could not track OpenRGB client: {error}");
+                        continue;
+                    }
+                };
                 info!("OpenRGB client connected from {addr}");
                 stream.set_nonblocking(false).ok();
                 stream.set_read_timeout(Some(Duration::from_secs(300))).ok();
@@ -144,7 +207,7 @@ fn run_server(
                     rgb.lock().set_openrgb_active(true);
                 }
 
-                thread::spawn(move || {
+                let client = thread::spawn(move || {
                     let mut client = ClientHandler::new(stream, rgb, buf, stop);
                     if let Err(e) = client.run() {
                         debug!("OpenRGB client disconnected: {e}");
@@ -156,6 +219,7 @@ fn run_server(
                     }
                     info!("OpenRGB client disconnected ({remaining} remaining)");
                 });
+                clients.0.push((control, client));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -167,6 +231,8 @@ fn run_server(
         }
     }
 
+    drop(clients);
+    rgb.lock().set_openrgb_active(false);
     info!("OpenRGB server stopped");
     Ok(())
 }
@@ -221,28 +287,15 @@ impl ClientHandler {
             }
 
             let (dev_idx, pkt_id, payload) = self.read_packet()?;
+            if self.stop_flag.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             self.handle_packet(dev_idx, pkt_id, &payload)?;
         }
     }
 
     fn read_packet(&mut self) -> anyhow::Result<(u32, u32, Vec<u8>)> {
-        let mut header = [0u8; HEADER_SIZE];
-        self.stream.read_exact(&mut header)?;
-
-        if &header[0..4] != MAGIC {
-            anyhow::bail!("Invalid magic bytes");
-        }
-
-        let dev_idx = u32::from_le_bytes(header[4..8].try_into()?);
-        let pkt_id = u32::from_le_bytes(header[8..12].try_into()?);
-        let pkt_size = u32::from_le_bytes(header[12..16].try_into()?) as usize;
-
-        let mut payload = vec![0u8; pkt_size];
-        if pkt_size > 0 {
-            self.stream.read_exact(&mut payload)?;
-        }
-
-        Ok((dev_idx, pkt_id, payload))
+        read_packet_from(&mut self.stream)
     }
 
     fn send_packet(&mut self, dev_idx: u32, pkt_id: u32, payload: &[u8]) -> anyhow::Result<()> {
@@ -833,4 +886,56 @@ fn mode_from_openrgb_name(name: &str, value: u32) -> RgbMode {
     }
 
     RgbMode::Static
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn header(size: usize) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend(5u32.to_le_bytes());
+        bytes.extend(105u32.to_le_bytes());
+        bytes.extend((size as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn packet_reader_checks_size_before_reading_the_payload() {
+        let error = read_packet_from(&mut Cursor::new(header(MAX_PACKET_BYTES + 1))).unwrap_err();
+        assert!(error.to_string().contains("1 MiB"));
+        let mut bytes = header(MAX_PACKET_BYTES);
+        bytes.resize(HEADER_SIZE + MAX_PACKET_BYTES, 42);
+        let (device, packet, payload) = read_packet_from(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!((device, packet), (5, 105));
+        assert_eq!(payload.len(), MAX_PACKET_BYTES);
+        assert!(payload.iter().all(|byte| *byte == 42));
+        assert!(read_packet_from(&mut Cursor::new(header(1))).is_err());
+        let mut invalid = header(0);
+        invalid[0] = b'X';
+        assert!(read_packet_from(&mut Cursor::new(invalid)).is_err());
+    }
+
+    #[test]
+    fn client_shutdown_unblocks_and_joins_an_idle_reader() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let control = reader.try_clone().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            assert_eq!(reader.read(&mut [0u8; 1]).unwrap(), 0);
+            done_tx.send(()).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(Clients(vec![(control, worker)]));
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(peer);
+    }
 }

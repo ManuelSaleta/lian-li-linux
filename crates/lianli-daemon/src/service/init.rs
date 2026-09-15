@@ -731,10 +731,13 @@ impl ServiceManager {
             .map(|rgb| (rgb.openrgb_server, rgb.openrgb_port))
             .unwrap_or((false, 6743));
 
-        // Check if we need to restart (port changed or toggled)
         let current_state = self.openrgb.state.lock().clone();
-        let needs_restart =
-            self.openrgb.thread.is_some() && (current_state.port != Some(port) || !enabled);
+        let needs_restart = self.openrgb.thread.as_ref().is_some_and(|thread| {
+            thread.is_finished()
+                || current_state.error.is_some()
+                || current_state.port != Some(port)
+                || !enabled
+        });
 
         if needs_restart {
             info!("Stopping OpenRGB server for reconfiguration");
@@ -745,6 +748,7 @@ impl ServiceManager {
             if let Some(thread) = self.controllers.direct_color_writer.take() {
                 let _ = thread.join();
             }
+            self.controllers.direct_color_buffer.lock().take_all();
             let mut s = self.openrgb.state.lock();
             *s = openrgb_server::OpenRgbServerState::default();
         }
@@ -754,11 +758,11 @@ impl ServiceManager {
         }
 
         if self.openrgb.thread.is_some() {
-            return; // Already running with correct port
+            return;
         }
 
         if let Some(ref rgb) = self.controllers.rgb {
-            self.openrgb.stop.store(false, Ordering::Relaxed);
+            self.openrgb.stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             self.openrgb.thread = Some(openrgb_server::start_openrgb_server(
                 Arc::clone(rgb),
                 Arc::clone(&self.controllers.direct_color_buffer),

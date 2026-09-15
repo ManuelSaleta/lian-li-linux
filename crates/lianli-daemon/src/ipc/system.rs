@@ -3,6 +3,26 @@
 
 use lianli_shared::ipc::IpcResponse;
 
+pub fn retry_openrgb(
+    state: &super::SharedState,
+    tx: std::sync::mpsc::Sender<crate::service::DaemonEvent>,
+) -> IpcResponse {
+    let mut state = state.lock();
+    let status = &state.telemetry.openrgb_status;
+    if !status.enabled || status.running || status.error.is_none() {
+        return IpcResponse::error("OpenRGB is not in a failed enabled state; refresh its status");
+    }
+    if state.openrgb_retry_pending {
+        return IpcResponse::error("An OpenRGB retry is already queued");
+    }
+    state.openrgb_retry_pending = true;
+    if tx.send(crate::service::DaemonEvent::RetryOpenRgb).is_err() {
+        state.openrgb_retry_pending = false;
+        return IpcResponse::error("The daemon stopped before accepting the OpenRGB retry");
+    }
+    IpcResponse::ok(serde_json::json!(null))
+}
+
 use crate::ipc::SharedState;
 
 pub fn ping() -> IpcResponse {
@@ -68,4 +88,49 @@ pub fn get_config(state: &SharedState) -> IpcResponse {
 pub fn get_telemetry(state: &SharedState) -> IpcResponse {
     let ipc_state = state.lock();
     IpcResponse::ok(&ipc_state.telemetry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::DaemonEvent;
+    use parking_lot::Mutex;
+    use std::sync::{mpsc, Arc};
+
+    #[test]
+    fn openrgb_retry_requires_failure_coalesces_requests_and_reports_queue_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(crate::ipc::DaemonState::new(
+            root.path().join("config.json"),
+        )));
+        let (tx, rx) = mpsc::channel();
+        assert!(matches!(
+            retry_openrgb(&state, tx.clone()),
+            IpcResponse::Error { .. }
+        ));
+        {
+            let mut state = state.lock();
+            state.telemetry.openrgb_status.enabled = true;
+            state.telemetry.openrgb_status.error = Some("Port in use".into());
+        }
+        assert!(matches!(
+            retry_openrgb(&state, tx.clone()),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(state.lock().openrgb_retry_pending);
+        assert!(matches!(
+            retry_openrgb(&state, tx.clone()),
+            IpcResponse::Error { .. }
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), DaemonEvent::RetryOpenRgb));
+        assert!(rx.try_recv().is_err());
+        assert!(state.lock().config.is_none());
+        state.lock().openrgb_retry_pending = false;
+        drop(rx);
+        assert!(matches!(
+            retry_openrgb(&state, tx),
+            IpcResponse::Error { .. }
+        ));
+        assert!(!state.lock().openrgb_retry_pending);
+    }
 }

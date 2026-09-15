@@ -202,11 +202,22 @@ impl ServiceManager {
             .unwrap_or((false, 6743));
         let openrgb_status = {
             let orgb_state = self.openrgb.state.lock();
+            let exited = enabled
+                && !self.openrgb.stop.load(std::sync::atomic::Ordering::Relaxed)
+                && self
+                    .openrgb
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.is_finished());
             lianli_shared::ipc::OpenRgbServerStatus {
                 enabled,
-                running: orgb_state.running,
+                running: orgb_state.running && !exited,
                 port: orgb_state.port,
-                error: orgb_state.error.clone(),
+                error: orgb_state.error.clone().or_else(|| {
+                    exited.then(|| {
+                        "OpenRGB worker exited; retry the server after checking daemon logs".into()
+                    })
+                }),
             }
         };
 
