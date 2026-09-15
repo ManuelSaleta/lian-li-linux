@@ -378,6 +378,7 @@ const WAIT_BUFFER_POLL: Duration = Duration::from_millis(50);
 const WAIT_BUFFER_NO_STOP_CAP: u32 = 600;
 
 pub(crate) struct WinUsbLcdCore {
+    pub(crate) h264_transferred: Option<Arc<AtomicBool>>,
     transport: SharedTransport,
     builder: PacketBuilder,
     screen: ScreenInfo,
@@ -462,6 +463,7 @@ impl WinUsbLcdCore {
 
         Ok(Self {
             transport: Arc::new(LcdLink::new(transport, Some(device.clone()))),
+            h264_transferred: None,
             builder: PacketBuilder::new(),
             screen,
             write_timeout,
@@ -484,6 +486,7 @@ impl WinUsbLcdCore {
     ) -> Self {
         Self {
             transport,
+            h264_transferred: None,
             builder: PacketBuilder::new(),
             screen,
             write_timeout,
@@ -700,7 +703,17 @@ impl WinUsbLcdCore {
         match bulk.read(&mut response, self.read_timeout) {
             Ok(length) => match transport.h264_chunk_size.update(&response[..length]) {
                 Some(size) => debug!("H264 chunk size from device: {size}"),
-                None => warn!("Invalid GetH264Block response ({length} bytes)"),
+                None if response.get(8..12) == Some(&[0, 0, 0, 0]) && length >= 12 => {
+                    debug!(
+                        "Device requested the default H264 chunk size: {DEFAULT_H264_CHUNK_SIZE}"
+                    );
+                }
+                None => warn!(
+                    "Invalid GetH264Block response ({length} bytes, block size {:?})",
+                    response[..length]
+                        .get(8..12)
+                        .map(|bytes| u32::from_be_bytes(bytes.try_into().expect("four-byte size")))
+                ),
             },
             Err(error) => warn!("Read after GetH264Block failed: {error}"),
         }
@@ -1075,6 +1088,9 @@ impl WinUsbLcdCore {
         }
 
         let resp = self.read_response("h264 chunk");
+        if let Some(transferred) = &self.h264_transferred {
+            transferred.store(true, Ordering::Release);
+        }
         let mut level = resp.map(|buf| buf[8]);
         if let Some(buf) = resp {
             if buf[8] > 3 {

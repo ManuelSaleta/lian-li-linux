@@ -191,7 +191,19 @@ impl ServiceManager {
 
     /// Update IPC telemetry and device list.
     pub(super) fn sync_ipc_telemetry(&self) {
-        let streaming_active = !self.targets.lock().is_empty();
+        let (streaming_active, media_runtime) = {
+            let targets = self.targets.lock();
+            let runtime: HashMap<_, _> = targets
+                .iter()
+                .filter_map(|(index, target)| {
+                    self.media_requested_keys
+                        .get(*index)
+                        .filter(|key| **key == target.asset.config_key)
+                        .map(|_| (*index, target.media_status()))
+                })
+                .collect();
+            (!targets.is_empty(), runtime)
+        };
 
         // OpenRGB server status
         let (enabled, _) = self
@@ -214,9 +226,7 @@ impl ServiceManager {
                 running: orgb_state.running && !exited,
                 port: orgb_state.port,
                 error: orgb_state.error.clone().or_else(|| {
-                    exited.then(|| {
-                        "OpenRGB worker exited; retry the server after checking daemon logs".into()
-                    })
+                    exited.then(|| "OpenRGB stopped. Check daemon logs, then Retry OpenRGB.".into())
                 }),
             }
         };
@@ -472,6 +482,9 @@ impl ServiceManager {
 
         {
             let mut ipc_state = self.ipc.state.lock();
+            for (index, status) in &mut ipc_state.telemetry.media_preparation {
+                status.runtime = media_runtime.get(index).cloned();
+            }
             ipc_state.telemetry.streaming_active = streaming_active;
             ipc_state.telemetry.openrgb_status = openrgb_status;
             ipc_state.telemetry.fan_rpms = fan_rpms;

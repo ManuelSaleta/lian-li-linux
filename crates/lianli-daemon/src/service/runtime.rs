@@ -2,6 +2,7 @@ use super::renderers::{
     AsyncCustomH264Renderer, AsyncCustomRenderer, AsyncSensorH264Renderer, AsyncSensorRenderer,
     AsyncVideoPlayer,
 };
+use super::source_preparation::{PreparedSource, SourceRequest, SourceResult};
 use super::DaemonEvent;
 use lianli_devices::crypto::PacketBuilder;
 use lianli_devices::slv3_lcd::Slv3LcdDevice;
@@ -24,27 +25,35 @@ use tracing::{debug, info, warn};
 pub(super) type SharedHidLcd = Arc<HidLcd>;
 
 pub(super) struct HidLcd {
+    attachment: Arc<()>,
     device: Mutex<Box<dyn LcdDevice>>,
-    // Separate from the LCD mutex: recovery must not even take that mutex
-    // while a worker is feeding H.264. Count overlapping replacement workers.
-    //
-    // Ungated device access is limited to non autonomous frame sends,
-    // brightness applies and the init worker, only brightness can overlap
-    // a live stream
+    // Recovery and another H.264 producer must wait until the current stream releases its lease.
     streams: Mutex<usize>,
 }
 
 impl HidLcd {
     pub(super) fn new(device: Box<dyn LcdDevice>) -> Self {
         Self {
+            attachment: Arc::new(()),
             device: Mutex::new(device),
             streams: Mutex::new(0),
         }
     }
 
-    /// Recovery may hold the gate for seconds; let the caller retry next tick.
+    pub(super) fn attachment(&self) -> std::sync::Weak<()> {
+        Arc::downgrade(&self.attachment)
+    }
+
+    pub(super) fn matches_attachment(&self, attachment: &std::sync::Weak<()>) -> bool {
+        std::sync::Weak::ptr_eq(&self.attachment(), attachment)
+    }
+
     fn begin_stream(self: &Arc<Self>) -> Option<HidStreamLease> {
-        *self.streams.try_lock()? += 1;
+        let mut streams = self.streams.try_lock()?;
+        if *streams != 0 {
+            return None;
+        }
+        *streams = 1;
         Some(HidStreamLease {
             lcd: Arc::clone(self),
             released: Arc::new(AtomicBool::new(false)),
@@ -151,6 +160,7 @@ fn spawn_hid_h264_stream(
     stop: Arc<AtomicBool>,
     fps: f32,
     lease: HidStreamLease,
+    transferred: Arc<AtomicBool>,
 ) -> (JoinHandle<()>, Arc<AtomicBool>) {
     use lianli_devices::hydroshift_lcd::{find_au_split, pace_frame};
     use std::io::Read;
@@ -212,6 +222,7 @@ fn spawn_hid_h264_stream(
                 if !send_h264_au_with_retry(&lcd, &au, &halted) {
                     return;
                 }
+                transferred.store(true, Ordering::Release);
                 pace_frame(&mut next_deadline, frame_interval);
                 if halted() {
                     return;
@@ -220,7 +231,9 @@ fn spawn_hid_h264_stream(
         }
         if clean_eof && !halted() && !accum.is_empty() {
             pace_frame(&mut next_deadline, frame_interval);
-            send_h264_au_with_retry(&lcd, &accum, &halted);
+            if send_h264_au_with_retry(&lcd, &accum, &halted) {
+                transferred.store(true, Ordering::Release);
+            }
         }
     });
     (handle, halt)
@@ -232,16 +245,13 @@ pub(super) enum LcdBackend {
     HidLcd(SharedHidLcd),
 }
 
-/// The LCD mutex could not be taken within the bounded wait, meaning the
-/// init worker is holding it across its long settle and firmware retries.
-/// Frame sends treat it as a retry later rather than an error so the
-/// streaming thread never tears down a target that is merely initializing.
+/// Temporary contention defers a frame without counting toward device recovery.
 #[derive(Debug)]
 struct LcdBusy;
 
 impl std::fmt::Display for LcdBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LCD busy (initializing)")
+        write!(f, "LCD busy. Retry the frame later.")
     }
 }
 impl std::error::Error for LcdBusy {}
@@ -352,6 +362,7 @@ impl LcdBackend {
 }
 
 pub(super) struct HidStreamWorker {
+    transferred: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     halt: Arc<AtomicBool>,
     lease: Option<HidStreamLease>,
@@ -373,6 +384,7 @@ impl HidStreamWorker {
         fps: f32,
     ) -> Self {
         let mut worker = Self {
+            transferred: Arc::new(AtomicBool::new(false)),
             handle: None,
             halt: Arc::new(AtomicBool::new(false)),
             lease: None,
@@ -402,6 +414,7 @@ impl HidStreamWorker {
             pending.stop,
             pending.fps,
             lease.clone(),
+            self.transferred.clone(),
         );
         self.handle = Some(handle);
         self.halt = halt;
@@ -443,14 +456,31 @@ pub(super) enum StreamRestarter {
 }
 
 impl StreamRestarter {
-    /// Called before feeding the encoder so a deferred reader cannot fill its pipe.
-    pub(super) fn try_start_pending(&self) -> bool {
+    pub(super) fn transferred(&self) -> Option<bool> {
         match self {
-            Self::HidLcd(_, current) => current
-                .lock()
-                .as_mut()
-                .is_none_or(HidStreamWorker::try_start),
-            Self::WinUsb(..) => true,
+            Self::HidLcd(_, current) => current.try_lock().map(|current| {
+                current
+                    .as_ref()
+                    .is_some_and(|worker| worker.transferred.load(Ordering::Acquire))
+            }),
+            Self::WinUsb(..) => None,
+        }
+    }
+    /// Called before feeding the encoder so a deferred reader cannot fill its pipe.
+    pub(super) fn try_start_pending(&self) -> anyhow::Result<bool> {
+        match self {
+            Self::HidLcd(_, current) => {
+                let mut current = current.lock();
+                let Some(worker) = current.as_mut() else {
+                    return Ok(true);
+                };
+                anyhow::ensure!(
+                    !worker.handle.as_ref().is_some_and(JoinHandle::is_finished),
+                    "HID H.264 worker stopped. Check daemon logs for the transfer error."
+                );
+                Ok(worker.try_start())
+            }
+            Self::WinUsb(..) => Ok(true),
         }
     }
 
@@ -479,19 +509,18 @@ impl StreamRestarter {
             }
             Self::WinUsb(tx, control, owner) => {
                 let mut owner = owner.lock();
-                let stream_stop = control
-                    .restart(&owner)
-                    .ok_or_else(|| anyhow::anyhow!("H.264 stream was replaced"))?;
-                *owner = stream_stop.clone();
-                tx.try_send(LcdThreadMsg::StreamH264Reader(stdout, fps, stream_stop))
-                    .map_err(|e| anyhow::anyhow!("LCD stream restart was not accepted: {e}"))
+                *owner = control.submit(Some(&owner), |stream_stop| {
+                    tx.try_send(LcdThreadMsg::StreamH264Reader(stdout, fps, stream_stop))
+                        .map_err(|e| anyhow::anyhow!("LCD stream restart was not accepted: {e}"))
+                })?;
+                Ok(())
             }
         }
     }
 }
 
 pub(super) enum LcdThreadMsg {
-    Frame(Vec<u8>),
+    Frame(Vec<u8>, Arc<FrameDelivery>),
     FrameVerified(Vec<u8>, std::sync::mpsc::SyncSender<anyhow::Result<()>>),
     StreamH264 {
         path: PathBuf,
@@ -509,28 +538,100 @@ pub(super) enum LcdThreadMsg {
 #[derive(Default)]
 pub(super) struct StreamControl {
     current: Mutex<Arc<AtomicBool>>,
+    failure: Mutex<Option<String>>,
+    transferred: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl StreamControl {
-    fn next(&self) -> Arc<AtomicBool> {
+    fn submit(
+        &self,
+        expected: Option<&Arc<AtomicBool>>,
+        enqueue: impl FnOnce(Arc<AtomicBool>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Arc<AtomicBool>> {
         let mut current = self.current.lock();
+        if let Some(expected) = expected {
+            anyhow::ensure!(
+                Arc::ptr_eq(&current, expected) && !expected.load(Ordering::Acquire),
+                "H.264 stream was replaced"
+            );
+        }
+        let replacement = Arc::new(AtomicBool::new(false));
+        // The enqueue must be nonblocking. Consumers acquire current before using stream state.
+        enqueue(replacement.clone())?;
         current.store(true, Ordering::Release);
-        *current = Arc::new(AtomicBool::new(false));
-        Arc::clone(&current)
+        *current = replacement.clone();
+        *self.failure.lock() = None;
+        *self.transferred.lock() = Some(Arc::new(AtomicBool::new(false)));
+        Ok(replacement)
+    }
+
+    #[cfg(test)]
+    fn next(&self) -> Arc<AtomicBool> {
+        self.submit(None, |_| Ok(())).unwrap()
     }
 
     fn cancel(&self) {
-        self.current.lock().store(true, Ordering::Release);
+        let current = self.current.lock();
+        current.store(true, Ordering::Release);
+        *self.failure.lock() = None;
+        *self.transferred.lock() = None;
     }
 
+    #[cfg(test)]
     fn restart(&self, expected: &Arc<AtomicBool>) -> Option<Arc<AtomicBool>> {
-        let mut current = self.current.lock();
+        self.submit(Some(expected), |_| Ok(())).ok()
+    }
+
+    fn transfer_observer(&self, expected: &Arc<AtomicBool>) -> Option<Arc<AtomicBool>> {
+        let current = self.current.lock();
         if !Arc::ptr_eq(&current, expected) || expected.load(Ordering::Acquire) {
             return None;
         }
-        current.store(true, Ordering::Release);
-        *current = Arc::new(AtomicBool::new(false));
-        Some(Arc::clone(&current))
+        self.transferred.lock().clone()
+    }
+
+    fn transferred(&self) -> Option<bool> {
+        let current = self.current.lock();
+        if current.load(Ordering::Acquire) {
+            return None;
+        }
+        self.transferred
+            .lock()
+            .as_ref()
+            .map(|flag| flag.load(Ordering::Acquire))
+    }
+
+    fn failed(&self, expected: &Arc<AtomicBool>, error: &str) {
+        let current = self.current.lock();
+        if Arc::ptr_eq(&current, expected) && !expected.load(Ordering::Acquire) {
+            *self.failure.lock() = Some(error.chars().take(2048).collect());
+        }
+    }
+
+    fn take_failure(&self) -> Option<String> {
+        let current = self.current.lock();
+        let failure = self.failure.lock().take();
+        if failure.is_some() {
+            current.store(true, Ordering::Release);
+        }
+        failure
+    }
+}
+
+#[derive(Default)]
+pub(super) struct FrameDelivery {
+    retired: AtomicBool,
+    failure: Mutex<Option<String>>,
+}
+
+impl FrameDelivery {
+    fn submit(&self, send: impl FnOnce() -> anyhow::Result<()>) {
+        if self.retired.load(Ordering::Acquire) || self.failure.lock().is_some() {
+            return;
+        }
+        if let Err(error) = send() {
+            *self.failure.lock() = Some(error.to_string().chars().take(2048).collect());
+        }
     }
 }
 
@@ -538,6 +639,7 @@ pub(super) struct ThreadedWinUsbSender {
     transport: Option<lianli_devices::winusb::lcd::SharedTransport>,
     tx: std::sync::mpsc::SyncSender<LcdThreadMsg>,
     stream_control: Arc<StreamControl>,
+    frame_delivery: Arc<FrameDelivery>,
     closing: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -547,6 +649,7 @@ impl ThreadedWinUsbSender {
         let transport = Some(device.shared_transport());
         let (tx, rx) = std::sync::mpsc::sync_channel::<LcdThreadMsg>(2);
         let stream_control = Arc::new(StreamControl::default());
+        let worker_control = stream_control.clone();
         let closing = Arc::new(AtomicBool::new(false));
         let closing_clone = Arc::clone(&closing);
         let thread = thread::spawn(move || {
@@ -557,14 +660,8 @@ impl ThreadedWinUsbSender {
                     continue;
                 }
                 match msg {
-                    LcdThreadMsg::Frame(data) => {
-                        if let Err(e) = device.send_frame(&data) {
-                            if lianli_transport::usb::shutting_down() {
-                                debug!("LCD[{index}] frame send refused during shutdown: {e:#}");
-                            } else {
-                                warn!("LCD[{index}] sender thread frame error: {e}");
-                            }
-                        }
+                    LcdThreadMsg::Frame(data, delivery) => {
+                        delivery.submit(|| device.send_frame(&data))
                     }
                     LcdThreadMsg::FrameVerified(data, reply) => {
                         let result = device.send_frame_verified(&data);
@@ -579,7 +676,13 @@ impl ThreadedWinUsbSender {
                         if stop.load(Ordering::Acquire) || closing_clone.load(Ordering::Acquire) {
                             continue;
                         }
+                        let Some(observer) = worker_control.transfer_observer(&stop) else {
+                            continue;
+                        };
+                        device.observe_h264_transfer(observer);
                         if let Err(e) = device.stream_h264(&path, looping, &stop, fps) {
+                            worker_control
+                                .failed(&stop, &format!("H.264 file transfer failed: {e:#}"));
                             if lianli_transport::usb::shutting_down() {
                                 debug!("LCD[{index}] h264 stream ended by shutdown: {e:#}");
                             } else {
@@ -591,7 +694,13 @@ impl ThreadedWinUsbSender {
                         if stop.load(Ordering::Acquire) || closing_clone.load(Ordering::Acquire) {
                             continue;
                         }
+                        let Some(observer) = worker_control.transfer_observer(&stop) else {
+                            continue;
+                        };
+                        device.observe_h264_transfer(observer);
                         if let Err(e) = device.stream_h264_reader(&mut stdout, &stop, fps) {
+                            worker_control
+                                .failed(&stop, &format!("Live H.264 transfer failed: {e:#}"));
                             if lianli_transport::usb::shutting_down() {
                                 debug!("LCD[{index}] h264 live stream ended by shutdown: {e:#}");
                             } else {
@@ -627,21 +736,23 @@ impl ThreadedWinUsbSender {
             transport,
             tx,
             stream_control,
+            frame_delivery: Arc::new(FrameDelivery::default()),
             closing,
             thread: Some(thread),
         }
     }
 
     fn stream_h264(&self, path: PathBuf, looping: bool, fps: f32) -> anyhow::Result<()> {
-        let stop = self.stream_control.next();
-        self.tx
-            .try_send(LcdThreadMsg::StreamH264 {
-                path,
-                looping,
-                fps,
-                stop,
-            })
-            .map_err(|e| anyhow::anyhow!("LCD file stream was not accepted: {e}"))?;
+        self.stream_control.submit(None, |stop| {
+            self.tx
+                .try_send(LcdThreadMsg::StreamH264 {
+                    path,
+                    looping,
+                    fps,
+                    stop,
+                })
+                .map_err(|e| anyhow::anyhow!("LCD file stream was not accepted: {e}"))
+        })?;
         Ok(())
     }
 
@@ -650,10 +761,11 @@ impl ThreadedWinUsbSender {
         stdout: std::process::ChildStdout,
         fps: f32,
     ) -> anyhow::Result<()> {
-        let stop = self.stream_control.next();
-        self.tx
-            .try_send(LcdThreadMsg::StreamH264Reader(stdout, fps, stop))
-            .map_err(|e| anyhow::anyhow!("LCD live stream was not accepted: {e}"))?;
+        self.stream_control.submit(None, |stop| {
+            self.tx
+                .try_send(LcdThreadMsg::StreamH264Reader(stdout, fps, stop))
+                .map_err(|e| anyhow::anyhow!("LCD live stream was not accepted: {e}"))
+        })?;
         Ok(())
     }
 
@@ -661,7 +773,7 @@ impl ThreadedWinUsbSender {
         match self.tx.try_send(LcdThreadMsg::SetBrightness(brightness)) {
             Ok(()) => Ok(()),
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                anyhow::bail!("LCD sender busy; brightness was not accepted")
+                anyhow::bail!("LCD busy. Brightness change was not accepted.")
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 anyhow::bail!("LCD sender thread exited")
@@ -671,16 +783,21 @@ impl ThreadedWinUsbSender {
 
     fn send_frame(&self, frame: &[u8]) -> anyhow::Result<()> {
         self.stream_control.cancel();
-        match self.tx.try_send(LcdThreadMsg::Frame(frame.to_vec())) {
+        match self.tx.try_send(LcdThreadMsg::Frame(
+            frame.to_vec(),
+            self.frame_delivery.clone(),
+        )) {
             Ok(()) => Ok(()),
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                debug!("LCD sender busy, dropping frame");
-                Ok(())
-            }
+            Err(std::sync::mpsc::TrySendError::Full(_)) => Err(LcdBusy.into()),
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 anyhow::bail!("LCD sender thread exited")
             }
         }
+    }
+
+    fn reset_frame_delivery(&mut self) {
+        self.frame_delivery.retired.store(true, Ordering::Release);
+        self.frame_delivery = Arc::new(FrameDelivery::default());
     }
 
     pub(super) fn switch_to_desktop_mode(&mut self) -> anyhow::Result<()> {
@@ -790,14 +907,20 @@ pub(crate) struct ActiveTarget {
     // the encoder's stdin, ffmpeg flushes its trailer to stdout, and the WinUsb
     // thread (owned by `lcd`) needs to still be alive to drain it.
     media: Box<dyn FrameSource>,
+    retired_media: Option<RetiredSource>,
+    removal: Option<Arc<()>>,
+    playback_asset: Arc<MediaAsset>,
     media_pending: bool,
+    media_paused: bool,
+    source_failed: bool,
+    source_selection: Arc<()>,
+    media_stage: lianli_shared::ipc::MediaRuntimeStage,
+    media_fallback: Option<String>,
     media_tx: Option<Sender<DaemonEvent>>,
     pub(super) lcd: LcdBackend,
     pub(super) asset: Arc<MediaAsset>,
     pub(super) screen: ScreenInfo,
     pub(super) custom_h264: bool,
-    // This variable contains the last seen frame version. Each renderer holds a frame version counter which gets increased each time it actually writes into the frame. The first time it writes into the frame sets the frame version to 1
-    // By using this mechanism we are able to detect whether we actually need to send the frame via USB bus to the LCD, and thus we can save quite a lot of time by not sending frames which are already displayed.
     pub(super) frame_counter: u64,
     pub(super) consecutive_errors: u32,
     recovery_stop: Arc<AtomicBool>,
@@ -903,7 +1026,15 @@ impl ActiveTarget {
             device_identity,
             lcd,
             media,
+            playback_asset: asset.clone(),
             media_pending: true,
+            media_paused: false,
+            retired_media: None,
+            removal: None,
+            source_failed: false,
+            source_selection: Arc::new(()),
+            media_stage: lianli_shared::ipc::MediaRuntimeStage::StartingSource,
+            media_fallback: None,
             media_tx: tx,
             asset,
             screen,
@@ -925,7 +1056,7 @@ impl ActiveTarget {
     /// device poll with a zero wait so a busy LCD is retried later
     /// instead of disabling recovery for the whole session.
     pub(super) fn maybe_start_recovery(&mut self, tx: Option<Sender<DaemonEvent>>, wait: Duration) {
-        if self.recovery_thread.is_some() || self.recovery_unsupported {
+        if self.removal.is_some() || self.recovery_thread.is_some() || self.recovery_unsupported {
             return;
         }
         let LcdBackend::HidLcd(d) = &self.lcd else {
@@ -999,12 +1130,13 @@ impl ActiveTarget {
         builder: &mut PacketBuilder,
         brightness: u8,
     ) {
-        if !self.media_pending && self.media.is_autonomous() {
-            if let LcdBackend::WinUsb(sender) = &self.lcd {
-                sender.stream_control.cancel();
-                self.media = Box::new(NoopFrameSource);
-                self.media_pending = true;
-            }
+        if self.removal.is_some() {
+            return;
+        }
+        if self.media.is_autonomous() && matches!(&self.lcd, LcdBackend::WinUsb(_)) {
+            self.pause_source();
+            self.media_pending = true;
+            self.source_selection = Arc::new(());
         }
         self.pending_brightness = Some(brightness);
         self.brightness_retries = 3;
@@ -1046,23 +1178,22 @@ impl ActiveTarget {
         self.device_identity == identity && key == &self.key
     }
 
-    /// Replace the media asset without reopening the LCD transport.
     pub(super) fn swap_media(
         &mut self,
         asset: Arc<MediaAsset>,
         custom_h264: bool,
         tx: Option<Sender<DaemonEvent>>,
     ) {
-        self.media = Box::new(NoopFrameSource);
         self.key = asset.config_key.clone();
+        if self.media_stage == lianli_shared::ipc::MediaRuntimeStage::Failed {
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::StartingSource;
+        }
         self.asset = Arc::clone(&asset);
         self.custom_h264 = custom_h264;
-        if let LcdBackend::WinUsb(sender) = &self.lcd {
-            sender.stream_control.cancel();
-        }
         self.media_pending = true;
+        self.source_failed = false;
+        self.source_selection = Arc::new(());
         self.media_tx = tx;
-        self.frame_counter = 0;
         info!(
             "[devices] LCD[{}] media swapped (keeping transport)",
             self.index
@@ -1083,31 +1214,179 @@ impl ActiveTarget {
         self.swap_media(Arc::clone(&self.asset), custom_h264, tx);
     }
 
+    pub(super) fn source_request(&self) -> Option<SourceRequest> {
+        (self.media_pending
+            && self.removal.is_none()
+            && self.retired_media.is_none()
+            && self.pending_brightness.is_none()
+            && self.needs_source_preparation())
+        .then(|| SourceRequest {
+            index: self.index,
+            selection: Arc::downgrade(&self.source_selection),
+            asset: self.asset.clone(),
+            screen: self.screen,
+            custom_h264: self.custom_h264,
+            tx: self.media_tx.clone(),
+        })
+    }
+
+    fn needs_source_preparation(&self) -> bool {
+        matches!(
+            &self.asset.kind,
+            MediaAssetKind::Sensor { .. } | MediaAssetKind::Custom { .. }
+        )
+    }
+
+    pub(super) fn accepts_source(&self, result: &SourceResult) -> bool {
+        self.index == result.index
+            && self.media_pending
+            && self.removal.is_none()
+            && self.retired_media.is_none()
+            && self.pending_brightness.is_none()
+            && std::sync::Weak::ptr_eq(&result.selection, &Arc::downgrade(&self.source_selection))
+    }
+
+    pub(super) fn install_source(&mut self, result: SourceResult) {
+        let mut fallback = None;
+        let media = result.result.try_accept(|prepared| {
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => return Err((Err(error.clone()), anyhow::anyhow!(error))),
+            };
+            attach_prepared_source(prepared, &self.lcd, &mut fallback)
+                .map_err(|(prepared, error)| (Ok(prepared), error))
+        });
+        self.finish_source_install(media, fallback);
+    }
+
+    fn finish_source_install(
+        &mut self,
+        media: anyhow::Result<Box<dyn FrameSource>>,
+        fallback: Option<String>,
+    ) {
+        let media = match media {
+            Ok(media) => media,
+            Err(error) => {
+                self.media_pending = false;
+                self.source_failed = true;
+                self.media_fallback = Some(
+                    format!("Media attachment failed: {error:#}")
+                        .chars()
+                        .take(2048)
+                        .collect(),
+                );
+                return;
+            }
+        };
+        self.begin_source_install(media.is_autonomous());
+        self.media = media;
+        self.media_fallback = fallback;
+        self.media_pending = false;
+    }
+
+    fn begin_source_install(&mut self, autonomous: bool) {
+        assert!(self.retired_media.is_none());
+        self.media.request_stop();
+        self.retired_media = Some(RetiredSource {
+            source: std::mem::replace(&mut self.media, Box::new(NoopFrameSource)),
+            _asset: self.playback_asset.clone(),
+        });
+        if let LcdBackend::WinUsb(sender) = &mut self.lcd {
+            if !autonomous {
+                sender.stream_control.cancel();
+            }
+            sender.reset_frame_delivery();
+        }
+        self.playback_asset = self.asset.clone();
+        self.media_paused = false;
+        self.source_failed = false;
+        self.media_stage = lianli_shared::ipc::MediaRuntimeStage::StartingSource;
+        self.media_fallback = None;
+        self.frame_counter = 0;
+    }
+
+    fn pause_source(&mut self) {
+        self.media.request_stop();
+        self.media_paused = true;
+        if let LcdBackend::WinUsb(sender) = &self.lcd {
+            sender.stream_control.cancel();
+        }
+    }
+
+    pub(super) fn playback_failure_key(&self) -> Option<ConfigKey> {
+        (!self.media_pending && !self.source_failed).then(|| self.playback_asset.config_key.clone())
+    }
+
     pub(super) fn send_frame(
         &mut self,
         wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
     ) -> Result<bool, SendError> {
-        if self.media_pending {
+        if self.removal.is_some()
+            || self.media_stage == lianli_shared::ipc::MediaRuntimeStage::Failed
+        {
+            return Ok(false);
+        }
+        if self.media_pending && self.retired_media.is_none() && !self.needs_source_preparation() {
             if self.pending_brightness.is_some() {
                 return Ok(false);
             }
-            self.media = make_frame_source(
-                Arc::clone(&self.asset),
-                self.media_tx.clone(),
-                &self.lcd,
-                &self.screen,
-                self.custom_h264,
-            );
+            let media = make_frame_source(Arc::clone(&self.asset), self.media_tx.clone())
+                .map_err(SendError::Other)?;
+            self.begin_source_install(media.is_autonomous());
+            self.media = media;
             self.media_pending = false;
+        }
+        if self.media_paused {
+            return Ok(false);
+        }
+        let frame_failure = match &self.lcd {
+            LcdBackend::WinUsb(sender) => sender.frame_delivery.failure.lock().clone(),
+            _ => None,
+        };
+        if let Some(error) = frame_failure {
+            warn!("LCD[{}] JPEG transfer failed: {error}", self.index);
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+            self.pause_source();
+            return Err(SendError::Stopped(format!("JPEG transfer failed: {error}")));
         }
         // H.264 / autonomous sources: kick off streaming on the first call,
         // then short-circuit (their threads push frames directly to the LCD).
         if self.media.is_autonomous() {
-            self.media.start(&self.lcd).map_err(SendError::Other)?;
+            if let LcdBackend::WinUsb(sender) = &self.lcd {
+                if let Some(error) = sender.stream_control.take_failure() {
+                    self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+                    self.pause_source();
+                    return Err(SendError::Stopped(error));
+                }
+            }
+            if self.media.has_exited() {
+                self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+                self.pause_source();
+                return Err(SendError::Stopped(
+                    "H.264 playback failed. Check daemon logs, then use Retry failed media in Installation Health."
+                        .into(),
+                ));
+            }
+            if let Err(error) = self.media.start(&self.lcd) {
+                if self.media.has_exited() {
+                    self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+                    self.pause_source();
+                    return Err(SendError::Stopped(error.to_string()));
+                }
+                return Err(SendError::Other(error));
+            }
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::AutonomousSourceConfigured;
             return Ok(true);
         }
 
+        if self.media.has_exited() {
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+            self.pause_source();
+            return Err(SendError::Stopped(
+                "JPEG rendering failed. Check daemon logs, then use Retry failed media in Installation Health.".into(),
+            ));
+        }
         let is_static = self.media.is_static();
         let frame = match self.media.next_frame() {
             Some(bytes) => bytes,
@@ -1121,14 +1400,8 @@ impl ActiveTarget {
         };
         match result {
             Ok(()) => {}
-            // The init worker holds the LCD for its whole settle window.
-            // Report nothing sent so the version check retries next tick
-            // instead of counting an error toward target recreation.
             Err(e) if e.downcast_ref::<LcdBusy>().is_some() => {
-                debug!(
-                    "[devices] LCD[{}] initializing, deferring frame send",
-                    self.index
-                );
+                debug!("[devices] LCD[{}] busy, deferring frame send", self.index);
                 return Ok(false);
             }
             Err(err) => {
@@ -1142,14 +1415,115 @@ impl ActiveTarget {
 
         self.frame_counter += 1;
         self.media.mark_sent();
+        self.media_stage = lianli_shared::ipc::MediaRuntimeStage::FrameSubmitted;
         Ok(true)
+    }
+
+    pub(super) fn media_status(&self) -> lianli_shared::ipc::MediaRuntimeStatus {
+        lianli_shared::ipc::MediaRuntimeStatus {
+            stage: if self.source_failed || self.removal.is_some() {
+                lianli_shared::ipc::MediaRuntimeStage::Failed
+            } else {
+                self.media_stage
+            },
+            fps_limit: self.playback_asset.stream_fps,
+            hardware_video_allowed: self.playback_asset.hardware_video,
+            fallback_reason: self.media_fallback.clone(),
+            h264_transfer_started: match &self.lcd {
+                LcdBackend::WinUsb(sender) if self.media.is_autonomous() => {
+                    sender.stream_control.transferred()
+                }
+                _ => self.media.transferred(),
+            },
+            encoder: match &self.playback_asset.kind {
+                MediaAssetKind::H264Stream { encoder, .. } => encoder.clone(),
+                _ => self.media.encoder_status(),
+            },
+        }
+    }
+
+    pub(super) fn retry_failed_source(&mut self) {
+        if self.removal.is_some() {
+            return;
+        }
+        if self.source_failed || self.media_stage == lianli_shared::ipc::MediaRuntimeStage::Failed {
+            if let LcdBackend::WinUsb(sender) = &mut self.lcd {
+                sender.reset_frame_delivery();
+            }
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::StartingSource;
+            self.media_pending = true;
+            self.source_failed = false;
+            self.source_selection = Arc::new(());
+            self.media_fallback = None;
+        }
+    }
+
+    pub(super) fn removal_event(&mut self, error: String) -> Option<DaemonEvent> {
+        let removal = self.request_removal()?;
+        let error: String = error.chars().take(2048).collect();
+        self.media_fallback = Some(error.clone());
+        Some(DaemonEvent::RemoveFailedLcd {
+            target_index: self.index,
+            removal,
+            key: self.asset.config_key.clone(),
+            error,
+        })
+    }
+
+    fn request_removal(&mut self) -> Option<std::sync::Weak<()>> {
+        if self.removal.is_some() {
+            return None;
+        }
+        let removal = Arc::new(());
+        let token = Arc::downgrade(&removal);
+        self.removal = Some(removal);
+        self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+        self.media_pending = false;
+        self.media.request_stop();
+        self.recovery_stop.store(true, Ordering::Relaxed);
+        self.source_selection = Arc::new(());
+        self.pending_brightness = None;
+        if let LcdBackend::WinUsb(sender) = &self.lcd {
+            sender.stream_control.cancel();
+        }
+        Some(token)
+    }
+
+    pub(super) fn matches_removal(&self, token: &std::sync::Weak<()>) -> bool {
+        self.removal
+            .as_ref()
+            .is_some_and(|removal| std::sync::Weak::ptr_eq(token, &Arc::downgrade(removal)))
+    }
+
+    pub(super) fn take_finished_retirement(&mut self) -> Option<RetiredSource> {
+        if self.retired_media.as_ref()?.source.retirement_complete() {
+            self.retired_media.take()
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn return_retirement(&mut self, source: RetiredSource) {
+        assert!(self.retired_media.is_none());
+        self.retired_media = Some(source);
     }
 
     pub(super) fn stop(&mut self) {
         self.recovery_stop.store(true, Ordering::Relaxed);
         self.media_pending = false;
-        // dropping media sets the renderer stop flags, which unblock stop()
+        self.source_selection = Arc::new(());
+        let retired = self
+            .retired_media
+            .as_mut()
+            .map(|source| source.source.as_mut());
+        if !stop_frame_sources(self.media.as_mut(), retired, Duration::from_secs(3)) {
+            warn!(
+                "LCD[{}] media workers are still finishing shutdown",
+                self.index
+            );
+        }
         self.media = Box::new(NoopFrameSource);
+        drop(self.retired_media.take());
         if let Some(t) = self.recovery_thread.take() {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !t.is_finished() && std::time::Instant::now() < deadline {
@@ -1158,6 +1532,11 @@ impl ActiveTarget {
             if !t.is_finished() {
                 warn!(
                     "LCD[{}] recovery thread did not stop in 5s — detaching it",
+                    self.index
+                );
+            } else if t.join().is_err() {
+                warn!(
+                    "LCD[{}] recovery thread panicked during shutdown",
                     self.index
                 );
             }
@@ -1205,12 +1584,29 @@ impl Drop for ActiveTarget {
     }
 }
 
+pub(super) struct RetiredSource {
+    source: Box<dyn FrameSource>,
+    _asset: Arc<MediaAsset>,
+}
+
 /// A source of JPEG frames to push to an LCD, or an autonomous H.264
 /// pipeline that streams directly to the device.
-///
-/// Every `MediaRuntime` variant is now one of these. The trait lets
-/// `ActiveTarget::send_frame` dispatch without a 7-arm match.
-trait FrameSource: Send {
+pub(super) trait FrameSource: Send {
+    fn request_stop(&mut self) {}
+
+    fn retirement_complete(&self) -> bool {
+        true
+    }
+
+    fn transferred(&self) -> Option<bool> {
+        None
+    }
+    fn encoder_status(&self) -> Option<lianli_shared::ipc::MediaEncoderStatus> {
+        None
+    }
+    fn has_exited(&self) -> bool {
+        false
+    }
     /// Called on the first `send_frame` after the source is attached. For
     /// H.264 file streaming, this kicks off the streaming thread.
     fn start(&mut self, _lcd: &LcdBackend) -> anyhow::Result<()> {
@@ -1237,6 +1633,30 @@ trait FrameSource: Send {
     fn is_autonomous(&self) -> bool {
         false
     }
+}
+
+fn stop_frame_sources(
+    current: &mut dyn FrameSource,
+    mut retired: Option<&mut (dyn FrameSource + 'static)>,
+    timeout: Duration,
+) -> bool {
+    current.request_stop();
+    if let Some(source) = &mut retired {
+        source.request_stop();
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    while !current.retirement_complete()
+        || retired
+            .as_ref()
+            .is_some_and(|source| !source.retirement_complete())
+    {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    true
 }
 
 struct NoopFrameSource;
@@ -1267,16 +1687,28 @@ struct VideoSource {
     player: Arc<AsyncVideoPlayer>,
     frames: Arc<lianli_media::Retained<Vec<Vec<u8>>>>,
     sent_index: usize,
+    pending_index: usize,
 }
 impl FrameSource for VideoSource {
+    fn request_stop(&mut self) {
+        self.player.request_stop();
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.player.retirement_complete()
+    }
+
     fn next_frame(&mut self) -> Option<&[u8]> {
         let idx = self.player.get_frame_index();
         if idx <= self.sent_index || self.frames.is_empty() {
             return None;
         }
         let ret = Some(self.frames[idx % self.frames.len()].as_slice());
-        self.sent_index = idx;
+        self.pending_index = idx;
         ret
+    }
+    fn mark_sent(&mut self) {
+        self.sent_index = self.pending_index;
     }
 }
 
@@ -1284,16 +1716,34 @@ struct SensorSource {
     renderer: Arc<AsyncSensorRenderer>,
     cached: Vec<u8>,
     sent_index: usize,
+    pending_index: usize,
 }
 impl FrameSource for SensorSource {
+    fn request_stop(&mut self) {
+        self.renderer.request_stop();
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.renderer.retirement_complete()
+    }
+
+    fn has_exited(&self) -> bool {
+        self.renderer.has_exited()
+    }
+
     fn next_frame(&mut self) -> Option<&[u8]> {
         let idx = self.renderer.get_frame_index();
         if idx <= self.sent_index {
             return None;
         }
-        self.cached = self.renderer.get_current_frame();
-        self.sent_index = idx;
+        if self.pending_index != idx {
+            self.cached = self.renderer.get_current_frame();
+            self.pending_index = idx;
+        }
         Some(self.cached.as_slice())
+    }
+    fn mark_sent(&mut self) {
+        self.sent_index = self.pending_index;
     }
 }
 
@@ -1301,22 +1751,41 @@ struct CustomSource {
     renderer: Arc<AsyncCustomRenderer>,
     cached: Vec<u8>,
     sent_index: usize,
+    pending_index: usize,
 }
 impl FrameSource for CustomSource {
+    fn request_stop(&mut self) {
+        self.renderer.request_stop();
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.renderer.retirement_complete()
+    }
+
+    fn has_exited(&self) -> bool {
+        self.renderer.has_exited()
+    }
+
     fn next_frame(&mut self) -> Option<&[u8]> {
         let idx = self.renderer.get_frame_index();
         if idx <= self.sent_index {
             return None;
         }
-        self.cached = self.renderer.get_current_frame();
-        self.sent_index = idx;
+        if self.pending_index != idx {
+            self.cached = self.renderer.get_current_frame();
+            self.pending_index = idx;
+        }
         Some(self.cached.as_slice())
+    }
+    fn mark_sent(&mut self) {
+        self.sent_index = self.pending_index;
     }
 }
 
 // ─── H.264 autonomous sources ──────────────────────────────────────────
 
 struct H264FileSource {
+    transferred: Arc<AtomicBool>,
     path: PathBuf,
     looping: bool,
     fps: f32,
@@ -1335,6 +1804,7 @@ const FILE_OPEN_RETRY: Duration = Duration::from_secs(5);
 impl H264FileSource {
     fn new(path: PathBuf, looping: bool, fps: f32) -> Self {
         Self {
+            transferred: Arc::new(AtomicBool::new(false)),
             path,
             looping,
             fps,
@@ -1348,6 +1818,31 @@ impl H264FileSource {
 }
 
 impl FrameSource for H264FileSource {
+    fn request_stop(&mut self) {
+        self.hid_stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = &self.hid_thread {
+            worker.thread().unpark();
+        }
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.hid_thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    fn transferred(&self) -> Option<bool> {
+        self.hid_completed
+            .as_ref()
+            .map(|_| self.transferred.load(Ordering::Acquire))
+    }
+    fn has_exited(&self) -> bool {
+        self.started
+            && self.hid_completed.is_some()
+            && self.hid_thread.as_ref().is_none_or(JoinHandle::is_finished)
+            && !self
+                .hid_completed
+                .as_ref()
+                .is_some_and(|completed| completed.load(Ordering::Acquire))
+    }
     fn start(&mut self, lcd: &LcdBackend) -> anyhow::Result<()> {
         if self.started {
             if let Some(ref t) = self.hid_thread {
@@ -1362,11 +1857,7 @@ impl FrameSource for H264FileSource {
                     if completed {
                         return Ok(());
                     }
-                    warn!("HID h264 stream thread ended; resetting for restart");
-                    self.hid_stop = Arc::new(AtomicBool::new(false));
-                    self.started = false;
-                    // Back off so a wedged device cannot spin the restart loop
-                    self.retry_after = Some(std::time::Instant::now() + FILE_OPEN_RETRY);
+                    anyhow::bail!("HID H.264 playback failed. Save media settings to retry.");
                 } else {
                     return Ok(());
                 }
@@ -1400,12 +1891,13 @@ impl FrameSource for H264FileSource {
                 let completed = Arc::new(AtomicBool::new(false));
                 let done = Arc::clone(&completed);
                 self.hid_completed = Some(completed);
+                let transferred = self.transferred.clone();
                 let Some(lease) = lcd.begin_stream() else {
                     return Ok(());
                 };
                 self.hid_thread = Some(thread::spawn(move || {
                     let _lease = lease;
-                    if stream_h264_file_to_hid(lcd, file, looping, fps, stop) {
+                    if stream_h264_file_to_hid(lcd, file, looping, fps, stop, transferred) {
                         done.store(true, Ordering::Release);
                     }
                 }));
@@ -1439,34 +1931,133 @@ impl Drop for H264FileSource {
 }
 
 struct CustomH264Source {
-    #[allow(dead_code)]
     renderer: Arc<AsyncCustomH264Renderer>,
 }
 impl FrameSource for CustomH264Source {
+    fn request_stop(&mut self) {
+        self.renderer.request_stop();
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.renderer.retirement_complete()
+    }
+
+    fn transferred(&self) -> Option<bool> {
+        self.renderer.transferred()
+    }
+    fn encoder_status(&self) -> Option<lianli_shared::ipc::MediaEncoderStatus> {
+        Some(self.renderer.encoder_status())
+    }
+    fn has_exited(&self) -> bool {
+        self.renderer.has_exited()
+    }
     fn is_autonomous(&self) -> bool {
         true
     }
 }
 
 struct SensorH264Source {
-    #[allow(dead_code)]
     renderer: Arc<AsyncSensorH264Renderer>,
 }
 impl FrameSource for SensorH264Source {
+    fn request_stop(&mut self) {
+        self.renderer.request_stop();
+    }
+
+    fn retirement_complete(&self) -> bool {
+        self.renderer.retirement_complete()
+    }
+
+    fn transferred(&self) -> Option<bool> {
+        self.renderer.transferred()
+    }
+    fn encoder_status(&self) -> Option<lianli_shared::ipc::MediaEncoderStatus> {
+        Some(self.renderer.encoder_status())
+    }
+    fn has_exited(&self) -> bool {
+        self.renderer.has_exited()
+    }
     fn is_autonomous(&self) -> bool {
         true
     }
 }
 
 /// Construct the appropriate `FrameSource` for a given media asset + LCD combo.
+pub(super) fn make_jpeg_source(
+    asset: Arc<MediaAsset>,
+    tx: Option<Sender<DaemonEvent>>,
+    screen: &ScreenInfo,
+) -> Option<Box<dyn FrameSource>> {
+    match &asset.kind {
+        MediaAssetKind::Sensor { asset: sensor } => {
+            let renderer = Arc::new(AsyncSensorRenderer::new(
+                tx,
+                sensor.clone(),
+                asset.clone(),
+                screen.needs_keepalive,
+            ));
+            Some(Box::new(SensorSource {
+                cached: renderer.get_current_frame(),
+                renderer,
+                sent_index: 0,
+                pending_index: 0,
+            }))
+        }
+        MediaAssetKind::Custom { asset: custom } => {
+            let renderer = Arc::new(AsyncCustomRenderer::new(
+                tx,
+                custom.clone(),
+                asset.clone(),
+                screen.needs_keepalive,
+            ));
+            Some(Box::new(CustomSource {
+                cached: renderer.get_current_frame(),
+                renderer,
+                sent_index: 0,
+                pending_index: 0,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn attach_prepared_source(
+    prepared: PreparedSource,
+    lcd: &LcdBackend,
+    fallback: &mut Option<String>,
+) -> Result<Box<dyn FrameSource>, (PreparedSource, anyhow::Error)> {
+    match prepared {
+        PreparedSource::Sensor(source) => source
+            .start(lcd)
+            .map(|renderer| {
+                Box::new(SensorH264Source {
+                    renderer: Arc::new(renderer),
+                }) as Box<dyn FrameSource>
+            })
+            .map_err(|(source, error)| (PreparedSource::Sensor(source), error)),
+        PreparedSource::Custom(source) => source
+            .start(lcd)
+            .map(|renderer| {
+                Box::new(CustomH264Source {
+                    renderer: Arc::new(renderer),
+                }) as Box<dyn FrameSource>
+            })
+            .map_err(|(source, error)| (PreparedSource::Custom(source), error)),
+        PreparedSource::Jpeg {
+            source,
+            fallback: reason,
+        } => {
+            *fallback = reason;
+            Ok(source)
+        }
+    }
+}
+
 fn make_frame_source(
     asset: Arc<MediaAsset>,
     tx: Option<Sender<DaemonEvent>>,
-    lcd: &LcdBackend,
-    screen: &ScreenInfo,
-    custom_h264: bool,
-) -> Box<dyn FrameSource> {
-    match &asset.kind {
+) -> anyhow::Result<Box<dyn FrameSource>> {
+    Ok(match &asset.kind {
         MediaAssetKind::Static { frame } => Box::new(StaticSource {
             frame: Arc::clone(frame),
             sent: false,
@@ -1477,82 +2068,16 @@ fn make_frame_source(
                 player,
                 frames: Arc::clone(frames),
                 sent_index: 0,
-            })
-        }
-        MediaAssetKind::Sensor {
-            asset: sensor_asset,
-        } => {
-            if screen.h264 {
-                match AsyncSensorH264Renderer::new(
-                    Arc::clone(sensor_asset),
-                    lcd,
-                    screen,
-                    asset.stream_fps,
-                    asset.hardware_video,
-                ) {
-                    Ok(renderer) => {
-                        info!("Sensor mode using live h264 pipeline");
-                        return Box::new(SensorH264Source {
-                            renderer: Arc::new(renderer),
-                        });
-                    }
-                    Err(e) => {
-                        warn!("Sensor h264 pipeline unavailable, falling back to JPEG: {e}");
-                    }
-                }
-            }
-            let renderer = Arc::new(AsyncSensorRenderer::new(
-                tx,
-                Arc::clone(sensor_asset),
-                Arc::clone(&asset),
-                screen.needs_keepalive,
-            ));
-            let cached = renderer.get_current_frame();
-            Box::new(SensorSource {
-                renderer,
-                cached,
-                sent_index: 0,
+                pending_index: 0,
             })
         }
         MediaAssetKind::H264Stream {
             path, looping, fps, ..
         } => Box::new(H264FileSource::new(path.clone(), *looping, *fps)),
-        MediaAssetKind::Custom {
-            asset: custom_asset,
-        } => {
-            if custom_h264 && screen.h264 {
-                match AsyncCustomH264Renderer::new(
-                    Arc::clone(custom_asset),
-                    lcd,
-                    screen,
-                    asset.stream_fps,
-                    asset.hardware_video,
-                ) {
-                    Ok(renderer) => {
-                        info!("Custom mode using live h264 pipeline");
-                        return Box::new(CustomH264Source {
-                            renderer: Arc::new(renderer),
-                        });
-                    }
-                    Err(e) => {
-                        warn!("Custom h264 pipeline unavailable, falling back to JPEG: {e}");
-                    }
-                }
-            }
-            let renderer = Arc::new(AsyncCustomRenderer::new(
-                tx,
-                Arc::clone(custom_asset),
-                Arc::clone(&asset),
-                screen.needs_keepalive,
-            ));
-            let cached = renderer.get_current_frame();
-            Box::new(CustomSource {
-                renderer,
-                cached,
-                sent_index: 0,
-            })
+        MediaAssetKind::Sensor { .. } | MediaAssetKind::Custom { .. } => {
+            anyhow::bail!("Media source requires background preparation")
         }
-    }
+    })
 }
 
 /// True when the file finished on its own and the worker must not restart
@@ -1562,6 +2087,7 @@ fn stream_h264_file_to_hid(
     looping: bool,
     fps: f32,
     stop: Arc<AtomicBool>,
+    transferred: Arc<AtomicBool>,
 ) -> bool {
     use lianli_devices::hydroshift_lcd::{find_au_split, pace_frame};
     use std::io::{Read, Seek, SeekFrom};
@@ -1622,6 +2148,7 @@ fn stream_h264_file_to_hid(
                 if !send_h264_au_with_retry(&lcd, &au, &stopped) {
                     return false;
                 }
+                transferred.store(true, Ordering::Release);
                 saw_boundary = true;
                 sent_any = true;
                 pace_frame(&mut next_deadline, frame_interval);
@@ -1634,6 +2161,7 @@ fn stream_h264_file_to_hid(
             if !send_h264_au_with_retry(&lcd, &accum, &stopped) {
                 return false;
             }
+            transferred.store(true, Ordering::Release);
             sent_any = true;
         }
         if stopped() {
@@ -1657,6 +2185,7 @@ fn stream_h264_file_to_hid(
 }
 
 pub(super) enum SendError {
+    Stopped(String),
     Usb(lianli_transport::TransportError),
     Other(anyhow::Error),
 }
@@ -1667,12 +2196,271 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     #[test]
+    fn stream_failure_belongs_only_to_its_uncancelled_generation() {
+        let control = StreamControl::default();
+        let old = control.next();
+        control.failed(&old, "old transfer failure");
+        assert_eq!(
+            control.take_failure().as_deref(),
+            Some("old transfer failure")
+        );
+        assert!(control.restart(&old).is_none());
+        let current = control.next();
+        assert!(control.take_failure().is_none());
+        control.failed(&old, "late old failure");
+        assert!(control.take_failure().is_none());
+        control.failed(&current, &"界".repeat(3000));
+        assert_eq!(control.take_failure().unwrap().chars().count(), 2048);
+        control.cancel();
+        control.failed(&current, "cancelled transfer");
+        assert!(control.take_failure().is_none());
+    }
+
+    #[test]
+    fn transfer_success_cannot_leak_into_a_replacement_or_cancelled_stream() {
+        let control = StreamControl::default();
+        assert_eq!(control.transferred(), None);
+        let old = control.next();
+        let old_observer = control.transfer_observer(&old).unwrap();
+        assert_eq!(control.transferred(), Some(false));
+        old_observer.store(true, Ordering::Release);
+        assert_eq!(control.transferred(), Some(true));
+        let current = control.next();
+        old_observer.store(true, Ordering::Release);
+        assert_eq!(control.transferred(), Some(false));
+        assert!(control.transfer_observer(&old).is_none());
+        let current_observer = control.transfer_observer(&current).unwrap();
+        current_observer.store(true, Ordering::Release);
+        let restarted = control.restart(&current).unwrap();
+        assert_eq!(control.transferred(), Some(false));
+        current_observer.store(true, Ordering::Release);
+        assert_eq!(control.transferred(), Some(false));
+        let observer = control.transfer_observer(&restarted).unwrap();
+        control.cancel();
+        observer.store(true, Ordering::Release);
+        assert_eq!(control.transferred(), None);
+        assert!(control.transfer_observer(&restarted).is_none());
+    }
+
+    #[test]
+    fn prepared_source_rejects_replaced_selections_and_recreated_targets() {
+        let asset = Arc::new(MediaAsset {
+            kind: MediaAssetKind::Static {
+                frame: lianli_media::Retained::frame(vec![1]).unwrap(),
+            },
+            config_key: "same-key".into(),
+            stream_fps: 30.0,
+            hardware_video: false,
+        });
+        let make_target = || {
+            let (tx, _) = std::sync::mpsc::sync_channel(1);
+            ActiveTarget::new(
+                0,
+                "same-device".into(),
+                LcdBackend::WinUsb(ThreadedWinUsbSender {
+                    transport: None,
+                    tx,
+                    stream_control: Arc::new(StreamControl::default()),
+                    frame_delivery: Arc::new(FrameDelivery::default()),
+                    closing: Arc::new(AtomicBool::new(false)),
+                    thread: None,
+                }),
+                asset.clone(),
+                ScreenInfo::TLLCD,
+                false,
+                None,
+            )
+        };
+        let mut target = make_target();
+        let result = SourceResult {
+            index: 0,
+            selection: Arc::downgrade(&target.source_selection),
+            result: Err("fixture failure".into()).into(),
+        };
+        assert!(target.accepts_source(&result));
+        target.swap_media(asset.clone(), false, None);
+        assert!(!target.accepts_source(&result));
+        let current = SourceResult {
+            index: 0,
+            selection: Arc::downgrade(&target.source_selection),
+            result: Err("fixture failure".into()).into(),
+        };
+        assert!(target.accepts_source(&current));
+        assert!(!make_target().accepts_source(&current));
+        target.pending_brightness = Some(50);
+        assert!(!target.accepts_source(&current));
+    }
+
+    #[test]
+    fn full_winusb_queue_defers_frames_without_advancing_submission_state() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(LcdThreadMsg::SetBrightness(40)).unwrap();
+        let sender = ThreadedWinUsbSender {
+            transport: None,
+            tx,
+            stream_control: Arc::new(StreamControl::default()),
+            frame_delivery: Arc::new(FrameDelivery::default()),
+            closing: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        let asset = Arc::new(MediaAsset {
+            kind: MediaAssetKind::Static {
+                frame: lianli_media::Retained::frame(vec![1, 2, 3]).unwrap(),
+            },
+            config_key: "queue-test".into(),
+            stream_fps: 20.0,
+            hardware_video: false,
+        });
+        let mut target = ActiveTarget::new(
+            0,
+            "test".into(),
+            LcdBackend::WinUsb(sender),
+            asset,
+            ScreenInfo::TLLCD,
+            false,
+            None,
+        );
+        struct PendingFrame(bool);
+        impl FrameSource for PendingFrame {
+            fn next_frame(&mut self) -> Option<&[u8]> {
+                (!self.0).then_some(&[1, 2, 3])
+            }
+            fn mark_sent(&mut self) {
+                self.0 = true;
+            }
+        }
+        target.media = Box::new(PendingFrame(false));
+        target.media_pending = false;
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        assert_eq!(target.frame_counter, 0);
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::StartingSource
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            LcdThreadMsg::SetBrightness(40)
+        ));
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(true)
+        ));
+        assert_eq!(target.frame_counter, 1);
+        let LcdThreadMsg::Frame(bytes, delivery) = rx.recv().unwrap() else {
+            panic!("expected queued JPEG")
+        };
+        assert_eq!(bytes, [1, 2, 3]);
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        delivery.submit(|| Err(anyhow::anyhow!("USB transfer timed out")));
+        assert!(matches!(target.send_frame(None, &mut PacketBuilder::new()),
+            Err(SendError::Stopped(message)) if message.contains("USB transfer timed out")));
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::Failed
+        );
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        delivery.submit(|| panic!("failed source must not send queued frames"));
+        target.retry_failed_source();
+        let LcdBackend::WinUsb(sender) = &target.lcd else {
+            unreachable!()
+        };
+        assert!(sender.frame_delivery.failure.lock().is_none());
+        assert!(delivery.retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn retired_jpeg_transfers_cannot_fail_replacement_media() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(2);
+        let mut sender = ThreadedWinUsbSender {
+            transport: None,
+            tx,
+            stream_control: Arc::new(StreamControl::default()),
+            frame_delivery: Arc::new(FrameDelivery::default()),
+            closing: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        let old = sender.frame_delivery.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_state = old.clone();
+        let worker = thread::spawn(move || {
+            worker_state.submit(|| {
+                started_tx.send(()).unwrap();
+                finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Err(anyhow::anyhow!("late failure"))
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        sender.reset_frame_delivery();
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(old.failure.lock().as_deref(), Some("late failure"));
+        assert!(sender.frame_delivery.failure.lock().is_none());
+        old.submit(|| panic!("retired JPEG must not touch the device"));
+        sender.frame_delivery.submit(|| Ok(()));
+        assert!(sender.frame_delivery.failure.lock().is_none());
+        sender
+            .frame_delivery
+            .submit(|| Err(anyhow::anyhow!("x".repeat(4096))));
+        assert_eq!(
+            sender.frame_delivery.failure.lock().as_ref().unwrap().len(),
+            2048
+        );
+    }
+
+    #[test]
+    fn rejected_stream_submission_preserves_current_owner_and_transfer_status() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let sender = ThreadedWinUsbSender {
+            transport: None,
+            tx,
+            stream_control: Arc::new(StreamControl::default()),
+            frame_delivery: Arc::new(FrameDelivery::default()),
+            closing: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        sender.stream_h264("current".into(), true, 20.0).unwrap();
+        let current = sender.stream_control.current.lock().clone();
+        let observer = sender.stream_control.transfer_observer(&current).unwrap();
+        observer.store(true, Ordering::Release);
+        sender.stream_control.failed(&current, "existing failure");
+        assert!(sender.stream_h264("rejected".into(), true, 20.0).is_err());
+        assert!(!current.load(Ordering::Acquire));
+        assert_eq!(sender.stream_control.transferred(), Some(true));
+        assert_eq!(
+            sender.stream_control.failure.lock().as_deref(),
+            Some("existing failure")
+        );
+        assert!(sender
+            .stream_control
+            .submit(Some(&current), |_| anyhow::bail!("rejected restart"))
+            .is_err());
+        assert!(Arc::ptr_eq(&sender.stream_control.current.lock(), &current));
+        drop(rx);
+        assert!(sender
+            .stream_h264("disconnected".into(), true, 20.0)
+            .is_err());
+        assert!(!current.load(Ordering::Acquire));
+        assert_eq!(sender.stream_control.transferred(), Some(true));
+    }
+
+    #[test]
     fn replacing_queued_stream_keeps_old_cancellation_and_brightness_order() {
         let (tx, rx) = std::sync::mpsc::sync_channel(3);
         let sender = ThreadedWinUsbSender {
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
+            frame_delivery: Arc::new(FrameDelivery::default()),
             closing: Arc::new(AtomicBool::new(false)),
             thread: None,
         };
@@ -1714,6 +2502,7 @@ mod tests {
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
+            frame_delivery: Arc::new(FrameDelivery::default()),
             closing: Arc::new(AtomicBool::new(false)),
             thread: None,
         };
@@ -1749,12 +2538,306 @@ mod tests {
             LcdThreadMsg::SetBrightness(100)
         ));
         target.swap_media(asset, true, None);
+        let status = target.media_status();
+        assert_eq!(
+            status.stage,
+            lianli_shared::ipc::MediaRuntimeStage::StartingSource
+        );
+        assert_eq!(status.fps_limit, 20.0);
+        assert!(!status.hardware_video_allowed);
+        assert!(status.fallback_reason.is_none());
+        struct RetainedSource(Arc<AtomicUsize>, Arc<AtomicBool>, Arc<AtomicBool>);
+        impl FrameSource for RetainedSource {
+            fn request_stop(&mut self) {
+                self.1.store(true, Ordering::Release);
+            }
+            fn retirement_complete(&self) -> bool {
+                self.2.load(Ordering::Acquire)
+            }
+            fn is_autonomous(&self) -> bool {
+                true
+            }
+        }
+        impl Drop for RetainedSource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let retired = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        target.media = Box::new(RetainedSource(
+            retired.clone(),
+            stopping.clone(),
+            finished.clone(),
+        ));
+        let replacement = Arc::new(MediaAsset {
+            kind: target.asset.kind.clone(),
+            config_key: "replacement".into(),
+            stream_fps: 15.0,
+            hardware_video: true,
+        });
+        target.swap_media(replacement, true, None);
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        assert!(target.source_request().is_some());
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(true)
+        ));
+        assert_eq!(target.media_status().fps_limit, 20.0);
+        assert!(!target.media_status().hardware_video_allowed);
+        assert_eq!(target.playback_asset.config_key, "sensor-test");
+        assert!(target.playback_failure_key().is_none());
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        target.install_source(SourceResult {
+            index: target.index,
+            selection: Arc::downgrade(&target.source_selection),
+            result: Err("Initial JPEG rendering failed".into()).into(),
+        });
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::Failed
+        );
+        assert!(!target.media_pending);
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(true)
+        ));
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::Failed
+        );
+        target.retry_failed_source();
+        assert!(target.source_request().is_some());
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        target.finish_source_install(Err(anyhow::anyhow!("sender queue full")), None);
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        assert_eq!(target.media_status().fps_limit, 20.0);
+        assert!(target
+            .media_status()
+            .fallback_reason
+            .unwrap()
+            .contains("sender queue full"));
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(true)
+        ));
+        target.retry_failed_source();
+        let accepted = match &target.lcd {
+            LcdBackend::WinUsb(sender) => sender.stream_control.next(),
+            _ => unreachable!(),
+        };
+        target.finish_source_install(
+            Ok(Box::new(RetainedSource(
+                retired.clone(),
+                Arc::new(AtomicBool::new(false)),
+                finished.clone(),
+            ))),
+            None,
+        );
+        assert!(!accepted.load(Ordering::Acquire));
+        assert!(stopping.load(Ordering::Acquire));
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        assert!(target.take_finished_retirement().is_none());
+        target.swap_media(target.asset.clone(), true, None);
+        assert!(target.source_request().is_none());
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(true)
+        ));
+        finished.store(true, Ordering::Release);
+        let completed = target.take_finished_retirement().unwrap();
+        assert_eq!(retired.load(Ordering::Relaxed), 0);
+        assert!(target.source_request().is_some());
+        drop(completed);
+        assert_eq!(retired.load(Ordering::Relaxed), 1);
+        assert_eq!(target.media_status().fps_limit, 15.0);
+        assert!(target.media_status().hardware_video_allowed);
+        assert_eq!(target.playback_asset.config_key, "replacement");
+        target.media_pending = false;
+        assert_eq!(
+            target.playback_failure_key().as_deref(),
+            Some("replacement")
+        );
+        struct StoppedSource(bool);
+        impl FrameSource for StoppedSource {
+            fn is_autonomous(&self) -> bool {
+                self.0
+            }
+            fn has_exited(&self) -> bool {
+                true
+            }
+        }
+        target.media = Box::new(StoppedSource(true));
+        target.media_pending = false;
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Err(SendError::Stopped(_))
+        ));
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::Failed
+        );
+        target.retry_failed_source();
+        assert!(target.media_pending);
+        target.media = Box::new(StoppedSource(false));
+        target.media_paused = false;
+        target.media_pending = false;
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Err(SendError::Stopped(message)) if message.contains("JPEG rendering failed")
+        ));
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        target.retry_failed_source();
+        assert!(target.media_pending);
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::StartingSource
+        );
         assert!(rx.try_recv().is_err());
+        let brightness_drops = Arc::new(AtomicUsize::new(0));
+        let brightness_stop = Arc::new(AtomicBool::new(false));
+        target.media = Box::new(RetainedSource(
+            brightness_drops.clone(),
+            brightness_stop.clone(),
+            Arc::new(AtomicBool::new(true)),
+        ));
         target.apply_brightness(None, &mut PacketBuilder::new(), 37);
         assert!(matches!(
             rx.try_recv().unwrap(),
             LcdThreadMsg::SetBrightness(37)
         ));
+        assert!(brightness_stop.load(Ordering::Acquire));
+        assert_eq!(brightness_drops.load(Ordering::Relaxed), 0);
+        assert!(target.source_request().is_some());
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        assert!(target.playback_failure_key().is_none());
+        target.finish_source_install(
+            Ok(Box::new(RetainedSource(
+                brightness_drops.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(true)),
+            ))),
+            None,
+        );
+        assert!(!target.media_paused);
+        assert_eq!(brightness_drops.load(Ordering::Relaxed), 0);
+        drop(target.take_finished_retirement().unwrap());
+        assert_eq!(brightness_drops.load(Ordering::Relaxed), 1);
+        if let LcdBackend::WinUsb(sender) = &target.lcd {
+            let owner = sender.stream_control.next();
+            sender.stream_control.failed(&owner, "transfer stopped");
+        }
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Err(SendError::Stopped(error)) if error == "transfer stopped"
+        ));
+        assert_eq!(brightness_drops.load(Ordering::Relaxed), 1);
+        target.retry_failed_source();
+        assert!(target.source_request().is_some());
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        let stale = Arc::downgrade(&Arc::new(()));
+        assert!(!target.matches_removal(&stale));
+        let Some(DaemonEvent::RemoveFailedLcd {
+            removal,
+            key,
+            error,
+            ..
+        }) = target.removal_event("USB unavailable".into())
+        else {
+            panic!("removal event missing")
+        };
+        assert!(target.matches_removal(&removal));
+        assert!(!target.matches_removal(&stale));
+        assert_eq!(key, "replacement");
+        assert_eq!(error, "USB unavailable");
+        assert!(target.removal_event("duplicate".into()).is_none());
+        target.swap_media(target.asset.clone(), true, None);
+        target.retry_failed_source();
+        assert!(target.matches_removal(&removal));
+        assert!(target.source_request().is_none());
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        target.apply_brightness(None, &mut PacketBuilder::new(), 80);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn file_retirement_waits_for_worker_completion_after_stop() {
+        let (release, released) = std::sync::mpsc::channel();
+        let mut source = H264FileSource::new(PathBuf::new(), true, 30.0);
+        source.hid_thread = Some(thread::spawn(move || {
+            released.recv_timeout(Duration::from_secs(2)).unwrap();
+        }));
+        source.request_stop();
+        assert!(source.hid_stop.load(Ordering::Acquire));
+        assert!(!source.retirement_complete());
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !source.retirement_complete() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(source.retirement_complete());
+        source.hid_thread.take().unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_signals_both_sources_and_observes_completion_with_one_deadline() {
+        struct Source {
+            stopped: bool,
+            finished: bool,
+        }
+        impl FrameSource for Source {
+            fn request_stop(&mut self) {
+                self.stopped = true;
+            }
+            fn retirement_complete(&self) -> bool {
+                self.finished
+            }
+        }
+        let mut current = Source {
+            stopped: false,
+            finished: false,
+        };
+        let mut retired = Source {
+            stopped: false,
+            finished: false,
+        };
+        assert!(!stop_frame_sources(
+            &mut current,
+            Some(&mut retired),
+            Duration::ZERO
+        ));
+        assert!(current.stopped && retired.stopped);
+        current.finished = true;
+        assert!(!stop_frame_sources(
+            &mut current,
+            Some(&mut retired),
+            Duration::ZERO
+        ));
+        retired.finished = true;
+        assert!(stop_frame_sources(
+            &mut current,
+            Some(&mut retired),
+            Duration::ZERO
+        ));
+        assert!(stop_frame_sources(&mut current, None, Duration::ZERO));
     }
 
     #[test]
@@ -1807,6 +2890,8 @@ mod tests {
         let closing = Arc::new(AtomicBool::new(false));
         let stream_control = Arc::new(StreamControl {
             current: Mutex::new(stop.clone()),
+            failure: Mutex::new(None),
+            transferred: Mutex::new(None),
         });
         let worker_stop = stop.clone();
         let worker_closing = closing.clone();
@@ -1824,6 +2909,7 @@ mod tests {
             transport: None,
             tx,
             stream_control,
+            frame_delivery: Arc::new(FrameDelivery::default()),
             closing,
             thread: Some(worker),
         };
@@ -1871,6 +2957,20 @@ mod tests {
 
     fn lcd(fail_on: usize) -> (SharedHidLcd, Arc<AtomicUsize>) {
         lcd_with_failures(fail_on, 1)
+    }
+
+    #[test]
+    fn init_completion_cannot_match_a_replacement_attachment() {
+        let (original, _) = lcd(usize::MAX);
+        let completion = original.attachment();
+        let same_attachment = Arc::clone(&original);
+        assert!(same_attachment.matches_attachment(&completion));
+        let (replacement, _) = lcd(usize::MAX);
+        assert!(!replacement.matches_attachment(&completion));
+        drop(original);
+        drop(same_attachment);
+        assert!(completion.upgrade().is_none());
+        assert!(!replacement.matches_attachment(&completion));
     }
 
     fn lcd_with_failures(fail_on: usize, fail_count: usize) -> (SharedHidLcd, Arc<AtomicUsize>) {
@@ -1954,15 +3054,38 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_workers_exclude_recovery_without_lcd_access() {
+    fn stream_replacement_waits_for_retirement_and_preserves_the_new_lease() {
         let (lcd, _) = lcd(0);
         let old = lcd.begin_stream().unwrap();
-        let new = lcd.begin_stream().unwrap();
+        assert!(lcd.begin_stream().is_none());
         let _device = lcd.lock();
         assert!(lcd.recovery_idle().is_none());
+        old.release();
+        let new = lcd.begin_stream().unwrap();
         drop(old);
         assert!(lcd.recovery_idle().is_none());
+        assert!(lcd.begin_stream().is_none());
         drop(new);
+        assert!(lcd.recovery_idle().is_some());
+    }
+
+    #[test]
+    fn replacement_hid_worker_stays_pending_until_the_old_producer_retires() {
+        let (lcd, sends) = lcd(usize::MAX);
+        let old = lcd.begin_stream().unwrap();
+        let mut replacement = HidStreamWorker::new(
+            lcd.clone(),
+            Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+            Arc::new(AtomicBool::new(false)),
+            30.0,
+        );
+        assert!(replacement.handle.is_none());
+        assert!(!replacement.try_start());
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        drop(old);
+        assert!(replacement.try_start());
+        replacement.handle.take().unwrap().join().unwrap();
+        drop(replacement);
         assert!(lcd.recovery_idle().is_some());
     }
 
@@ -1988,12 +3111,17 @@ mod tests {
         assert!(worker.handle.is_none());
         let restarter = StreamRestarter::HidLcd(Arc::clone(&lcd), Mutex::new(Some(worker)));
         let idle = lcd.recovery_idle().unwrap();
-        assert!(!restarter.try_start_pending());
+        assert!(!restarter.try_start_pending().unwrap());
         drop(idle);
         let device = lcd.lock();
-        assert!(restarter.try_start_pending());
+        assert!(restarter.try_start_pending().unwrap());
         assert!(lcd.recovery_idle().is_none());
         drop(device);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while restarter.try_start_pending().is_ok() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(restarter.try_start_pending().is_err());
         let StreamRestarter::HidLcd(_, current) = restarter else {
             unreachable!()
         };
@@ -2047,14 +3175,20 @@ mod tests {
             (0, false, Box::new(PanicReader), true),
         ] {
             let (lcd, sends) = lcd(fail_on);
+            let transferred = Arc::new(AtomicBool::new(false));
             let (worker, _) = spawn_hid_h264_stream(
                 Arc::clone(&lcd),
                 reader,
                 Arc::new(AtomicBool::new(stopped)),
                 30.0,
                 lcd.begin_stream().unwrap(),
+                transferred.clone(),
             );
             assert_eq!(worker.join().is_err(), panics);
+            assert_eq!(
+                transferred.load(Ordering::Acquire),
+                !stopped && !panics && sends.load(Ordering::Relaxed) > 0
+            );
             assert!(lcd.recovery_idle().is_some());
             if fail_on > 0 {
                 assert_eq!(sends.load(Ordering::Relaxed), 3);
@@ -2077,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn file_flush_retries_release_gate_and_restart_with_a_new_lease() {
+    fn failed_file_flush_releases_gate_and_explicit_retry_takes_a_new_lease() {
         let path =
             std::env::temp_dir().join(format!("lianli-recovery-test-{}.h264", std::process::id()));
         std::fs::write(&path, [0, 0, 0, 1, 5, 128, 0, 0, 0, 1, 1, 128]).unwrap();
@@ -2095,6 +3229,7 @@ mod tests {
             assert!(lcd.recovery_idle().is_none());
             wait_for_file_worker(&source);
             assert_eq!(sends.load(Ordering::Relaxed), 4);
+            assert_eq!(source.transferred(), Some(true));
             assert!(!source
                 .hid_completed
                 .as_ref()
@@ -2102,14 +3237,16 @@ mod tests {
                 .load(Ordering::Acquire));
             assert!(lcd.recovery_idle().is_some());
 
-            source.looping = false;
+            assert!(source.has_exited());
+            assert!(source.start(&backend).is_err());
+            assert!(source.has_exited());
+            source = H264FileSource::new(path.clone(), false, 30.0);
+            assert!(!source.transferred.load(Ordering::Acquire));
             let idle = lcd.recovery_idle().unwrap();
             source.start(&backend).unwrap();
             assert!(!source.started);
             assert!(source.hid_thread.is_none());
             drop(idle);
-            // Clear the restart backoff the dead worker armed
-            source.retry_after = None;
             let device = lcd.lock();
             source.start(&backend).unwrap();
             assert!(lcd.recovery_idle().is_none());
@@ -2121,6 +3258,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .load(Ordering::Acquire));
+            assert!(!source.has_exited());
             assert!(lcd.recovery_idle().is_some());
             source.start(&backend).unwrap();
             assert!(
@@ -2151,12 +3289,14 @@ mod tests {
     #[test]
     fn stream_lease_covers_retry_sleeps_and_exhausted_failures() {
         let (lcd, sends) = lcd_with_failures(1, 3);
+        let transferred = Arc::new(AtomicBool::new(false));
         let (worker, _) = spawn_hid_h264_stream(
             Arc::clone(&lcd),
             Box::new(std::io::Cursor::new(vec![0, 0, 0, 1, 5, 128])),
             Arc::new(AtomicBool::new(false)),
             30.0,
             lcd.begin_stream().unwrap(),
+            transferred.clone(),
         );
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while sends.load(Ordering::Relaxed) == 0 {
@@ -2170,6 +3310,7 @@ mod tests {
         drop(device);
         worker.join().unwrap();
         assert_eq!(sends.load(Ordering::Relaxed), 3);
+        assert!(!transferred.load(Ordering::Acquire));
         assert!(lcd.recovery_idle().is_some());
     }
 

@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use super::core::SharedTransport;
 
 pub(crate) trait WinUsbLcd: Send + Sync {
+    fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>);
     fn screen_info(&self) -> &ScreenInfo;
     fn firmware_str(&self) -> Option<&str>;
     fn shared_transport(&self) -> SharedTransport;

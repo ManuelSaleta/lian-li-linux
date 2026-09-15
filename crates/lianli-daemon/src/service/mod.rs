@@ -27,6 +27,8 @@ mod pixel_cleaner;
 mod renderers;
 mod runtime;
 mod shutdown;
+mod source_preparation;
+mod source_retirement;
 mod streaming;
 mod subsystems;
 mod suspend;
@@ -44,6 +46,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::Coordinated { .. } => "IpcMutation",
         DaemonEvent::IpcUpdate => "IpcUpdate",
         DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
+        DaemonEvent::RetryMedia => "RetryMedia",
         DaemonEvent::USBCheck => "USBCheck",
         DaemonEvent::DevicePoll => "DevicePoll",
         DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
@@ -54,6 +57,8 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::FrameFinished => "FrameFinished",
         DaemonEvent::MediaPrepared => "MediaPrepared",
         DaemonEvent::RecreateMedia { .. } => "RecreateMedia",
+        DaemonEvent::RemoveFailedLcd { .. } => "RemoveFailedLcd",
+        DaemonEvent::MediaPlaybackStopped { .. } => "MediaPlaybackStopped",
         DaemonEvent::ResyncWirelessRgb => "ResyncWirelessRgb",
         DaemonEvent::LcdInitComplete { .. } => "LcdInitComplete",
         DaemonEvent::SystemResumed => "SystemResumed",
@@ -95,6 +100,7 @@ pub enum DaemonEvent {
     },
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     RetryOpenRgb,
+    RetryMedia,
     USBCheck,
     DevicePoll,
     DisplaySwitch {
@@ -118,15 +124,25 @@ pub enum DaemonEvent {
     },
     FrameFinished,
     MediaPrepared,
+    MediaPlaybackStopped {
+        target_index: usize,
+        key: String,
+        error: String,
+    },
     RecreateMedia {
         target_index: usize,
         device_id: String,
     },
+    RemoveFailedLcd {
+        target_index: usize,
+        removal: std::sync::Weak<()>,
+        key: String,
+        error: String,
+    },
     ResyncWirelessRgb,
-    /// Background LCD init finished; the target is rebuilt so the recovery
-    /// thread starts with firmware state now known.
     LcdInitComplete {
         device_id: String,
+        attachment: std::sync::Weak<()>,
     },
     SystemResumed,
     RebootWirelessLcd {
@@ -537,49 +553,104 @@ impl ServiceManager {
                 break;
             }
         });
-        // Spawn the dedicated LCD streaming thread.
-        // Polls all targets for new frames so DevicePoll / USB enumeration
-        // on the main loop can never block video playback.
         let stream_targets = Arc::clone(&self.targets);
         let stream_main_tx = tx.clone();
-        thread::spawn(move || {
+        let mut stream_worker = streaming::StreamingWorker::spawn(move |stop| {
             let mut builder = PacketBuilder::new();
-            loop {
+            let mut source_preparation = source_preparation::SourcePreparation::default();
+            let source_retirement = source_retirement::SourceRetirement::new();
+            let mut source_start_error = None;
+            while !stop.load(Ordering::Acquire) {
+                let mut prepared = source_preparation
+                    .poll()
+                    .or_else(|| source_start_error.take());
+                let mut source_request = None;
                 let mut to_recreate = Vec::new();
-                {
+                let mut stopped = Vec::new();
+                let idle = {
                     let mut targets = stream_targets.lock();
+                    for target in targets.values_mut() {
+                        if let Some(source) = target.take_finished_retirement() {
+                            if let Err(source) = source_retirement.try_retire(source) {
+                                target.return_retirement(source);
+                            }
+                        }
+                    }
+                    if !stop.load(Ordering::Acquire) {
+                        if let Some(result) = prepared.as_ref() {
+                            if let Some(target) = targets.get_mut(&result.index) {
+                                if target.accepts_source(result) {
+                                    target.install_source(prepared.take().unwrap());
+                                }
+                            }
+                        }
+                    }
                     for (&id, target) in targets.iter_mut() {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if !source_preparation.is_busy() && source_request.is_none() {
+                            source_request = target.source_request();
+                        }
                         match target.send_frame(None, &mut builder) {
                             Ok(true) => {
                                 target.consecutive_errors = 0;
                             }
                             Ok(false) => {}
+                            Err(runtime::SendError::Stopped(error)) => {
+                                if let Some(key) = target.playback_failure_key() {
+                                    stopped.push((id, key, error));
+                                }
+                            }
                             Err(runtime::SendError::Usb(err)) => {
                                 target.consecutive_errors += 1;
                                 if target.consecutive_errors >= 3 {
                                     warn!("LCD[{id}] USB error (3/3): {err}");
-                                    to_recreate.push((id, target.device_identity.clone()));
+                                    if let Some(event) = target.removal_event(format!(
+                                        "USB transfer failed after three attempts: {err}"
+                                    )) {
+                                        to_recreate.push(event);
+                                    }
                                 }
                             }
                             Err(runtime::SendError::Other(err)) => {
                                 warn!("LCD[{id}] media error: {err}");
-                                to_recreate.push((id, target.device_identity.clone()));
+                                if let Some(event) =
+                                    target.removal_event(format!("Media playback failed: {err:#}"))
+                                {
+                                    to_recreate.push(event);
+                                }
                             }
                         }
                     }
-                    for &(id, _) in &to_recreate {
-                        targets.remove(&id);
+                    targets.is_empty()
+                };
+                drop(prepared);
+                if !stop.load(Ordering::Acquire) {
+                    if let Some(request) = source_request {
+                        let index = request.index;
+                        let selection = request.selection.clone();
+                        if let Err(error) = source_preparation.start(request) {
+                            source_start_error = Some(source_preparation::SourceResult {
+                                index,
+                                selection,
+                                result: Err(format!("Cannot start media preparation: {error}"))
+                                    .into(),
+                            });
+                        }
                     }
                 }
-                for (id, device_id) in to_recreate {
-                    stream_main_tx
-                        .send(DaemonEvent::RecreateMedia {
-                            target_index: id,
-                            device_id,
-                        })
-                        .ok();
+                for (target_index, key, error) in stopped {
+                    let _ = stream_main_tx.send(DaemonEvent::MediaPlaybackStopped {
+                        target_index,
+                        key,
+                        error,
+                    });
                 }
-                thread::sleep(Duration::from_millis(1));
+                for event in to_recreate {
+                    let _ = stream_main_tx.send(event);
+                }
+                thread::park_timeout(Duration::from_millis(if idle { 100 } else { 1 }));
             }
         });
 
@@ -705,8 +776,11 @@ impl ServiceManager {
                     }
                     self.ipc.state.lock().openrgb_retry_pending = false;
                 }
+                DaemonEvent::RetryMedia => {
+                    self.poll_prepared_media();
+                }
                 DaemonEvent::FrameFinished => {
-                    // Handled by the polling streaming thread — no action needed.
+                    stream_worker.wake();
                 }
                 DaemonEvent::MediaPrepared => {
                     self.poll_prepared_media();
@@ -727,6 +801,35 @@ impl ServiceManager {
                         } else {
                             rgb.resync_wireless_effects();
                         }
+                    }
+                }
+                DaemonEvent::MediaPlaybackStopped {
+                    target_index,
+                    key,
+                    error,
+                } => {
+                    self.record_playback_failure(target_index, &key, error);
+                }
+                DaemonEvent::RemoveFailedLcd {
+                    target_index,
+                    removal,
+                    key,
+                    error,
+                } => {
+                    let removed = {
+                        let mut targets = self.targets.lock();
+                        if targets
+                            .get(&target_index)
+                            .is_some_and(|target| target.matches_removal(&removal))
+                        {
+                            targets.remove(&target_index)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(target) = removed {
+                        self.record_playback_failure(target_index, &key, error);
+                        drop(target);
                     }
                 }
                 DaemonEvent::RecreateMedia {
@@ -752,25 +855,27 @@ impl ServiceManager {
                         }
                     }
                 }
-                DaemonEvent::LcdInitComplete { device_id } => {
-                    // firmware state is now recorded by the init worker;
-                    // start the recovery thread if the target was created
-                    // before init finished. Idempotent, no teardown.
-                    // Answers from the device are definitive now, and any
-                    // brightness deferred while the init worker held the
-                    // LCD can be applied.
+                DaemonEvent::LcdInitComplete {
+                    device_id,
+                    attachment,
+                } => {
                     let tx = self.tx.clone();
                     let mut targets = self.targets.lock();
-                    if let Some((_, target)) = targets
-                        .iter_mut()
-                        .find(|(_, t)| t.device_identity == device_id)
-                    {
+                    if let Some((_, target)) = targets.iter_mut().find(|(_, t)| {
+                        t.device_identity == device_id
+                            && matches!(
+                                &t.lcd,
+                                LcdBackend::HidLcd(lcd)
+                                    if lcd.matches_attachment(&attachment)
+                            )
+                    }) {
                         target.mark_init_complete();
                         target.maybe_start_recovery(tx, Duration::from_millis(200));
                         target.flush_pending_brightness(
                             Some(&self.wireless),
                             &mut self.packet_builder,
                         );
+                        drop(targets);
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {
@@ -860,6 +965,7 @@ impl ServiceManager {
         }
 
         let _shutdown = monitor.enter("shutdown");
+        stream_worker.stop();
         self.shutdown();
         Ok(self.restart_requested && !signals.requested())
     }

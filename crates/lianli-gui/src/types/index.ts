@@ -88,11 +88,21 @@ export interface PixelCleanStatus {
 }
 
 export interface TelemetrySnapshot {
+  desktop_streams?: DesktopStreamStatus[];
   media_preparation?: Record<string, {
     generation: number;
     device_id: string;
     state: "waiting_for_device" | "preparing" | "ready" | "failed";
     error: string | null;
+    last_playback_error?: string | null;
+    runtime?: {
+      stage: "failed" | "starting_source" | "autonomous_source_configured" | "frame_submitted";
+      fps_limit: number;
+      hardware_video_allowed: boolean;
+      fallback_reason: string | null;
+      encoder?: { name: string; software_fallback: boolean } | null;
+      h264_transfer_started?: boolean | null;
+    } | null;
   }>;
   fan_rpms: Record<string, number[]>;
   coolant_temps: Record<string, number>;
@@ -100,6 +110,24 @@ export interface TelemetrySnapshot {
   openrgb_status: OpenRgbServerStatus;
   /** Active pixel cleaner sessions keyed by target ID, card index, or "all" for multi-LCD concurrency. */
   pixel_clean_statuses?: Record<string, PixelCleanStatus>;
+}
+
+export interface DesktopStreamStatus {
+  bus: number;
+  address: number;
+  product_id: number;
+  state: "waiting_for_session" | "starting" | "streaming" | "paused" | "failed";
+  backend: string | null;
+  fallback_reason: string | null;
+  error: string | null;
+  applied_generation: number | null;
+  applied_policy: { hardware_video: boolean; fps_limit: number } | null;
+  encoding?: {
+    encoder: "turbojpeg" | "libx264" | "h264_vaapi" | "h264_nvenc" | "h264_amf" | "unknown";
+    gpu_input: boolean;
+    cpu_readback_reason: "no_dma_buf" | "gpu_failure" | null;
+    software_reason: "hardware_unavailable" | "hardware_failed" | null;
+  } | null;
 }
 
 export interface DaemonInfo {
@@ -113,6 +141,13 @@ export interface DaemonInfo {
   ownership_lock?: { device: string; inode: string } | null;
   service_invocation?: string | null;
   service_operation_lock?: { device: string; inode: string } | null;
+}
+
+export interface AssetAccessReport {
+  uid: number;
+  checked: number;
+  failed: number;
+  issues: { owner: string; path: string | null; error: string }[];
 }
 
 export interface PollResult {

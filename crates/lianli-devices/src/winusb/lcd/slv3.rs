@@ -52,6 +52,9 @@ const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 const SLV3_FRAME_RATE: u8 = 120;
 
 impl WinUsbLcd for Slv3WinUsbLcd {
+    fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>) {
+        self.core.h264_transferred = Some(transferred);
+    }
     fn screen_info(&self) -> &ScreenInfo {
         self.core.screen()
     }

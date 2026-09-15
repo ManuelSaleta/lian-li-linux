@@ -99,6 +99,13 @@ impl WinUsbLcdDevice {
         self.0.stream_h264(path, looping, stop, fps)
     }
 
+    pub fn observe_h264_transfer(
+        &mut self,
+        transferred: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.0.observe_h264_transfer(transferred);
+    }
+
     pub fn stream_h264_reader(
         &mut self,
         reader: &mut dyn std::io::Read,

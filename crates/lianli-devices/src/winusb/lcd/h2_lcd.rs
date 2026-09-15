@@ -55,6 +55,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(2_000);
 const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 impl WinUsbLcd for H2WinUsbLcd {
+    fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>) {
+        self.core.h264_transferred = Some(transferred);
+    }
     fn screen_info(&self) -> &ScreenInfo {
         self.core.screen()
     }

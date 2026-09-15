@@ -1,5 +1,9 @@
 # Managed LCD media
 
+Playback prepares replacements separately and retires old sources without blocking
+the streaming loop. Settings reports the active transfer method, encoder and FPS
+limit. Retry failed media uses saved settings without saving unrelated drafts.
+
 The LCD page can copy selected media and custom-template assets into managed storage
 for the selected native daemon. Review the result, stage its copied paths and Save.
 The copy runs independently of the GUI and retains its outcome for inspection.

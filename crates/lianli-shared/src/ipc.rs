@@ -108,6 +108,7 @@ pub enum IpcRequest {
         device_id: String,
     },
     RetryOpenRgb,
+    RetryMedia,
     ListStateBackups,
     PreviewStateBackup {
         target: crate::backups::BackupTarget,
@@ -295,6 +296,7 @@ impl IpcRequest {
             | Self::SetFanDirection { .. }
             | Self::SetRgbConfig { .. }
             | Self::SwitchDisplayMode { .. }
+            | Self::RetryMedia
             | Self::RetryOpenRgb
             | Self::BindWirelessDevice { .. }
             | Self::UnbindWirelessDevice { .. }
@@ -493,6 +495,31 @@ pub struct MediaPreparationStatus {
     pub device_id: String,
     pub state: MediaPreparationState,
     pub error: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<MediaRuntimeStatus>,
+    #[serde(default)]
+    pub last_playback_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaRuntimeStage {
+    Failed,
+    StartingSource,
+    AutonomousSourceConfigured,
+    FrameSubmitted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaRuntimeStatus {
+    pub stage: MediaRuntimeStage,
+    pub fps_limit: f32,
+    pub hardware_video_allowed: bool,
+    pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub encoder: Option<MediaEncoderStatus>,
+    #[serde(default)]
+    pub h264_transfer_started: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

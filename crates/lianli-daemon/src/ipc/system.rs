@@ -3,11 +3,34 @@
 
 use lianli_shared::ipc::IpcResponse;
 
+pub fn retry_media(state: &super::SharedState, tx: super::EventSender) -> IpcResponse {
+    use lianli_shared::ipc::{MediaPreparationState, MediaRuntimeStage};
+    let mut state = state.lock();
+    if !state.telemetry.media_preparation.values().any(|status| {
+        status.state == MediaPreparationState::Failed
+            || status
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.stage == MediaRuntimeStage::Failed)
+    }) {
+        return IpcResponse::error("No failed media is available to retry. Refresh its status");
+    }
+    if state.media_retry_pending {
+        return IpcResponse::error("A media retry is already queued");
+    }
+    state.media_retry_pending = true;
+    if tx.send(crate::service::DaemonEvent::RetryMedia).is_err() {
+        state.media_retry_pending = false;
+        return IpcResponse::error("The daemon stopped before accepting the media retry");
+    }
+    IpcResponse::ok(serde_json::json!(null))
+}
+
 pub fn retry_openrgb(state: &super::SharedState, tx: super::EventSender) -> IpcResponse {
     let mut state = state.lock();
     let status = &state.telemetry.openrgb_status;
     if !status.enabled || status.running || status.error.is_none() {
-        return IpcResponse::error("OpenRGB is not in a failed enabled state; refresh its status");
+        return IpcResponse::error("OpenRGB is not in a failed enabled state. Refresh its status");
     }
     if state.openrgb_retry_pending {
         return IpcResponse::error("An OpenRGB retry is already queued");
@@ -98,6 +121,70 @@ mod tests {
     use crate::service::DaemonEvent;
     use parking_lot::Mutex;
     use std::sync::{mpsc, Arc};
+
+    #[test]
+    fn media_retry_requires_failure_coalesces_and_does_not_save_configuration() {
+        use lianli_shared::ipc::{
+            MediaPreparationState, MediaPreparationStatus, MediaRuntimeStage, MediaRuntimeStatus,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.json");
+        let state = Arc::new(Mutex::new(crate::ipc::DaemonState::new(path.clone())));
+        let (tx, rx) = mpsc::channel();
+        assert!(matches!(
+            retry_media(&state, tx.clone().into()),
+            IpcResponse::Error { .. }
+        ));
+        state.lock().telemetry.media_preparation.insert(
+            0,
+            MediaPreparationStatus {
+                generation: 1,
+                device_id: "fixture".into(),
+                state: MediaPreparationState::Failed,
+                error: Some("Missing media".into()),
+                runtime: None,
+                last_playback_error: None,
+            },
+        );
+        assert!(matches!(
+            retry_media(&state, tx.clone().into()),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(matches!(
+            retry_media(&state, tx.clone().into()),
+            IpcResponse::Error { .. }
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), DaemonEvent::RetryMedia));
+        assert!(rx.try_recv().is_err());
+        {
+            let mut state = state.lock();
+            state.media_retry_pending = false;
+            let status = state.telemetry.media_preparation.get_mut(&0).unwrap();
+            status.state = MediaPreparationState::Ready;
+            status.runtime = Some(MediaRuntimeStatus {
+                stage: MediaRuntimeStage::Failed,
+                fps_limit: 30.0,
+                hardware_video_allowed: false,
+                fallback_reason: None,
+                encoder: None,
+                h264_transfer_started: None,
+            });
+        }
+        assert!(matches!(
+            retry_media(&state, tx.clone().into()),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), DaemonEvent::RetryMedia));
+        state.lock().media_retry_pending = false;
+        drop(rx);
+        assert!(matches!(
+            retry_media(&state, tx.into()),
+            IpcResponse::Error { .. }
+        ));
+        assert!(!state.lock().media_retry_pending);
+        assert!(state.lock().config.is_none());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn openrgb_retry_requires_failure_coalesces_requests_and_reports_queue_failure() {

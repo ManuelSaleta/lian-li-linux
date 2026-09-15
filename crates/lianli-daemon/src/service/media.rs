@@ -75,6 +75,9 @@ impl ServiceManager {
             return;
         }
         self.media_requested_keys = keys;
+        for target in self.targets.lock().values_mut() {
+            target.retry_failed_source();
+        }
         self.media_assets.retain(|index, _| {
             self.media_settings
                 .get(index)
@@ -129,6 +132,8 @@ impl ServiceManager {
                 (
                     index,
                     MediaPreparationStatus {
+                        runtime: None,
+                        last_playback_error: None,
                         generation,
                         device_id: cfg.device_id(),
                         state: if !targets.contains_key(&index) {
@@ -151,11 +156,19 @@ impl ServiceManager {
         let Some(tx) = self.tx.clone() else {
             return;
         };
+        let retry_ready =
+            self.ipc.state.lock().media_retry_pending && !self.media_preparation.is_busy();
+        if retry_ready {
+            self.media_reload_pending = true;
+        }
         if self.media_reload_pending
             && self.pixel_clean_sessions.is_empty()
             && self.pixel_clean_preparation.is_none()
         {
             self.prepare_media_assets(tx.clone());
+            if retry_ready {
+                self.ipc.state.lock().media_retry_pending = false;
+            }
         }
         let results = self.media_preparation.poll(&tx);
         self.apply_prepared_results(results);
@@ -218,6 +231,26 @@ impl ServiceManager {
                 status.state = new_state;
                 status.error = error;
             }
+        }
+    }
+
+    pub(super) fn record_playback_failure(&self, index: usize, key: &str, error: String) {
+        if self
+            .media_requested_keys
+            .get(index)
+            .is_none_or(|current| current != key)
+        {
+            return;
+        }
+        if let Some(status) = self
+            .ipc
+            .state
+            .lock()
+            .telemetry
+            .media_preparation
+            .get_mut(&index)
+        {
+            status.last_playback_error = Some(error.chars().take(2048).collect());
         }
     }
 
@@ -523,15 +556,14 @@ impl ServiceManager {
                                         guard.set_use_c_command(enable_512);
                                         drop(guard);
                                         if let Some(tx) = init_tx {
-                                            tx.send(DaemonEvent::LcdInitComplete { device_id })
-                                                .ok();
+                                            tx.send(DaemonEvent::LcdInitComplete {
+                                                device_id,
+                                                attachment: hid_init.attachment(),
+                                            })
+                                            .ok();
                                         }
                                     })
                                 {
-                                    // Without the worker LcdInitComplete never
-                                    // fires, so say why instead of failing
-                                    // silently and leaving the LCD
-                                    // uninitialized with no trace in the log.
                                     warn!(
                                         "Failed to spawn AIO LCD init thread for {spawn_err_id}: {e}"
                                     );
@@ -546,8 +578,8 @@ impl ServiceManager {
                                     );
                                 }
                             } else {
-                                let mut guard = hid.lock();
-                                if let Err(e) = guard.initialize() {
+                                let result = hid.lock().initialize();
+                                if let Err(e) = result {
                                     warn!(
                                         "AIO LCD basic init failed for {}: {e:#}",
                                         candidate.device_id
@@ -753,12 +785,30 @@ mod tests {
         service.ipc.state.lock().telemetry.media_preparation.insert(
             0,
             MediaPreparationStatus {
+                runtime: None,
+                last_playback_error: None,
                 generation: 2,
                 device_id: "hid:panel-a".into(),
                 state: MediaPreparationState::Preparing,
                 error: None,
             },
         );
+        service.media_requested_keys = vec!["new".into()];
+        service.record_playback_failure(0, "old", "stale failure".into());
+        assert!(service.ipc.state.lock().telemetry.media_preparation[&0]
+            .last_playback_error
+            .is_none());
+        service.record_playback_failure(0, "new", "界".repeat(3000));
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0]
+                .last_playback_error
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count(),
+            2048
+        );
+        assert!(service.targets.lock().is_empty());
         service.apply_prepared_results(vec![super::super::media_preparation::PreparedMedia {
             generation: 1,
             index: 0,
@@ -847,8 +897,12 @@ mod tests {
         service.prepare_media_assets(tx);
         assert!(!service.media_preparation.is_busy());
         assert!(service.media_reload_pending);
+        service.ipc.state.lock().media_retry_pending = true;
+        service.poll_prepared_media();
+        assert!(service.ipc.state.lock().media_retry_pending);
         service.pixel_clean_sessions.clear();
         service.poll_prepared_media();
+        assert!(!service.ipc.state.lock().media_retry_pending);
         let deadline = Instant::now() + std::time::Duration::from_secs(3);
         while service.media_preparation.is_busy() && Instant::now() < deadline {
             service.poll_prepared_media();
@@ -865,6 +919,63 @@ mod tests {
             service.media_asset_targets[&0].screen,
             ScreenInfo::AIO_LCD_480
         );
+        let healthy = service.media_assets[&0].clone();
+        service.ipc.state.lock().media_retry_pending = true;
+        service.poll_prepared_media();
+        assert!(!service.ipc.state.lock().media_retry_pending);
+        assert!(Arc::ptr_eq(&healthy, &service.media_assets[&0]));
+        assert!(!service.media_preparation.is_busy());
+    }
+
+    #[test]
+    fn repaired_media_retries_without_changing_saved_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("repaired.png");
+        let mut service = ServiceManager::new(
+            root.path().join("config.json"),
+            root.path().join("daemon.sock"),
+            lianli_shared::daemon::DaemonMode::User,
+        )
+        .unwrap();
+        let lcd = serde_json::from_value(serde_json::json!({
+            "type": "image", "serial": "panel-a", "path": path,
+        }))
+        .unwrap();
+        service.config = Some(lianli_shared::config::AppConfig {
+            lcds: vec![lcd],
+            ..Default::default()
+        });
+        let saved = serde_json::to_value(&service.config).unwrap();
+        service.media_targets.insert(0, target());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        service.tx = Some(tx.clone());
+        let finish = |service: &mut ServiceManager| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            while service.media_preparation.is_busy() && Instant::now() < deadline {
+                service.poll_prepared_media();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(!service.media_preparation.is_busy());
+        };
+        service.prepare_media_assets(tx);
+        finish(&mut service);
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0].state,
+            MediaPreparationState::Failed
+        );
+        image::RgbImage::from_pixel(8, 8, image::Rgb([40, 80, 120]))
+            .save(&path)
+            .unwrap();
+        service.ipc.state.lock().media_retry_pending = true;
+        service.poll_prepared_media();
+        finish(&mut service);
+        assert_eq!(
+            service.ipc.state.lock().telemetry.media_preparation[&0].state,
+            MediaPreparationState::Ready
+        );
+        assert!(service.media_assets.contains_key(&0));
+        assert_eq!(serde_json::to_value(&service.config).unwrap(), saved);
+        assert!(!root.path().join("config.json").exists());
     }
 
     #[test]

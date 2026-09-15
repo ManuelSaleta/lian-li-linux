@@ -91,6 +91,9 @@ impl Hs2OledWinUsbLcd {
 }
 
 impl WinUsbLcd for Hs2OledWinUsbLcd {
+    fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>) {
+        self.core.h264_transferred = Some(transferred);
+    }
     fn screen_info(&self) -> &ScreenInfo {
         self.core.screen()
     }

@@ -44,6 +44,7 @@ pub struct DaemonState {
     pub presets_path: PathBuf,
     pub devices: Vec<DeviceInfo>,
     pub openrgb_retry_pending: bool,
+    pub media_retry_pending: bool,
     pub telemetry: TelemetrySnapshot,
     pub wireless_operations: super::wireless::WirelessOperations,
     /// RGB controller, set once devices are opened.
@@ -76,6 +77,7 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             "hardware_video".into(),
             "media_preparation".into(),
             "openrgb_retry".into(),
+            "media_retry".into(),
             "media_access".into(),
             "state_recovery".into(),
             "backup_preview".into(),
@@ -129,6 +131,7 @@ impl DaemonState {
             presets_path,
             devices: Vec::new(),
             openrgb_retry_pending: false,
+            media_retry_pending: false,
             telemetry: TelemetrySnapshot::default(),
             wireless_operations: Default::default(),
             rgb_controller: None,
@@ -308,6 +311,7 @@ fn handle_request(
             IpcResponse::error("Service stop requires authenticated peer credentials")
         }
         IpcRequest::Ping => super::system::ping(),
+        IpcRequest::RetryMedia => super::system::retry_media(state, tx),
         IpcRequest::RetryOpenRgb => super::system::retry_openrgb(state, tx),
         IpcRequest::GetDaemonInfo => super::system::daemon_info(state),
         IpcRequest::ListSensors => super::system::list_sensors(state),
