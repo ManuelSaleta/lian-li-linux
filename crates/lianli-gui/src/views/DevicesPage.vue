@@ -8,7 +8,7 @@ import { useDaemonStore } from "@/stores/daemon";
 const devices = useDevicesStore();
 const daemon = useDaemonStore();
 
-const empty = computed(() => devices.visible.length === 0);
+const empty = computed(() => devices.displayCards.length === 0);
 
 async function refresh() {
   await daemon.refresh();
@@ -24,6 +24,8 @@ async function refresh() {
       </n-button>
     </div>
 
+    <n-alert v-for="(error, id) in devices.displaySwitchErrors" :key="id" type="error" closable @close="delete devices.displaySwitchErrors[id]">{{ error }}</n-alert>
+
     <div v-if="empty" class="empty-state">
       <PlugZap :size="48" :stroke-width="1.4" />
       <div class="empty-title">No devices found</div>
@@ -33,7 +35,7 @@ async function refresh() {
 
     <div v-else class="grid">
       <DeviceCard
-        v-for="d in devices.visible"
+        v-for="d in devices.displayCards"
         :key="d.device_id"
         :device="d"
       />

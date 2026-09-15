@@ -50,24 +50,33 @@ pub fn switch_display_mode(state: &SharedState, tx: EventSender, device_id: Stri
             if pid == 0 {
                 return IpcResponse::error("device PID not available");
             }
-            let _ = tx.send(DaemonEvent::DisplaySwitchToLcd { device_id, pid });
+            tracing::info!("LCD mode switch requested for {device_id}");
+            if tx
+                .send(DaemonEvent::DisplaySwitchToLcd { device_id, pid })
+                .is_err()
+            {
+                return IpcResponse::error("The daemon is stopping. Mode switch was not queued");
+            }
             IpcResponse::ok(serde_json::json!({
-                "switched": "to_lcd",
-                "message": "Device is rebooting into LCD mode. It will appear shortly."
+                "accepted": true,
+                "message": "LCD mode switch queued. Wait for the device to reconnect."
             }))
         }
         Some(f) if f.supports_display_mode_switch() => {
-            // LCD → Desktop: the service loop owns the WinUSB transport.
-            let _ = tx.send(DaemonEvent::DisplaySwitch { device_id });
+            tracing::info!("Desktop mode switch requested for {device_id}");
+            if tx.send(DaemonEvent::DisplaySwitch { device_id }).is_err() {
+                return IpcResponse::error("The daemon is stopping. Mode switch was not queued");
+            }
             IpcResponse::ok(serde_json::json!({
-                "switched": "to_desktop",
-                "message": "Device is switching to desktop mode. It will reboot shortly."
+                "accepted": true,
+                "message": "Desktop mode switch queued. Wait for the device to reconnect."
             }))
         }
         Some(_) => IpcResponse::error("device does not support display mode switching"),
         None => IpcResponse::error(format!("device not found: {device_id}")),
     }
 }
+
 pub fn render_template_preview(
     template: lianli_shared::template::LcdTemplate,
     width: u32,
@@ -128,4 +137,36 @@ pub fn render_template_preview(
     };
     usage.record(&dependencies);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_switch_requires_delivery_without_a_capture_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = super::super::DaemonState::new(directory.path().join("config.json"));
+        state.devices.push(
+            serde_json::from_value(serde_json::json!({
+                "device_id": "desktop-test", "family": "UniversalScreenDesktop",
+                "name": "Test", "vid": 0x1a86, "pid": 0xad21,
+                "has_lcd": false, "has_fan": false, "has_pump": false,
+                "has_rgb": false, "mb_sync_support": false
+            }))
+            .unwrap(),
+        );
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(state));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let response = switch_display_mode(&state, sender.clone().into(), "desktop-test".into());
+        assert!(matches!(response, IpcResponse::Ok { data } if data["accepted"] == true));
+        assert!(
+            matches!(receiver.try_recv().unwrap(), DaemonEvent::DisplaySwitchToLcd { device_id, pid: 0xad21 } if device_id == "desktop-test")
+        );
+        drop(receiver);
+        assert!(matches!(
+            switch_display_mode(&state, sender.into(), "desktop-test".into()),
+            IpcResponse::Error { message } if message.contains("not queued")
+        ));
+    }
 }

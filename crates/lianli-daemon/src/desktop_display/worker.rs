@@ -126,6 +126,7 @@ fn run_worker(
     let mut bytes = Vec::new();
     let mut first_frame = None;
     let mut reported_generation = None;
+    let mut metrics = super::metrics::StreamMetrics::new();
     while !stop.load(Ordering::Relaxed) {
         let permitted = connection.permitted.load(Ordering::Acquire);
         let policy = video_policy.load();
@@ -181,7 +182,7 @@ fn run_worker(
                         pending.map(|(sequence, _)| sequence) == Some(received),
                         "Unexpected display frame sequence"
                     );
-                    pending.take();
+                    let request_elapsed = pending.take().unwrap().1.elapsed();
                     output.validate_mode(mode)?;
                     if !permitted || pause_pending || applied != generation {
                         continue;
@@ -213,6 +214,7 @@ fn run_worker(
                         requested,
                         stop,
                     )?;
+                    let usb_started = Instant::now();
                     let sent = if codec == DisplayCodec::Jpeg {
                         display.send_jpeg_frame(&bytes)
                     } else {
@@ -220,6 +222,7 @@ fn run_worker(
                     };
                     // A missing H.264 packet invalidates subsequent dependent frames; restart cleanly.
                     sent.context("Sending desktop frame")?;
+                    metrics.delivered(pid, bytes.len(), request_elapsed, usb_started.elapsed());
                     if reported_generation != Some((applied, encoding)) {
                         status.applied(applied, requested, encoding);
                         reported_generation = Some((applied, encoding));

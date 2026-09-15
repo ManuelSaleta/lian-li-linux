@@ -78,7 +78,6 @@ function onFanQty(v: number | null) {
   fans.scheduleFanQuantity(d.value.device_id, v);
 }
 
-// ── Display-mode switch ────────────────────────────────────────────────────
 const supportsDisplaySwitch = computed(() =>
   familySupportsDisplaySwitch(d.value.family),
 );
@@ -88,9 +87,13 @@ const displayModeLabel = computed(() =>
 );
 
 async function onSwitchDisplay() {
-  devices.pending.set(d.value.device_id, "switch");
+  const deviceId = d.value.device_id;
+  if (!devices.beginDisplaySwitch(d.value)) return;
   try {
-    await lcd.switchDisplayMode(d.value.device_id);
+    await lcd.switchDisplayMode(deviceId);
+  } catch (error) {
+    devices.finishDisplaySwitch(deviceId, String(error));
+    message.error(String(error));
   } finally {
     await refreshSoon();
   }

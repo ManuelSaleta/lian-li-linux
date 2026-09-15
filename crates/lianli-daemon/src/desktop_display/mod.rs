@@ -1,4 +1,5 @@
 mod enumerate;
+mod metrics;
 mod policy;
 mod session;
 mod status;

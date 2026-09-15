@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import type { DeviceInfo, TelemetrySnapshot } from "@/types";
 import { DONGLE_FAMILIES } from "@/constants";
 import { usePendingAction } from "@/composables/usePendingAction";
+import { DISPLAY_SWITCH_TIMEOUT_MS, displaySwitchComplete } from "@/utils/displaySwitch";
 
 /// Dev-only mock device flags. Activated via `npm run dev:mock` (mode: "mock") or manual toggle.
 const MOCK_MODE = import.meta.env.MODE === "mock";
@@ -78,6 +79,28 @@ export const useDevicesStore = defineStore("devices", () => {
     openrgb_status: { enabled: false, running: false, port: null, error: null },
   });
   const pending = usePendingAction();
+  const displaySwitches = ref<Record<string, DeviceInfo>>({});
+  const displaySwitchErrors = ref<Record<string, string>>({});
+  const switchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function finishDisplaySwitch(id: string, error?: string) {
+    clearTimeout(switchTimers.get(id));
+    switchTimers.delete(id);
+    delete displaySwitches.value[id];
+    pending.clear(id);
+    if (error) displaySwitchErrors.value[id] = error;
+  }
+
+  function beginDisplaySwitch(device: DeviceInfo) {
+    if (displaySwitches.value[device.device_id]) return false;
+    delete displaySwitchErrors.value[device.device_id];
+    displaySwitches.value[device.device_id] = { ...device };
+    pending.set(device.device_id, "switch", true);
+    switchTimers.set(device.device_id, setTimeout(() => {
+      finishDisplaySwitch(device.device_id, `${device.name}: mode switch timed out. Recheck the device and daemon logs before retrying.`);
+    }, DISPLAY_SWITCH_TIMEOUT_MS));
+    return true;
+  }
 
   const allDevices = computed(() => {
     const real = list.value;
@@ -101,6 +124,10 @@ export const useDevicesStore = defineStore("devices", () => {
       (d) => !DONGLE_FAMILIES.includes(d.family) && d.wireless_group_mac == null,
     ),
   );
+  const displayCards = computed(() => [
+    ...visible.value,
+    ...Object.values(displaySwitches.value).filter((device) => !visible.value.some((current) => current.device_id === device.device_id)),
+  ]);
 
   /** Device lookup by id. */
   function byId(id: string): DeviceInfo | undefined {
@@ -143,6 +170,9 @@ export const useDevicesStore = defineStore("devices", () => {
   }
 
   function applyPoll(devices: DeviceInfo[], snap: TelemetrySnapshot) {
+    for (const [id, source] of Object.entries(displaySwitches.value)) {
+      if (displaySwitchComplete(source, devices)) finishDisplaySwitch(id);
+    }
     list.value = devices;
     telemetry.value = snap;
     pending.expire(devices.map((d) => d.device_id));
@@ -152,10 +182,14 @@ export const useDevicesStore = defineStore("devices", () => {
     list,
     telemetry,
     visible,
+    displayCards,
     lcdDevices,
     fanDevices,
     aioDevices,
     pending,
+    beginDisplaySwitch,
+    finishDisplaySwitch,
+    displaySwitchErrors,
     byId,
     fanRpms,
     coolantTemp,

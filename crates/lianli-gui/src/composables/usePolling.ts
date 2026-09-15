@@ -17,16 +17,14 @@ export function usePolling(task: AsyncTask, intervalMs = 2000): {
 } {
   const running = ref(false);
   let timer: ReturnType<typeof setInterval> | null = null;
-  let inFlight = false;
+  let inFlight: Promise<void> | null = null;
 
-  async function tick() {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      await task();
-    } finally {
-      inFlight = false;
-    }
+  function tick(): Promise<void> {
+    if (inFlight) return inFlight;
+    inFlight = Promise.resolve().then(task).finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   }
 
   function start() {
