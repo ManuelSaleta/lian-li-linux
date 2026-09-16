@@ -23,7 +23,8 @@ fn run_as_desktop_user(test: &str) -> bool {
             Ok(())
         });
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = spawn_test_process(&mut command)
+        .unwrap_or_else(|error| panic!("Cannot launch unprivileged test {test}: {error}"));
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -37,4 +38,37 @@ fn run_as_desktop_user(test: &str) -> bool {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn spawn_test_process(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.spawn() {
+            // Parallel test subprocesses can briefly inherit the executable's copy handle.
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[test]
+fn copied_test_process_waits_for_writer_to_close() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("true");
+    std::fs::copy("/bin/true", &binary).unwrap();
+    let writer = std::fs::OpenOptions::new().write(true).open(&binary).unwrap();
+    let mut command = std::process::Command::new(&binary);
+    assert_eq!(command.spawn().unwrap_err().raw_os_error(), Some(libc::ETXTBSY));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(writer);
+    });
+    let result = spawn_test_process(&mut command);
+    release.join().unwrap();
+    assert!(result.unwrap().wait().unwrap().success());
 }
