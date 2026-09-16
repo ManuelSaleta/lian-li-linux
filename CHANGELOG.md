@@ -3,6 +3,38 @@
 Generated from git history by git-cliff (see .github/cliff.toml).
 Regenerate rather than editing by hand.
 
+## v1.0.0 — 2026-09-16
+
+### Documentation
+- **changelog**: Regenerate for v0.9.1  ([#197](https://github.com/sgtaziz/lian-li-linux/pull/197))
+- Update distrobox instructions  (`05f7da0`)
+- **distrobox**: Require host USB permissions  (`97c0ea3`)
+
+### Features
+- **media**: Configure runtime hardware video with bounded preparation  (`60506fe`)
+- **services**: Switch native ownership with recoverable state transfer  (`0301f64`)
+- **media**: Manage catalog and imported asset storage  (`354179d`)
+- **gui**: Review and restore daemon state backups  (`311cb8c`)
+- **distrobox**: Support managed system services and host integration  (`ffbbaa2`)
+- **lcd**: Supervise session capture with safe EVDI fallback  (`9824c36`)
+- **lcd**: Capture native Hyprland headless outputs  (`b8a2848`)
+- **lcd**: Capture Hermes outputs with synchronized GPU fallback  (`cb96053`)
+- **gui**: Diagnose installation issues and export daemon logs  (`150fe94`)
+- **packaging**: Build distribution-specific release artifacts  (`cfe749c`)
+
+### Fixes
+- **rgb**: Render Scope selector when direction unsupported  ([#200](https://github.com/sgtaziz/lian-li-linux/pull/200))
+- **ipc**: Preserve daemon identity and durable configuration  (`affa3bc`)
+- **wireless**: Retain controllers through failed recovery  (`47924f5`)
+- **rgb**: Bound OpenRGB clients and support server recovery  (`0d27f4b`)
+- **daemon**: Apply cooling fail-safe to stale sensor readings  (`763232b`)
+- **lcd**: Preserve playback across replacement and shutdown  (`1c05dc5`)
+- **lcd**: Bound desktop delivery and asynchronous mode switching  (`6901769`)
+
+### Refactoring
+- **daemon**: Clear workspace Clippy warnings  (`13c24ad`)
+- **gui**: Streamline configuration and installation health  (`b1740b5`)
+
 ## v0.9.1 — 2026-09-11
 
 ### Documentation
