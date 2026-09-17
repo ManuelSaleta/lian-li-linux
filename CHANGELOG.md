@@ -3,6 +3,15 @@
 Generated from git history by git-cliff (see .github/cliff.toml).
 Regenerate rather than editing by hand.
 
+## v1.0.1 — 2026-09-17
+
+### Fixes
+- **gui**: Verify Distrobox desktop startup services  (`a170a90`)
+- **rgb**: Preserve live effects across unrelated config saves (fixes [#205](https://github.com/sgtaziz/lian-li-linux/issues/205))
+- **media**: Bound video and animation widget playback (fixes [#207](https://github.com/sgtaziz/lian-li-linux/issues/207))
+- **lcd**: Stop WinUSB playback across stream transitions  (`905e0e9`)
+- **daemon**: Avoid native Toolbox container detection (fixes [#208](https://github.com/sgtaziz/lian-li-linux/issues/208))
+
 ## v1.0.0 — 2026-09-16
 
 ### Documentation
@@ -30,6 +39,7 @@ Regenerate rather than editing by hand.
 - **daemon**: Apply cooling fail-safe to stale sensor readings  (`763232b`)
 - **lcd**: Preserve playback across replacement and shutdown  (`1c05dc5`)
 - **lcd**: Bound desktop delivery and asynchronous mode switching  (`6901769`)
+- **packaging**: Repair clean installs and retry busy test executables  (`178a494`)
 
 ### Refactoring
 - **daemon**: Clear workspace Clippy warnings  (`13c24ad`)
