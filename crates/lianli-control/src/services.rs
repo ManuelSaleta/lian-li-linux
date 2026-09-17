@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod desktop_startup;
+pub use desktop_startup::check_distrobox_desktop_startup;
+
 const PROPERTIES: &str =
     "Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,FragmentPath,ControlGroup,InvocationID,KillMode,SendSIGKILL,KillSignal,RestartKillSignal,TimeoutStopFailureMode,ExecStopPre,ExecStop,ExecStopPost";
 

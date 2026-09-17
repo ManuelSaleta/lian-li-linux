@@ -25,9 +25,19 @@ struct Commands {
 }
 
 pub(super) fn inspect(route: &Route, scope: ServiceScope) -> Result<Option<String>> {
+    let (start, stop) = read_commands(route, scope, scope.unit())?;
+    match_scoped_recipe(scope, start, stop)
+}
+
+pub(super) fn inspect_session(route: &Route) -> Result<Option<String>> {
+    let (start, stop) = read_commands(route, ServiceScope::User, "lianli-session.service")?;
+    match_commands(start, stop, true)
+}
+
+fn read_commands(route: &Route, scope: ServiceScope, unit: &str) -> Result<(Commands, Commands)> {
     let object = format!(
         "/org/freedesktop/systemd1/unit/{}",
-        scope.unit().replace('-', "_2d").replace('.', "_2e")
+        unit.replace('-', "_2d").replace('.', "_2e")
     );
     let read = |property| -> Result<Commands> {
         let output = route.output(
@@ -50,7 +60,7 @@ pub(super) fn inspect(route: &Route, scope: ServiceScope) -> Result<Option<Strin
         );
         Ok(serde_json::from_str(&output.stdout)?)
     };
-    match_scoped_recipe(scope, read("ExecStartEx")?, read("ExecStopEx")?)
+    Ok((read("ExecStartEx")?, read("ExecStopEx")?))
 }
 
 fn match_scoped_recipe(
@@ -147,6 +157,10 @@ fn match_system_recipe(mut start: Commands, mut stop: Commands) -> Result<Option
 }
 
 fn match_recipe(start: Commands, stop: Commands) -> Result<Option<String>> {
+    match_commands(start, stop, false)
+}
+
+fn match_commands(start: Commands, stop: Commands, session: bool) -> Result<Option<String>> {
     ensure!(
         start.signature == "a(sasasttttuii)" && stop.signature == start.signature,
         "Unrecognized systemd command property format"
@@ -168,8 +182,8 @@ fn match_recipe(start: Commands, stop: Commands) -> Result<Option<String>> {
         return Ok(None);
     }
     let (
-        [start_env, start_unset, start_program, start_name, box_name, separator, daemon, invocation_option, invocation],
-        [stop_env, stop_unset, stop_program, stop_name, stop_box, stop_separator, control, command, stop_option, stop_invocation],
+        [start_env, start_unset, start_program, start_name, box_name, separator, daemon, start_args @ ..],
+        [stop_env, stop_unset, stop_program, stop_name, stop_box, stop_separator, control, stop_args @ ..],
     ) = (start.1.as_slice(), stop.1.as_slice())
     else {
         return Ok(None);
@@ -178,6 +192,22 @@ fn match_recipe(start: Commands, stop: Commands) -> Result<Option<String>> {
     let program = Path::new(start_program);
     let daemon = Path::new(daemon);
     let control = Path::new(control);
+    let (daemon_name, control_name, expected_start, expected_stop): (_, _, &[&str], &[&str]) =
+        if session {
+            (
+                "lianli-session",
+                "lianli-session",
+                &["--login-start", "--service-invocation", "${INVOCATION_ID}"],
+                &["--stop-service", "${INVOCATION_ID}"],
+            )
+        } else {
+            (
+                "lianli-daemon",
+                "lianli-control",
+                &["--service-invocation", "${INVOCATION_ID}"],
+                &["stop-service", "--invocation-id", "${INVOCATION_ID}"],
+            )
+        };
     let matches = box_valid
         && start.2.is_empty()
         && stop.2.is_empty()
@@ -200,17 +230,10 @@ fn match_recipe(start: Commands, stop: Commands) -> Result<Option<String>> {
         && daemon.is_absolute()
         && control.is_absolute()
         && daemon.parent() == control.parent()
-        && daemon
-            .file_name()
-            .is_some_and(|name| name == "lianli-daemon")
-        && control
-            .file_name()
-            .is_some_and(|name| name == "lianli-control")
-        && invocation_option == "--service-invocation"
-        && invocation == "${INVOCATION_ID}"
-        && command == "stop-service"
-        && stop_option == "--invocation-id"
-        && stop_invocation == invocation;
+        && daemon.file_name().is_some_and(|name| name == daemon_name)
+        && control.file_name().is_some_and(|name| name == control_name)
+        && start_args == expected_start
+        && stop_args == expected_stop;
     Ok(matches.then(|| box_name.clone()))
 }
 
@@ -231,6 +254,69 @@ mod tests {
             args[0], args, [], 0,0,0,0,0,0,0
         ]]}))
         .unwrap()
+    }
+
+    #[test]
+    fn version_1_0_capture_recipe_accepts_login_discovery_and_matching_guarded_stop() {
+        let start = commands(&[
+            "/usr/bin/env",
+            "--unset=INVOCATION_ID",
+            "/usr/bin/distrobox-enter",
+            "--name",
+            "box",
+            "--",
+            "/usr/bin/lianli-session",
+            "--login-start",
+            "--service-invocation",
+            "${INVOCATION_ID}",
+        ]);
+        let mut stop = commands(&[
+            "/usr/bin/env",
+            "--unset=INVOCATION_ID",
+            "/usr/bin/distrobox-enter",
+            "--name",
+            "box",
+            "--",
+            "/usr/bin/lianli-session",
+            "--stop-service",
+            "${INVOCATION_ID}",
+        ]);
+        stop.data.extend(
+            commands(&[
+                "/usr/bin/sh",
+                "-c",
+                &crate::distrobox_unit::WRAPPER_WAIT_SCRIPT.replace('$', "$$"),
+                "--",
+                "${MAINPID}",
+            ])
+            .data,
+        );
+        let copy = |value: &Commands| Commands {
+            signature: value.signature.clone(),
+            data: value.data.clone(),
+        };
+        assert_eq!(
+            match_commands(copy(&start), copy(&stop), true)
+                .unwrap()
+                .as_deref(),
+            Some("box")
+        );
+        assert!(match_recipe(copy(&start), copy(&stop)).unwrap().is_none());
+        for (index, value) in [
+            (4, "other-box"),
+            (6, "/usr/bin/lianli-daemon"),
+            (7, "--login-start"),
+            (8, "stale-id"),
+        ] {
+            let mut wrong = copy(&stop);
+            wrong.data[0].1[index] = value.into();
+            assert!(match_commands(copy(&start), wrong, true).unwrap().is_none());
+        }
+        let mut wrong = copy(&start);
+        wrong.data[0].1.remove(7);
+        assert!(match_commands(wrong, copy(&stop), true).unwrap().is_none());
+        stop.data.pop();
+        assert!(match_commands(start, stop, true).unwrap().is_none());
     }
 
     #[test]

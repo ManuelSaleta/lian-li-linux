@@ -186,17 +186,7 @@ pub fn check() -> Result<InstallationReport, String> {
 
 fn check_desktop_startup(context: &InstallationContext) -> InstallationFinding {
     if let InstallationContext::Distrobox { name } = context {
-        return InstallationFinding {
-            code: "desktop.login_startup".into(),
-            state: CheckState::Unavailable,
-            severity: FindingSeverity::Info,
-            feature: "Desktop display login startup".into(),
-            context: "Host user service. Capture inside Distrobox".into(),
-            title: "Desktop startup uses a host user unit".into(),
-            evidence: "Installing the package inside a default box does not enable its user services on the host. This check does not establish whether a host capture unit is already enabled.".into(),
-            remediation: lianli_control::distrobox_unit::session_guidance(name).unwrap_or_else(|error| format!("{error:#}. Follow the Distrobox desktop startup guide.")),
-            guide: InstallationGuide::Distrobox,
-        };
+        return lianli_control::services::check_distrobox_desktop_startup(name);
     }
     let native = matches!(context, InstallationContext::Native);
     let root = Path::new("/usr/lib/systemd/user");
