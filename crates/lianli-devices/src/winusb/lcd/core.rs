@@ -1,3 +1,4 @@
+use super::playback::PlaybackState;
 use crate::crypto::PacketBuilder;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
@@ -392,6 +393,8 @@ pub(crate) struct WinUsbLcdCore {
     /// Frame rate the current stream asked for, reapplied after a reinit
     /// cycle since h2_control_init resets the panel to 30.
     stream_fps: Option<f32>,
+    playback: PlaybackState,
+    stop_play_supported: bool,
 }
 
 /// Read the serial the kernel cached at enumeration, matching on bus/device
@@ -425,6 +428,7 @@ impl WinUsbLcdCore {
         name: &str,
         write_timeout: Duration,
         read_timeout: Duration,
+        stop_play_supported: bool,
     ) -> Result<Self> {
         let bus = device.bus_number();
         let address = device.address();
@@ -474,6 +478,8 @@ impl WinUsbLcdCore {
             device_gone: false,
             firmware: None,
             stream_fps: None,
+            playback: PlaybackState::default(),
+            stop_play_supported,
         })
     }
 
@@ -483,6 +489,7 @@ impl WinUsbLcdCore {
         name: String,
         write_timeout: Duration,
         read_timeout: Duration,
+        stop_play_supported: bool,
     ) -> Self {
         Self {
             transport,
@@ -497,6 +504,8 @@ impl WinUsbLcdCore {
             device_gone: false,
             firmware: None,
             stream_fps: None,
+            playback: PlaybackState::default(),
+            stop_play_supported,
         }
     }
 
@@ -516,7 +525,42 @@ impl WinUsbLcdCore {
         self.firmware.as_deref()
     }
 
-    pub(crate) fn transport_release(&self) {}
+    pub(crate) fn stop_playback(&mut self) -> Result<()> {
+        let builder = &mut self.builder;
+        let transport = &self.transport;
+        let supported = self.stop_play_supported;
+        let write_timeout = self.write_timeout;
+        let read_timeout = self.read_timeout;
+        self.playback.stop(|| {
+            if !supported {
+                return Ok(());
+            }
+            if lianli_transport::usb::shutting_down() {
+                bail!("shutting down; playback teardown requires a bounded I/O permit");
+            }
+            let header = builder.stop_play_header_winusb();
+            let bulk = transport
+                .bulk
+                .try_lock_for(Duration::from_millis(250))
+                .context("LCD transport is busy while stopping playback")?;
+            lianli_transport::usb::with_teardown_io(
+                Duration::from_millis(2_500),
+                || -> Result<()> {
+                    bulk.write_full(&header, write_timeout)
+                        .context("stopping LCD playback")?;
+                    let mut response = [0u8; 512];
+                    if let Err(error) = bulk.read(&mut response, read_timeout) {
+                        debug!("StopPlay reply unavailable: {error}");
+                    }
+                    bulk.read_flush();
+                    Ok(())
+                },
+            )?;
+            drop(bulk);
+            std::thread::sleep(WAKE_STEP);
+            Ok(())
+        })
+    }
 
     #[inline]
     fn tx_write_full(
@@ -524,32 +568,6 @@ impl WinUsbLcdCore {
         data: &[u8],
     ) -> std::result::Result<(), lianli_transport::TransportError> {
         self.transport.lock().write_full(data, self.write_timeout)
-    }
-
-    /// `tx_write_full`, timing only the USB write itself. The lock is taken
-    /// first so a busy `SharedTransport` is not misreported as panel NAK
-    /// backpressure.
-    #[inline]
-    fn tx_write_full_timed(
-        &self,
-        data: &[u8],
-        what: &str,
-    ) -> std::result::Result<(), lianli_transport::TransportError> {
-        let tx = self.transport.lock();
-        let started = Instant::now();
-        let result = tx.write_full(data, self.write_timeout);
-        let took = started.elapsed();
-        if took > SLOW_CHUNK_WRITE {
-            // Device NAK stall: the panel is back-pressuring. Visible at WARN
-            // so field logs show stalls that the write timeout absorbed.
-            warn!(
-                "{what} stalled {} ms ({} bytes, result {:?})",
-                took.as_millis(),
-                data.len(),
-                result.as_ref().map(|_| ()).map_err(|e| e.to_string())
-            );
-        }
-        result
     }
 
     #[inline]
@@ -811,6 +829,7 @@ impl WinUsbLcdCore {
     }
 
     pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
+        self.stop_playback()?;
         if frame.len() > self.screen.max_payload {
             bail!(
                 "frame payload {} exceeds LCD limit {}",
@@ -884,14 +903,14 @@ impl WinUsbLcdCore {
     }
 
     pub(crate) fn apply_stream_fps(&mut self, fps: f32) -> Result<()> {
+        self.stop_playback()?;
         self.stream_fps = Some(fps);
         let clamped = fps.round().clamp(1.0, self.screen.max_fps as f32) as u8;
         self.set_frame_rate(clamped)
     }
 
     pub(crate) fn switch_to_desktop_mode(&mut self) -> Result<()> {
-        let stop = self.builder.stop_play_header_winusb();
-        self.send_command(stop, "StopPlay");
+        self.stop_playback()?;
         let switch_cmd = self.builder.switch_to_desktop_header_winusb();
         self.send_command(switch_cmd, "SwitchToDesktop");
         let reboot = self.builder.reboot_header_winusb();
@@ -1016,15 +1035,13 @@ impl WinUsbLcdCore {
         if !self.transport.has_unsafe_pending() || !(force || self.transport.hold_allowed()) {
             return Ok(false);
         }
+        self.stop_playback()?;
         let cmds = self.transport.take_unsafe();
         info!(
             "H2 ring: stopping play for {} queued command(s)",
             cmds.len()
         );
         let started = Instant::now();
-        let stop = self.builder.stop_play_header_winusb();
-        self.send_command(stop, "StopPlay");
-        std::thread::sleep(WAKE_STEP);
         let stop_clock = self.builder.stop_clock_header_winusb();
         self.send_command(stop_clock, "StopClock");
         std::thread::sleep(WAKE_STEP);
@@ -1068,24 +1085,29 @@ impl WinUsbLcdCore {
         packet[..512].copy_from_slice(&header);
         packet[512..512 + data.len()].copy_from_slice(data);
 
-        match self.tx_write_full_timed(&packet, "H264 chunk write") {
-            Ok(_) => self.note_write_success(),
-            Err(e) => {
-                // The write is refused on purpose once shutdown starts, so
-                // unwinding quietly is the expected outcome, not a fault
-                // that recovery should chase.
-                if lianli_transport::usb::shutting_down() {
-                    debug!("H264 chunk write refused during shutdown: {e}");
-                    bail!("shutting down");
-                }
-                warn!("H264 chunk write failed: {e}");
-                self.try_recover()
-                    .with_context(|| format!("recovering from h264 write error: {e}"))?;
-                self.tx_write_full_timed(&packet, "H264 chunk write retry")
-                    .context("h264 chunk write after recovery")?;
-                self.note_write_success();
-            }
+        if lianli_transport::usb::shutting_down() {
+            return Ok(());
         }
+        let transport = &self.transport;
+        let timeout = self.write_timeout;
+        self.playback.write(|| {
+            let bulk = transport.lock();
+            let started = Instant::now();
+            // Finish an accepted packet even if shutdown starts between short writes.
+            let result = lianli_transport::usb::with_teardown_io(timeout, || {
+                bulk.write_full(&packet, timeout)
+                    .context("H264 packet interrupted; reconnect the LCD before retrying media")
+            });
+            if started.elapsed() > SLOW_CHUNK_WRITE {
+                warn!(
+                    "H264 chunk write stalled {} ms ({} bytes)",
+                    started.elapsed().as_millis(),
+                    packet.len()
+                );
+            }
+            result
+        })?;
+        self.note_write_success();
 
         let resp = self.read_response("h264 chunk");
         if let Some(transferred) = &self.h264_transferred {
@@ -1121,18 +1143,24 @@ impl WinUsbLcdCore {
     /// feed does not idle the panel, and a PushRgbData sent here wedged
     /// the MCU twice on 2026-09-06, once straight after the feed stopped
     /// and once after an acknowledged StopPlay.
-    fn stream_end(&mut self, clean: bool) {
+    fn stream_end(&mut self, clean: bool, stop_playback: bool) -> Result<()> {
         self.stream_fps = None;
+        self.initialized = false;
+        let stopped = if stop_playback {
+            lianli_transport::usb::with_teardown_io(Duration::from_secs(3), || self.stop_playback())
+        } else {
+            Ok(())
+        };
         {
             let _bulk = self.transport.lock();
             self.transport.set_streaming(false);
         }
-        if !clean {
+        if !clean || stopped.is_err() || lianli_transport::usb::shutting_down() {
             // Play-safe commands are resent every tick anyway; a queued
             // ring write is kept for the next stream start or the control
             // channel, so a later identical write is not deduplicated away.
             self.transport.take_play_safe();
-            return;
+            return stopped;
         }
         for cmd in self.transport.take_play_safe() {
             debug!("Sending deferred {} after stream end", cmd.label);
@@ -1144,6 +1172,7 @@ impl WinUsbLcdCore {
         if let Err(e) = self.reinit_and_flush_unsafe(true) {
             warn!("Panel reinit at stream end failed: {e:#}");
         }
+        stopped
     }
 
     /// Mid-stream hold: a command that cannot go out in play mode is
@@ -1181,8 +1210,15 @@ impl WinUsbLcdCore {
             play_count,
             play_tick,
         );
-        self.stream_end(result.is_ok());
-        result
+        // A finite upload can finish before the panel presents its buffered frames.
+        let ended = self.stream_end(
+            result.is_ok(),
+            looping
+                || stop.load(Ordering::Relaxed)
+                || lianli_transport::usb::shutting_down()
+                || result.is_err(),
+        );
+        result.and(ended)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1199,7 +1235,7 @@ impl WinUsbLcdCore {
     ) -> Result<()> {
         use std::io::Seek;
         let length = file.metadata()?.len();
-        while !stop.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::Relaxed) && !lianli_transport::usb::shutting_down() {
             let Some((n, is_last)) = read_stream_chunk(file, file_buf, looping, length)? else {
                 break;
             };
@@ -1234,13 +1270,16 @@ impl WinUsbLcdCore {
         self.stream_begin();
         let result = (|| -> Result<()> {
             loop {
-                if stop.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) || lianli_transport::usb::shutting_down() {
                     break;
                 }
                 let n = reader
                     .read(&mut buf)
                     .context("WinUSB LCD: read h264 stream")?;
                 if n == 0 {
+                    break;
+                }
+                if stop.load(Ordering::Relaxed) {
                     break;
                 }
                 self.send_h264_chunk(&buf[..n], false, play_count, play_tick, stop)?;
@@ -1250,10 +1289,10 @@ impl WinUsbLcdCore {
             }
             Ok(())
         })();
-        self.stream_end(result.is_ok());
+        let ended = self.stream_end(result.is_ok(), true);
         self.tx_read_flush();
         self.initialized = false;
-        result
+        result.and(ended)
     }
 
     pub(crate) fn init_logging(&self) {

@@ -10,7 +10,7 @@ pub(crate) trait WinUsbLcd: Send + Sync {
     fn screen_info(&self) -> &ScreenInfo;
     fn firmware_str(&self) -> Option<&str>;
     fn shared_transport(&self) -> SharedTransport;
-    fn transport_release(&self);
+    fn stop_playback(&mut self) -> Result<()>;
 
     fn initialize(&mut self) -> Result<()>;
     fn send_frame(&mut self, frame: &[u8]) -> Result<()>;

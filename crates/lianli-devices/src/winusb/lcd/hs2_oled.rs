@@ -23,7 +23,7 @@ impl Hs2OledWinUsbLcd {
         screen: ScreenInfo,
         name: &str,
     ) -> Result<Self> {
-        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT)?;
+        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT, true)?;
         Ok(Self { core, play_tick: 0 })
     }
 
@@ -33,7 +33,14 @@ impl Hs2OledWinUsbLcd {
         name: String,
     ) -> Self {
         Self {
-            core: WinUsbLcdCore::from_shared(transport, screen, name, WRITE_TIMEOUT, READ_TIMEOUT),
+            core: WinUsbLcdCore::from_shared(
+                transport,
+                screen,
+                name,
+                WRITE_TIMEOUT,
+                READ_TIMEOUT,
+                true,
+            ),
             play_tick: 0,
         }
     }
@@ -46,8 +53,7 @@ impl Hs2OledWinUsbLcd {
         let warn = self.core.builder_mut().warn_switch_header_winusb(false);
         self.core.send_command(warn, "WarnSwitch");
 
-        let stop_play = self.core.builder_mut().stop_play_header_winusb();
-        self.core.send_command(stop_play, "StopPlay");
+        self.core.stop_playback()?;
 
         let hide_show = self
             .core
@@ -103,8 +109,8 @@ impl WinUsbLcd for Hs2OledWinUsbLcd {
     fn shared_transport(&self) -> SharedTransport {
         self.core.shared_transport()
     }
-    fn transport_release(&self) {
-        self.core.transport_release()
+    fn stop_playback(&mut self) -> Result<()> {
+        self.core.stop_playback()
     }
     fn initialize(&mut self) -> Result<()> {
         if !self.core.initialized {

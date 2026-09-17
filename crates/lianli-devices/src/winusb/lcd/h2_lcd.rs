@@ -17,7 +17,7 @@ impl H2WinUsbLcd {
         screen: ScreenInfo,
         name: &str,
     ) -> Result<Self> {
-        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT)?;
+        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT, true)?;
         Ok(Self { core })
     }
 
@@ -27,19 +27,24 @@ impl H2WinUsbLcd {
         name: String,
     ) -> Self {
         Self {
-            core: WinUsbLcdCore::from_shared(transport, screen, name, WRITE_TIMEOUT, READ_TIMEOUT),
+            core: WinUsbLcdCore::from_shared(
+                transport,
+                screen,
+                name,
+                WRITE_TIMEOUT,
+                READ_TIMEOUT,
+                true,
+            ),
         }
     }
 
     fn do_init(&mut self) -> Result<()> {
         self.core.init_logging();
         self.core.reset_failure_state();
+        if let Err(error) = self.core.stop_playback() {
+            tracing::warn!("Stopping previous LCD playback failed: {error:#}");
+        }
         self.core.h2_control_init();
-        // FIX: clear_layers() paints a black 480x480 PNG over the panel. With
-        // `lcds: []` the daemon never draws anything afterwards, so the screen
-        // stays black and the firmware's own content is wiped. Media streaming
-        // overwrites every frame anyway, so clearing here buys nothing.
-        // self.core.clear_layers();
         self.core.initialized = true;
         Ok(())
     }
@@ -67,8 +72,8 @@ impl WinUsbLcd for H2WinUsbLcd {
     fn shared_transport(&self) -> SharedTransport {
         self.core.shared_transport()
     }
-    fn transport_release(&self) {
-        self.core.transport_release()
+    fn stop_playback(&mut self) -> Result<()> {
+        self.core.stop_playback()
     }
     fn initialize(&mut self) -> Result<()> {
         if !self.core.initialized || self.core.needs_init() {

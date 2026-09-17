@@ -711,7 +711,7 @@ impl ThreadedWinUsbSender {
                     LcdThreadMsg::SwitchDesktop(reply) => {
                         let result = device.switch_to_desktop_mode();
                         let _ = reply.send(result);
-                        break;
+                        return;
                     }
                     LcdThreadMsg::SetBrightness(val) => {
                         if let Err(e) = device.set_brightness_val(val) {
@@ -721,16 +721,22 @@ impl ThreadedWinUsbSender {
                     LcdThreadMsg::Shutdown(reply) => {
                         let result =
                             lianli_transport::usb::with_teardown_io(Duration::from_secs(3), || {
+                                device.stop_playback()?;
                                 device.set_brightness_val(0)
                             });
-                        device.transport_release();
                         let _ = reply.send(result);
                         return;
                     }
                     LcdThreadMsg::Stop => break,
                 }
             }
-            device.transport_release();
+            if let Err(error) =
+                lianli_transport::usb::with_teardown_io(Duration::from_secs(3), || {
+                    device.stop_playback()
+                })
+            {
+                warn!("LCD[{index}] playback teardown failed: {error:#}");
+            }
         });
         Self {
             transport,

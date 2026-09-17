@@ -16,8 +16,16 @@ impl Slv3WinUsbLcd {
         device: rusb::Device<rusb::GlobalContext>,
         screen: ScreenInfo,
         name: &str,
+        stop_play_supported: bool,
     ) -> Result<Self> {
-        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT)?;
+        let core = WinUsbLcdCore::open(
+            device,
+            screen,
+            name,
+            WRITE_TIMEOUT,
+            READ_TIMEOUT,
+            stop_play_supported,
+        )?;
         Ok(Self { core })
     }
 
@@ -25,15 +33,24 @@ impl Slv3WinUsbLcd {
         transport: SharedTransport,
         screen: ScreenInfo,
         name: String,
+        stop_play_supported: bool,
     ) -> Self {
         Self {
-            core: WinUsbLcdCore::from_shared(transport, screen, name, WRITE_TIMEOUT, READ_TIMEOUT),
+            core: WinUsbLcdCore::from_shared(
+                transport,
+                screen,
+                name,
+                WRITE_TIMEOUT,
+                READ_TIMEOUT,
+                stop_play_supported,
+            ),
         }
     }
 
     fn do_init(&mut self) -> Result<()> {
         self.core.init_logging();
         self.core.reset_failure_state();
+        self.core.stop_playback()?;
         self.core.read_firmware();
         self.core.set_frame_rate(SLV3_FRAME_RATE)?;
         self.core.query_h264_block();
@@ -64,8 +81,8 @@ impl WinUsbLcd for Slv3WinUsbLcd {
     fn shared_transport(&self) -> SharedTransport {
         self.core.shared_transport()
     }
-    fn transport_release(&self) {
-        self.core.transport_release()
+    fn stop_playback(&mut self) -> Result<()> {
+        self.core.stop_playback()
     }
     fn initialize(&mut self) -> Result<()> {
         if !self.core.initialized {
@@ -124,6 +141,12 @@ pub(crate) fn boxed(
     device: rusb::Device<rusb::GlobalContext>,
     screen: ScreenInfo,
     name: &str,
+    stop_play_supported: bool,
 ) -> Result<BoxedWinUsbLcd> {
-    Ok(Box::new(Slv3WinUsbLcd::new(device, screen, name)?))
+    Ok(Box::new(Slv3WinUsbLcd::new(
+        device,
+        screen,
+        name,
+        stop_play_supported,
+    )?))
 }

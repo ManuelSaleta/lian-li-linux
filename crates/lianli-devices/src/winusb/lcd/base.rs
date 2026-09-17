@@ -17,7 +17,7 @@ impl BaseWinUsbLcd {
         screen: ScreenInfo,
         name: &str,
     ) -> Result<Self> {
-        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT)?;
+        let core = WinUsbLcdCore::open(device, screen, name, WRITE_TIMEOUT, READ_TIMEOUT, true)?;
         Ok(Self { core })
     }
 
@@ -27,13 +27,21 @@ impl BaseWinUsbLcd {
         name: String,
     ) -> Self {
         Self {
-            core: WinUsbLcdCore::from_shared(transport, screen, name, WRITE_TIMEOUT, READ_TIMEOUT),
+            core: WinUsbLcdCore::from_shared(
+                transport,
+                screen,
+                name,
+                WRITE_TIMEOUT,
+                READ_TIMEOUT,
+                true,
+            ),
         }
     }
 
     fn do_init(&mut self) -> Result<()> {
         self.core.init_logging();
         self.core.reset_failure_state();
+        self.core.stop_playback()?;
         self.core.read_firmware();
         let sync = self.core.builder_mut().sync_clock_header_winusb(2);
         self.core.send_command(sync, "SyncClock");
@@ -61,8 +69,8 @@ impl WinUsbLcd for BaseWinUsbLcd {
     fn shared_transport(&self) -> SharedTransport {
         self.core.shared_transport()
     }
-    fn transport_release(&self) {
-        self.core.transport_release()
+    fn stop_playback(&mut self) -> Result<()> {
+        self.core.stop_playback()
     }
     fn initialize(&mut self) -> Result<()> {
         if !self.core.initialized {
