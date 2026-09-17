@@ -20,6 +20,10 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 ffmpeg-next = { workspace = true }
 
+[dev-dependencies]
+gif = "0.14"
+png = "0.18"
+
 [[bin]]
 name = "render-preview"
 path = "src/bin/render_preview.rs"

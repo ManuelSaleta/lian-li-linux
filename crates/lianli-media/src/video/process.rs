@@ -120,8 +120,29 @@ struct PipeCapture<R> {
 }
 
 pub(crate) fn stream_frames(
+    command: Command,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    frame_bytes: usize,
+    consume: impl FnMut(&[u8]) -> Result<(), crate::MediaError>,
+) -> Result<Output, crate::MediaError> {
+    read_frames(command, timeout, false, cancel, frame_bytes, consume)
+}
+
+pub(crate) fn stream_live_frames(
+    command: Command,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    frame_bytes: usize,
+    consume: impl FnMut(&[u8]) -> Result<(), crate::MediaError>,
+) -> Result<Output, crate::MediaError> {
+    read_frames(command, timeout, true, cancel, frame_bytes, consume)
+}
+
+fn read_frames(
     mut command: Command,
     timeout: Duration,
+    idle_timeout: bool,
     cancel: &AtomicBool,
     frame_bytes: usize,
     mut consume: impl FnMut(&[u8]) -> Result<(), crate::MediaError>,
@@ -146,8 +167,9 @@ pub(crate) fn stream_frames(
         reaped: false,
     };
     let mut stdout = PipeCapture::new(helper.child.stdout.take().expect("stdout was piped"))?;
+    stdout.bytes = Vec::with_capacity(frame_bytes);
     let mut stderr = PipeCapture::new(helper.child.stderr.take().expect("stderr was piped"))?;
-    let deadline = Instant::now() + timeout;
+    let mut deadline = Instant::now() + timeout;
     let mut exited = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -156,7 +178,9 @@ pub(crate) fn stream_frames(
         if Instant::now() >= deadline {
             return Err(TimedOut::Deadline { program, timeout }.into());
         }
-        stdout.drain_frames(frame_bytes, &mut consume)?;
+        if stdout.drain_frames(frame_bytes, &mut consume)? && idle_timeout {
+            deadline = Instant::now() + timeout;
+        }
         stderr.drain(STDERR_LIMIT)?;
         if !exited {
             exited = helper.exited()?;
@@ -192,10 +216,11 @@ impl<R: Read + AsRawFd> PipeCapture<R> {
         &mut self,
         frame_bytes: usize,
         consume: &mut impl FnMut(&[u8]) -> Result<(), crate::MediaError>,
-    ) -> Result<(), crate::MediaError> {
+    ) -> Result<bool, crate::MediaError> {
         if self.eof {
-            return Ok(());
+            return Ok(false);
         }
+        let mut progressed = false;
         let mut buffer = [0u8; 8192];
         for _ in 0..32 {
             let length = buffer.len().min(frame_bytes - self.bytes.len());
@@ -210,6 +235,7 @@ impl<R: Read + AsRawFd> PipeCapture<R> {
                     break;
                 }
                 Ok(size) => {
+                    progressed = true;
                     self.bytes.extend_from_slice(&buffer[..size]);
                     if self.bytes.len() == frame_bytes {
                         consume(&self.bytes)?;
@@ -221,7 +247,7 @@ impl<R: Read + AsRawFd> PipeCapture<R> {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(())
+        Ok(progressed)
     }
     fn poll_fd(&self) -> libc::pollfd {
         libc::pollfd {
@@ -364,6 +390,27 @@ impl std::fmt::Display for TimedOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_stream_timeout_excludes_consumer_backpressure() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf abcdefgh"]);
+        let mut frames = Vec::new();
+        let output = stream_live_frames(
+            command,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+            4,
+            |frame| {
+                frames.push(frame.to_vec());
+                std::thread::sleep(Duration::from_millis(1100));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(frames, vec![b"abcd".to_vec(), b"efgh".to_vec()]);
+    }
 
     #[test]
     fn streamed_frames_preserve_boundaries_and_reject_partial_output() {

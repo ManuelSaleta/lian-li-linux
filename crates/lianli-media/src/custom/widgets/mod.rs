@@ -26,17 +26,12 @@ use lianli_shared::template::{Widget, WidgetKind};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(super) struct WidgetState {
     pub resolved_sensor: Option<ResolvedSensor>,
     pub loaded_image: Option<RgbaImage>,
-    pub video_frames: Option<Arc<Vec<RgbaImage>>>,
-    pub video_frame_durations: Option<Arc<Vec<Duration>>>,
-    pub video_total_ms: u64,
-    pub video_fps_cap_ms: Option<u64>,
-    pub last_video_render_ms: Option<u64>,
+    pub video_stream: Option<crate::video::widget_stream::VideoStream>,
     pub last_render_text: Option<String>,
     pub last_quantized: i32,
     pub failed: AtomicBool,
@@ -56,11 +51,7 @@ impl WidgetState {
         Self {
             resolved_sensor: None,
             loaded_image: None,
-            video_frames: None,
-            video_frame_durations: None,
-            video_total_ms: 0,
-            video_fps_cap_ms: None,
-            last_video_render_ms: None,
+            video_stream: None,
             last_render_text: None,
             last_quantized: i32::MIN,
             failed: AtomicBool::new(false),

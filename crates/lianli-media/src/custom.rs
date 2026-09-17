@@ -1,7 +1,7 @@
 //! `CustomAsset` — the data-driven renderer for `MediaType::Custom`.
 //!
-//! Orchestrates per-widget state (resolved sensors, preloaded images / decoded
-//! video frames), composites each widget onto a baked template frame every
+//! Orchestrates per-widget state (resolved sensors, images and video playback),
+//! composites each widget onto a baked template frame every
 //! render tick, and encodes the result as JPEG. Widget drawing lives under
 //! [`widgets`], shared helpers under [`helpers`].
 
@@ -12,7 +12,6 @@ mod widgets;
 
 use crate::common::{encode_jpeg_rgba, render_dimensions, MediaError};
 use crate::sensor::FrameInfo;
-use crate::video::decode_frames_to_rgba;
 use crate::PreparationControl;
 use ab_glyph::FontVec;
 use helpers::{
@@ -228,38 +227,41 @@ impl CustomAsset {
                 }
             }
 
-            if let WidgetKind::Video { path, .. } = &widget.kind {
+            if let WidgetKind::Video {
+                path,
+                fit,
+                loop_playback,
+                ..
+            } = &widget.kind
+            {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
-                let requested = widget.fps.unwrap_or(30.0).min(fps);
-                let decode_fps =
-                    crate::video::ffmpeg::cap_fps_cancellable(path, requested, &control)?;
-                match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1), &control) {
-                    Ok((frames, durations)) => {
-                        for frame in &frames {
-                            retained_budget.reserve(frame.as_raw().len())?;
+                let requested = widget.fps.unwrap_or(30.0).min(fps).clamp(1.0, 60.0);
+                let decode_fps = if crate::video::widget_animation::is_animation(path) {
+                    requested
+                } else {
+                    crate::video::ffmpeg::cap_fps_cancellable(path, requested, &control)?
+                };
+                state.video_stream = Some(
+                    crate::video::widget_stream::VideoStream::new(
+                        path,
+                        decode_fps,
+                        (ww.max(1), wh.max(1)),
+                        *fit,
+                        *loop_playback,
+                        &control,
+                    )
+                    .map_err(|error| {
+                        if matches!(error, MediaError::Cancelled) {
+                            return error;
                         }
-                        let total_ms: u64 = durations
-                            .iter()
-                            .map(|d| d.as_millis() as u64)
-                            .sum::<u64>()
-                            .max(1);
-                        state.video_total_ms = total_ms;
-                        state.video_frame_durations = Some(Arc::new(durations));
-                        state.video_frames = Some(Arc::new(frames));
-                        state.video_fps_cap_ms = widget
-                            .fps
-                            .map(|_| (1000.0 / decode_fps.max(1.0)).round() as u64);
-                    }
-                    Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
-                    Err(error) => {
-                        return Err(MediaError::InvalidConfig(format!(
+                        MediaError::InvalidConfig(format!(
                             "Template '{}' widget '{}' video '{}': {error}",
                             template.id,
                             widget.id,
                             path.display()
-                        )))
-                    }
-                }
+                        ))
+                    })?,
+                );
             }
 
             widget_states.push(state);
@@ -451,33 +453,21 @@ impl CustomAsset {
                         any_dynamic_changed = true;
                     }
                 }
-                WidgetKind::Video { .. } => {
-                    if let (Some(frames), Some(durs)) =
-                        (&state.video_frames, &state.video_frame_durations)
-                    {
-                        if !frames.is_empty() && state.video_total_ms > 0 {
-                            let cycle = elapsed_ms % state.video_total_ms;
-                            let mut acc = 0u64;
-                            let mut idx = frames.len() - 1;
-                            for (i, d) in durs.iter().enumerate() {
-                                acc += (d.as_millis() as u64).max(1);
-                                if cycle < acc {
-                                    idx = i;
-                                    break;
-                                }
-                            }
-                            let cap_ok = match (state.video_fps_cap_ms, state.last_video_render_ms)
-                            {
-                                (Some(cap), Some(prev)) => elapsed_ms.saturating_sub(prev) >= cap,
-                                _ => true,
-                            };
-                            if state.last_video_frame_idx != Some(idx) && cap_ok {
-                                state.last_video_frame_idx = Some(idx);
-                                state.last_video_render_ms = Some(elapsed_ms);
-                                state.last_sample_at = Some(now);
-                                any_dynamic_changed = true;
-                            }
+                WidgetKind::Video { path, .. } => {
+                    if let Some(stream) = &mut state.video_stream {
+                        if stream.advance(now).map_err(|error| {
+                            MediaError::Ffmpeg(format!(
+                                "Template '{}' widget '{}' video '{}': {error}",
+                                self.template.id,
+                                widget.id,
+                                path.display()
+                            ))
+                        })? {
+                            state.last_video_frame_idx =
+                                Some(state.last_video_frame_idx.unwrap_or(0).wrapping_add(1));
+                            any_dynamic_changed = true;
                         }
+                        continue;
                     }
                 }
                 _ => {}

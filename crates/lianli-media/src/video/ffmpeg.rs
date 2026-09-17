@@ -1,6 +1,7 @@
 use super::process::PROBE_TIMEOUT;
 use crate::common::MediaError;
 use crate::PreparationControl;
+use lianli_shared::template::ImageFit;
 use std::path::Path;
 use std::process::Command;
 
@@ -80,6 +81,43 @@ pub(super) fn stream_rgba(
         return Err(MediaError::InvalidFps);
     }
     let frame_bytes = super::frame_budget::rgba_bytes(width, height)?;
+    let command = rgba_command(
+        input,
+        fps,
+        (width, height),
+        ImageFit::Stretch,
+        false,
+        control.hardware_video,
+    );
+    let output = control.stream_frames(command, frame_bytes, consume)?;
+    check_rgba_output(output)
+}
+
+pub(super) fn check_rgba_output(output: std::process::Output) -> Result<(), MediaError> {
+    if !output.status.success() {
+        return Err(MediaError::Ffmpeg(format!(
+            "ffmpeg exited with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn rgba_command(
+    input: &Path,
+    fps: f32,
+    size: (u32, u32),
+    fit: ImageFit,
+    looping: bool,
+    hardware: bool,
+) -> Command {
+    let (width, height) = size;
+    let scale = match fit {
+        ImageFit::Stretch => format!("scale={width}:{height}:flags=lanczos"),
+        ImageFit::Contain => format!("scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0"),
+        ImageFit::Cover => format!("scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height}"),
+    };
     let mut command = Command::new("ffmpeg");
     command.args([
         "-hide_banner",
@@ -97,23 +135,21 @@ pub(super) fn stream_rgba(
         "-threads",
         "1",
         "-hwaccel",
-        if control.hardware_video {
-            "auto"
-        } else {
-            "none"
-        },
+        if hardware { "auto" } else { "none" },
         "-max_pixels",
         "16777216",
-        "-i",
     ]);
-    command.arg(input).args([
+    if looping {
+        command.args(["-stream_loop", "-1"]);
+    }
+    command.arg("-i").arg(input).args([
         "-map",
         "0:v:0",
         "-an",
         "-sn",
         "-dn",
         "-vf",
-        &format!("scale={width}:{height}:flags=lanczos"),
+        &scale,
         "-r",
         &fps.to_string(),
         "-pix_fmt",
@@ -126,13 +162,5 @@ pub(super) fn stream_rgba(
         "rawvideo",
         "pipe:1",
     ]);
-    let output = control.stream_frames(command, frame_bytes, consume)?;
-    if !output.status.success() {
-        return Err(MediaError::Ffmpeg(format!(
-            "ffmpeg exited with status {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(())
+    command
 }

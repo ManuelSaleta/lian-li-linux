@@ -102,8 +102,33 @@ Digital-clock formats are checked during preparation, including a 4,096-byte
 expanded-output limit. Runtime expansion remains bounded as the date changes;
 an invalid or over-limit result falls back to `HH:MM`.
 
-Video/GIF frames prepared for JPEG or PNG playback and animation frames cached by
-custom video widgets are limited to 8,192 retained frames and 256 MiB per animation. Exceeding
+Custom video widgets use bounded hybrid playback for videos, GIFs and APNGs.
+Clips fitting within 32 MiB of decoded frames and 256 frames are cached; their
+decoder stops after preparation and subsequent loops reuse the cache. A single
+frame may use up to the existing 64 MiB image limit. Preparation measures actual
+frames rather than trusting duration metadata. If the cache fills or its shared
+memory reservation fails, playback continues through a bounded streaming queue.
+Larger animations no longer fail at the old 256 MiB or 8,192-frame widget limit.
+
+The queue targets 150 ms, with two to eight frames and a 16 MiB target for queued
+pixels; at least two frames are allowed even when they exceed that target. A
+1920×480 widget at 30 FPS queues four frames. Extra frames absorb brief scheduling
+stalls; they do not reduce total decoding work. Streaming buffer reservations and
+optional caches count toward the shared 1 GiB budget. At most eight decoders can
+be active at once, including replacements; cached widgets release their decoder
+slot. Decoding waits when the queue is full, and releasing an asset stops and
+joins its decoder.
+
+GIF/APNG playback retains native transparency and disposal handling. Short frame
+delays are coalesced at the requested frame-rate limit before resizing, retaining
+their combined duration. Playback respects image fit and the loop setting;
+non-looping sources hold their last frame. This applies to both JPEG and H.264
+custom templates. Device-facing encoder settings are unchanged.
+Decode failures after playback starts stop the source and appear in Installation
+Health; repair the file and use **Retry failed media**.
+
+Video/GIF frames prepared for standalone JPEG or PNG playback are still limited
+to 8,192 retained frames and 256 MiB per animation. Exceeding
 either limit fails preparation instead of truncating the animation. Use a shorter
 clip or a smaller video widget. Source decoding also uses the image limits above;
 simultaneous displays and widgets consume additional memory.
