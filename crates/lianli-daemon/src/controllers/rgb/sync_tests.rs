@@ -205,6 +205,47 @@ fn sync_resets_shared_controller_before_applying_either_port() {
     }
 }
 
+#[test]
+fn shared_controller_reset_restores_unchanged_individual_port() {
+    let colors = Arc::new(parking_lot::Mutex::new([[0; 3]; 2]));
+    let ports = (0..2)
+        .map(|port| {
+            (
+                format!("hid:controller:port{port}"),
+                Arc::new(SharedPort {
+                    port,
+                    colors: colors.clone(),
+                }) as Arc<dyn RgbDevice>,
+            )
+        })
+        .collect();
+    let mut controller = RgbController::new(ports, None);
+    let device: RgbDeviceConfig = serde_json::from_value(serde_json::json!({
+        "device_id": "hid:controller:port1",
+        "zones": [{"zone_index": 0, "effect": RgbEffect { colors: vec![[30, 40, 50]], ..Default::default() }}]
+    })).unwrap();
+    let mut config = RgbAppConfig {
+        enabled: true,
+        devices: vec![device],
+        ..Default::default()
+    };
+    controller.apply_config(&config, &[]);
+    assert_eq!(colors.lock()[1], [30, 40, 50]);
+    config.merge_lighting = Some(MergeLightingConfig {
+        enabled: true,
+        kind: lianli_shared::rgb::RgbSyncKind::Matched,
+        device_order: vec!["hid:controller:port0".into()],
+        effect: RgbEffect {
+            colors: vec![[1, 2, 3]],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    controller.apply_config(&config, &[]);
+    assert_eq!(*colors.lock(), [[1, 2, 3], [30, 40, 50]]);
+    controller.stop();
+}
+
 impl RgbDevice for UnavailableDevice {
     fn device_name(&self) -> String {
         "unavailable".into()

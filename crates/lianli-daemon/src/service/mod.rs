@@ -756,7 +756,15 @@ impl ServiceManager {
                             self.restart_requested = true;
                             break;
                         }
-                        self.start_fan_control();
+                        if !self
+                            .controllers
+                            .fan
+                            .as_ref()
+                            .zip(self.config.as_ref())
+                            .is_some_and(|(controller, config)| controller.matches_config(config))
+                        {
+                            self.start_fan_control();
+                        }
                         if let (Some(aio), Some(cfg)) =
                             (self.controllers.aio.as_ref(), self.config.as_ref())
                         {

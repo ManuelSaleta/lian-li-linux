@@ -72,6 +72,13 @@ impl Pending {
         self.generation = self.generation.wrapping_add(1);
         self.inflight = None;
     }
+
+    fn remove(&mut self, mac: &[u8; 6]) {
+        self.jobs.retain(|job| &job.mac != mac);
+        if self.inflight.as_ref().is_some_and(|job| &job.mac == mac) {
+            self.inflight = None;
+        }
+    }
 }
 
 pub(super) struct UploadWorker {
@@ -145,14 +152,14 @@ impl UploadWorker {
                 false
             };
             let mut pending = shared.0.lock();
-            if pending
+            let current = pending
                 .inflight
                 .as_ref()
-                .is_some_and(|inflight| inflight.id == id)
-            {
+                .is_some_and(|inflight| inflight.id == id);
+            if current {
                 pending.inflight = None;
             }
-            if pending.stopped || pending.generation != generation {
+            if !current || pending.stopped || pending.generation != generation {
                 if let Command::Upload(upload) = &job.command {
                     job.wireless
                         .forget_rgb_target(&job.mac, upload.effect_index());
@@ -236,6 +243,11 @@ impl UploadWorker {
     pub(super) fn clear(&self) {
         let mut pending = self.pending.0.lock();
         pending.clear();
+    }
+
+    pub(super) fn remove(&self, mac: &[u8; 6]) {
+        self.pending.0.lock().remove(mac);
+        self.pending.1.notify_one();
     }
 
     pub(super) fn stop(&mut self) {
@@ -345,6 +357,26 @@ mod tests {
         assert!(pending.submit_job(job(&wireless, [251; 6], 0)).is_err());
         pending.submit_job(job(&wireless, [250; 6], 0)).unwrap();
         assert_eq!(pending.jobs.back().unwrap().mac, [250; 6]);
+    }
+
+    #[test]
+    fn removing_one_device_preserves_other_queued_and_inflight_commands() {
+        let wireless = Arc::new(WirelessController::new());
+        let mut pending = Pending::default();
+        pending.submit_job(job(&wireless, [1; 6], 1)).unwrap();
+        pending.submit_job(job(&wireless, [2; 6], 1)).unwrap();
+        pending.inflight = Some(Inflight {
+            id: 1,
+            mac: [2; 6],
+            command: Command::MotherboardSync(false),
+        });
+        pending.remove(&[1; 6]);
+        assert_eq!(pending.jobs.len(), 1);
+        assert_eq!(pending.jobs[0].mac, [2; 6]);
+        assert_eq!(pending.inflight.as_ref().unwrap().id, 1);
+        pending.remove(&[2; 6]);
+        assert!(pending.jobs.is_empty());
+        assert!(pending.inflight.is_none());
     }
 
     #[test]

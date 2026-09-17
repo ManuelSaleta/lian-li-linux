@@ -27,6 +27,20 @@ pub struct FanController {
 }
 
 impl FanController {
+    pub fn matches_config(&self, config: &lianli_shared::config::AppConfig) -> bool {
+        self.config == config.fans.clone().unwrap_or_default()
+            && self.curves
+                == config
+                    .fan_curves
+                    .iter()
+                    .cloned()
+                    .map(|curve| (curve.name.clone(), curve))
+                    .collect()
+            && self.rgb_drift_enabled == config.rgb_drift_detection_enabled
+            && self.rgb_drift_interval
+                == Duration::from_millis(config.rgb_drift_detection_interval_ms.max(100))
+    }
+
     pub fn new(
         config: FanConfig,
         curves: Vec<FanCurve>,
@@ -801,5 +815,39 @@ mod sync_tests {
         assert_eq!(software_sync_pwm(&selected, |_| Some(128)), 128);
         assert_eq!(software_sync_pwm(&selected, |_| None), 255);
         assert_eq!(software_sync_pwm(&selected, |_| Some(0)), 0);
+    }
+
+    #[test]
+    fn unrelated_settings_do_not_require_restarting_fan_control() {
+        let mut config = lianli_shared::config::AppConfig::default();
+        let controller = FanController::new(
+            config.fans.clone().unwrap_or_default(),
+            config.fan_curves.clone(),
+            None,
+            Arc::new(HashMap::new()),
+            None,
+            config.rgb_drift_detection_enabled,
+            Duration::from_millis(config.rgb_drift_detection_interval_ms.max(100)),
+        );
+        config.hardware_video = !config.hardware_video;
+        config.rgb = Some(lianli_shared::rgb::RgbAppConfig::default());
+        assert!(controller.matches_config(&config));
+        let original = config.clone();
+        config
+            .fans
+            .get_or_insert_with(Default::default)
+            .hysteresis_pwm += 1;
+        assert!(!controller.matches_config(&config));
+        config = original.clone();
+        config.fan_curves.push(FanCurve {
+            name: "new".into(),
+            temp_source: None,
+            temp_command: String::new(),
+            curve: vec![(20.0, 30.0)],
+        });
+        assert!(!controller.matches_config(&config));
+        config = original;
+        config.rgb_drift_detection_enabled = !config.rgb_drift_detection_enabled;
+        assert!(!controller.matches_config(&config));
     }
 }

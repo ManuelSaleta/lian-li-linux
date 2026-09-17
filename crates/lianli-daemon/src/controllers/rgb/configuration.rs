@@ -47,7 +47,7 @@ impl RgbController {
     }
 
     pub fn apply_config(&mut self, config: &RgbAppConfig, presets: &[RgbPreset]) {
-        self.config = Some(config.clone());
+        let previous = self.config.replace(config.clone());
         self.presets = presets.to_vec();
         self.openrgb_server_enabled = config.openrgb_server;
         if !config.enabled || self.is_openrgb_controlled() {
@@ -61,29 +61,17 @@ impl RgbController {
             warn!("Failed to apply RGB synchronization: {error:#}");
         }
 
-        let removed: Vec<_> = self
-            .rendered
-            .keys()
+        let removed: Vec<_> = previous
+            .iter()
+            .flat_map(|config| &config.devices)
+            .map(|device| &device.device_id)
             .filter(|id| !self.sync_active.contains(*id))
             .filter(|id| !config.devices.iter().any(|d| &d.device_id == *id))
             .cloned()
             .collect();
-        if removed
-            .iter()
-            .any(|id| self.wireless_state.contains_key(id))
-        {
-            self.upload_worker.clear();
-            if let Some(wireless) = &self.wireless {
-                wireless.clear_rgb_targets();
-            }
-            self.applied
-                .retain(|id, _| !self.wireless_state.contains_key(id));
-        }
         for id in removed {
-            self.wired_renderer.remove(&id);
+            self.clear_device_pending(&id);
             self.rendered.remove(&id);
-            self.applied.remove(&id);
-            self.uploads.remove(&id);
         }
 
         let mut ordered: Vec<_> = config.devices.iter().collect();
@@ -93,10 +81,24 @@ impl RgbController {
                 continue;
             }
             let result = (|| -> anyhow::Result<()> {
-                if device.mb_rgb_sync {
-                    return self.set_mb_rgb_sync(&device.device_id, true);
+                let preset = device.active_preset.as_ref().and_then(|name| {
+                    presets
+                        .iter()
+                        .find(|preset| &preset.name == name && preset.device_id == device.device_id)
+                });
+                let signature = serde_json::to_string(&(
+                    device.mb_rgb_sync,
+                    &device.zones,
+                    &device.regions,
+                    preset.map(|preset| (&preset.zones, &preset.regions)),
+                ))?;
+                if self.configured.get(&device.device_id) == Some(&signature) {
+                    return Ok(());
                 }
-                if self.software_controlled(&device.device_id) {
+                self.configured.remove(&device.device_id);
+                if device.mb_rgb_sync {
+                    self.set_mb_rgb_sync(&device.device_id, true)?;
+                } else if self.software_controlled(&device.device_id) {
                     let next = self.configured_render(device, presets)?;
                     self.apply_render(&device.device_id, next)?;
                 } else {
@@ -112,6 +114,7 @@ impl RgbController {
                         }
                     }
                 }
+                self.configured.insert(device.device_id.clone(), signature);
                 Ok(())
             })();
             if let Err(error) = result {
@@ -197,6 +200,189 @@ impl RgbController {
 mod tests {
     use super::*;
     use lianli_shared::rgb::{RgbDeviceConfig, RgbZoneConfig};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct LoopDevice(mpsc::Sender<Vec<Vec<[u8; 3]>>>);
+
+    impl RgbDevice for LoopDevice {
+        fn device_name(&self) -> String {
+            "loop".into()
+        }
+        fn supported_modes(&self) -> Vec<RgbMode> {
+            vec![RgbMode::Static, RgbMode::Direct]
+        }
+        fn zone_info(&self) -> Vec<RgbZoneInfo> {
+            vec![RgbZoneInfo {
+                name: "zone".into(),
+                led_count: 1,
+            }]
+        }
+        fn set_zone_effect(&self, _: u8, _: &RgbEffect) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn software_frame_delivery(&self) -> Option<lianli_devices::traits::RgbFrameDelivery> {
+            Some(lianli_devices::traits::RgbFrameDelivery::LoopUpload)
+        }
+        fn set_software_animation(
+            &self,
+            frames: &[Vec<[u8; 3]>],
+            _: lianli_shared::rgb::RgbPlaybackTiming,
+        ) -> anyhow::Result<()> {
+            self.0.send(frames.to_vec())?;
+            Ok(())
+        }
+    }
+
+    fn saved_device(id: &str) -> RgbDeviceConfig {
+        RgbDeviceConfig {
+            device_id: id.into(),
+            mb_rgb_sync: false,
+            active_preset: None,
+            regions: None,
+            effect_memory: Vec::new(),
+            zones: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unrelated_saves_preserve_live_frames_and_direct_colors() {
+        for direct in [false, true] {
+            let (sender, received) = mpsc::channel();
+            let device = Arc::new(LoopDevice(sender)) as Arc<dyn RgbDevice>;
+            let mut controller = RgbController::new(
+                HashMap::from([("live".into(), device.clone()), ("other".into(), device)]),
+                None,
+            );
+            let mut config = RgbAppConfig {
+                enabled: true,
+                devices: vec![saved_device("live")],
+                ..Default::default()
+            };
+            controller.apply_config(&config, &[]);
+            received.recv_timeout(Duration::from_secs(1)).unwrap();
+            let frames = if direct {
+                vec![vec![[12, 34, 56]]]
+            } else {
+                vec![vec![[255, 0, 0]], vec![[0, 255, 0]]]
+            };
+            if direct {
+                controller.set_direct_colors("live", 0, &frames[0]).unwrap();
+            } else {
+                controller.set_rgb_frames("live", &frames, 50).unwrap();
+            }
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(1)).unwrap(),
+                frames
+            );
+            controller.apply_config(&config, &[]);
+            assert!(received.recv_timeout(Duration::from_millis(80)).is_err());
+            config.devices.push(saved_device("other"));
+            controller.apply_config(&config, &[]);
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(1)).unwrap(),
+                vec![vec![[0; 3]]]
+            );
+            assert!(received.recv_timeout(Duration::from_millis(80)).is_err());
+            assert_eq!(controller.get_zone_colors("live", 0).unwrap(), frames[0]);
+            config.merge_lighting = Some(lianli_shared::rgb::MergeLightingConfig {
+                enabled: true,
+                kind: lianli_shared::rgb::RgbSyncKind::Matched,
+                device_order: vec!["other".into()],
+                ..Default::default()
+            });
+            controller.apply_config(&config, &[]);
+            assert!(received.recv_timeout(Duration::from_millis(80)).is_err());
+            assert_eq!(controller.get_zone_colors("live", 0).unwrap(), frames[0]);
+            config.devices[0].zones.push(RgbZoneConfig {
+                zone_index: 0,
+                effect: RgbEffect::default(),
+                swap_lr: false,
+                swap_tb: false,
+            });
+            controller.apply_config(&config, &[]);
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(1)).unwrap(),
+                vec![vec![[255; 3]]]
+            );
+            controller.stop();
+        }
+    }
+
+    #[test]
+    fn preset_updates_and_hardware_invalidation_reapply_saved_settings() {
+        let (sender, received) = mpsc::channel();
+        let mut controller = RgbController::new(
+            HashMap::from([(
+                "live".into(),
+                Arc::new(LoopDevice(sender)) as Arc<dyn RgbDevice>,
+            )]),
+            None,
+        );
+        let mut device = saved_device("live");
+        device.active_preset = Some("colors".into());
+        let config = RgbAppConfig {
+            enabled: true,
+            devices: vec![device],
+            ..Default::default()
+        };
+        let mut presets = vec![RgbPreset {
+            name: "colors".into(),
+            device_id: "live".into(),
+            regions: None,
+            zones: vec![RgbPresetZone {
+                zone: 0,
+                colors: vec![[30, 40, 50]],
+                effect: None,
+            }],
+        }];
+        controller.apply_config(&config, &presets);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            vec![vec![[30, 40, 50]]]
+        );
+        presets[0].zones[0].colors[0] = [50, 40, 30];
+        controller.apply_config(&config, &presets);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            vec![vec![[50, 40, 30]]]
+        );
+        controller.invalidate_hardware_state();
+        controller.apply_config(&config, &presets);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            vec![vec![[50, 40, 30]]]
+        );
+        controller.stop();
+    }
+
+    #[test]
+    fn unsaved_live_device_survives_configuration_without_device_entries() {
+        let (sender, received) = mpsc::channel();
+        let mut controller = RgbController::new(
+            HashMap::from([(
+                "live".into(),
+                Arc::new(LoopDevice(sender)) as Arc<dyn RgbDevice>,
+            )]),
+            None,
+        );
+        let config = RgbAppConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        controller.apply_config(&config, &[]);
+        controller
+            .set_direct_colors("live", 0, &[[10, 20, 30]])
+            .unwrap();
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        controller.apply_config(&config, &[]);
+        assert_eq!(
+            controller.get_zone_colors("live", 0).unwrap(),
+            [[10, 20, 30]]
+        );
+        assert!(received.recv_timeout(Duration::from_millis(80)).is_err());
+        controller.stop();
+    }
 
     #[test]
     fn detached_fan_settings_are_preserved_but_not_rendered() {

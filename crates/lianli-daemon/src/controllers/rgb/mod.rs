@@ -44,6 +44,7 @@ pub struct RgbController {
     wireless_state: HashMap<String, WirelessDevice>,
     rendered: HashMap<String, RenderState>,
     applied: HashMap<String, RenderState>,
+    configured: HashMap<String, String>,
     uploads: HashMap<String, Arc<WirelessRgbUpload>>,
     upload_worker: UploadWorker,
     wired_renderer: WiredRenderer,
@@ -71,6 +72,7 @@ impl RgbController {
             wireless_state: HashMap::new(),
             rendered: HashMap::new(),
             applied: HashMap::new(),
+            configured: HashMap::new(),
             uploads: HashMap::new(),
             upload_worker: UploadWorker::new(),
             wired_renderer: WiredRenderer::new(),
@@ -97,6 +99,7 @@ impl RgbController {
     }
 
     fn clear_pending(&mut self) {
+        self.configured.clear();
         self.sync_clock.clear();
         self.sync_signature = None;
         self.sync_active.clear();
@@ -112,6 +115,19 @@ impl RgbController {
 
     pub fn set_thermal_override(&mut self, state: crate::thermal_alert::SharedThermalAlert) {
         self.thermal_override = state;
+    }
+
+    fn clear_device_pending(&mut self, id: &str) {
+        self.configured.remove(id);
+        self.applied.remove(id);
+        self.wired_renderer.remove(id);
+        if let Some(device) = self.wireless_state.get(id) {
+            self.upload_worker.remove(&device.mac);
+            if let (Some(wireless), Some(upload)) = (&self.wireless, self.uploads.get(id)) {
+                wireless.forget_rgb_target(&device.mac, upload.effect_index());
+            }
+        }
+        self.uploads.remove(id);
     }
 
     pub fn thermal_override_active(&self) -> bool {
@@ -286,6 +302,8 @@ impl RgbController {
 
     pub fn replace_wired(&mut self, wired: HashMap<String, Arc<dyn RgbDevice>>) {
         self.sync_signature = None;
+        self.configured
+            .retain(|id, _| !self.wired.contains_key(id) && !wired.contains_key(id));
         self.wired = wired;
         self.rendered
             .retain(|id, _| self.wired.contains_key(id) || self.wireless_state.contains_key(id));
@@ -310,6 +328,7 @@ impl RgbController {
                 self.sync_clock.clear();
                 self.wired_renderer.remove(&id);
                 self.applied.remove(&id);
+                self.configured.remove(&id);
                 self.rendered.remove(&id);
                 self.mb_sync_state.remove(&id);
                 self.last_direct.retain(|(device, _), _| device != &id);
@@ -318,6 +337,7 @@ impl RgbController {
     }
 
     pub fn refresh_wireless_devices(&mut self) {
+        self.configured.retain(|id, _| !id.starts_with("wireless:"));
         self.sync_signature = None;
         self.thermal_last_color = None;
         let mut devices = HashMap::new();

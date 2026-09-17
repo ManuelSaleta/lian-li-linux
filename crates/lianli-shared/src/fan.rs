@@ -1,7 +1,7 @@
 use crate::sensors::SensorSource;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FanCurve {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,7 +121,7 @@ impl FanSpeed {
 }
 
 /// A fan speed group targeting a specific device.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FanGroup {
     /// Device identifier (e.g. "wireless:AA:BB:CC:DD:EE:FF" or "usb:1:5" or a serial).
     /// When absent, groups are matched by index order to discovered devices.
@@ -165,7 +165,7 @@ where
     pad_speeds(speeds).map_err(D::Error::custom)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FanConfig {
     #[serde(deserialize_with = "deserialize_fan_groups")]
     pub speeds: Vec<FanGroup>,
