@@ -76,13 +76,20 @@ impl InstallationContext {
         let box_name = std::env::var("CONTAINER_ID")
             .ok()
             .filter(|name| !name.is_empty());
-        let host_visible = Path::new("/run/host/run").is_dir();
+        Self::detect_at(
+            Path::new("/"),
+            box_name,
+            std::env::var_os("container").is_some(),
+        )
+    }
+
+    fn detect_at(root: &Path, box_name: Option<String>, container_env: bool) -> Self {
+        let host_visible = root.join("run/host/run").is_dir();
         let container = box_name.is_some()
-            || std::env::var_os("container").is_some()
-            || Path::new("/run/.containerenv").exists()
-            || Path::new("/.dockerenv").exists()
-            || Path::new("/run/systemd/container").exists()
-            || Path::new("/run/host").exists();
+            || container_env
+            || root.join("run/.containerenv").exists()
+            || root.join(".dockerenv").exists()
+            || root.join("run/systemd/container").exists();
         Self::from_evidence(box_name, host_visible, container)
     }
 
@@ -123,6 +130,81 @@ impl InstallationContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_toolbox_host_symlink_does_not_imply_a_container() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("run")).unwrap();
+        std::os::unix::fs::symlink("../", root.path().join("run/host")).unwrap();
+        assert!(root.path().join("run/host/run").is_dir());
+
+        let context = InstallationContext::detect_at(root.path(), None, false);
+        assert_eq!(context, InstallationContext::Native);
+        assert_eq!(context.daemon_lock_path(), Some(DAEMON_LOCK_PATH.into()));
+        assert_eq!(
+            context.service_operation_lock_path(),
+            Some(SERVICE_OPERATION_LOCK_PATH.into())
+        );
+    }
+
+    #[test]
+    fn container_markers_remain_unsupported_even_with_host_access() {
+        for marker in ["run/.containerenv", ".dockerenv", "run/systemd/container"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("run/host/run")).unwrap();
+            let path = root.path().join(marker);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+
+            let context = InstallationContext::detect_at(root.path(), None, false);
+            assert_eq!(
+                context,
+                InstallationContext::UnsupportedContainer,
+                "{marker}"
+            );
+            assert_eq!(context.daemon_lock_path(), None);
+            assert_eq!(
+                InstallationContext::detect_at(root.path(), Some("box".into()), true),
+                InstallationContext::Distrobox { name: "box".into() },
+                "Distrobox with {marker} and the container environment variable"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_detection_still_requires_a_named_box_with_host_access() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            InstallationContext::detect_at(root.path(), None, false),
+            InstallationContext::Native
+        );
+        assert_eq!(
+            InstallationContext::detect_at(root.path(), None, true),
+            InstallationContext::UnsupportedContainer
+        );
+        assert_eq!(
+            InstallationContext::detect_at(root.path(), Some("box".into()), false),
+            InstallationContext::UnsupportedContainer
+        );
+        std::fs::create_dir_all(root.path().join("run/host/run")).unwrap();
+        assert_eq!(
+            InstallationContext::detect_at(root.path(), None, false),
+            InstallationContext::Native
+        );
+        assert_eq!(
+            InstallationContext::detect_at(root.path(), None, true),
+            InstallationContext::UnsupportedContainer
+        );
+        let context = InstallationContext::detect_at(root.path(), Some("box".into()), false);
+        assert_eq!(
+            context,
+            InstallationContext::Distrobox { name: "box".into() }
+        );
+        assert_eq!(
+            context.daemon_lock_path(),
+            Some("/run/host/run/lianli-daemon.lock".into())
+        );
+    }
 
     #[test]
     fn daemon_environment_is_optional_for_old_reports_and_independent_of_gui_context() {
