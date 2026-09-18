@@ -1,8 +1,9 @@
 use anyhow::{ensure, Result};
-use lianli_devices::traits::{RgbDevice, RgbFrameDelivery};
+use lianli_devices::traits::{RgbDeferred, RgbDevice, RgbFrameDelivery};
 use lianli_shared::rgb::RgbPlaybackTiming;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ struct Playback {
     next: Option<Instant>,
     last_frame: Option<usize>,
     failures: u32,
+    stop: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -36,7 +38,7 @@ impl WiredRenderer {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let worker = shared.clone();
         let thread = thread::spawn(move || loop {
-            let (id, device, frames, index, interval, timing) = {
+            let (id, device, frames, index, interval, timing, stop) = {
                 let mut state = worker.0.lock();
                 loop {
                     if state.stopped {
@@ -87,6 +89,7 @@ impl WiredRenderer {
                             index,
                             p.interval,
                             p.timing,
+                            p.stop.clone(),
                         );
                     }
                     if let Some(next) = state.devices.values().filter_map(|p| p.next).min() {
@@ -99,9 +102,9 @@ impl WiredRenderer {
                 }
             };
             let result = if let Some(index) = index {
-                device.set_software_animation(&frames[index..index + 1], timing)
+                device.set_software_animation_with_stop(&frames[index..index + 1], timing, &stop)
             } else {
-                device.set_software_animation(&frames, timing)
+                device.set_software_animation_with_stop(&frames, timing, &stop)
             };
             let mut state = worker.0.lock();
             if let Some(p) = state
@@ -120,6 +123,15 @@ impl WiredRenderer {
                         };
                     }
                     Err(error) => {
+                        if let Some(deferred) = error.downcast_ref::<RgbDeferred>() {
+                            p.next = Some(
+                                Instant::now()
+                                    + deferred
+                                        .retry_after
+                                        .clamp(Duration::from_millis(50), Duration::from_secs(10)),
+                            );
+                            continue;
+                        }
                         p.failures = p.failures.saturating_add(1);
                         p.next = Some(
                             Instant::now()
@@ -197,6 +209,9 @@ impl WiredRenderer {
             "RGB renderer device limit reached"
         );
         let now = Instant::now();
+        if let Some(previous) = state.devices.get(id) {
+            previous.stop.store(true, Ordering::Release);
+        }
         state.devices.insert(
             id.to_owned(),
             Playback {
@@ -209,6 +224,7 @@ impl WiredRenderer {
                 next: Some(now),
                 last_frame: None,
                 failures: 0,
+                stop: Arc::new(AtomicBool::new(false)),
             },
         );
         self.shared.1.notify_one();
@@ -216,12 +232,18 @@ impl WiredRenderer {
     }
 
     pub fn clear(&self) {
-        self.shared.0.lock().devices.clear();
+        let mut state = self.shared.0.lock();
+        for playback in state.devices.values() {
+            playback.stop.store(true, Ordering::Release);
+        }
+        state.devices.clear();
         self.shared.1.notify_one();
     }
 
     pub fn remove(&self, id: &str) {
-        self.shared.0.lock().devices.remove(id);
+        if let Some(playback) = self.shared.0.lock().devices.remove(id) {
+            playback.stop.store(true, Ordering::Release);
+        }
         self.shared.1.notify_one();
     }
 
@@ -229,6 +251,9 @@ impl WiredRenderer {
         {
             let mut state = self.shared.0.lock();
             state.stopped = true;
+            for playback in state.devices.values() {
+                playback.stop.store(true, Ordering::Release);
+            }
             state.devices.clear();
             self.shared.1.notify_one();
         }
@@ -257,6 +282,7 @@ mod tests {
         delivery: RgbFrameDelivery,
         frames: Sender<Vec<Vec<[u8; 3]>>>,
         failures_left: std::sync::atomic::AtomicUsize,
+        deferred_left: std::sync::atomic::AtomicUsize,
     }
 
     impl RecordingDevice {
@@ -267,6 +293,7 @@ mod tests {
                     delivery,
                     frames,
                     failures_left: Default::default(),
+                    deferred_left: Default::default(),
                 }),
                 received,
             )
@@ -303,6 +330,19 @@ mod tests {
             _timing: RgbPlaybackTiming,
         ) -> Result<()> {
             if self
+                .deferred_left
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(RgbDeferred {
+                    retry_after: Duration::from_millis(50),
+                    reason: "test queue busy",
+                }
+                .into());
+            }
+            if self
                 .failures_left
                 .fetch_update(
                     std::sync::atomic::Ordering::Relaxed,
@@ -321,6 +361,38 @@ mod tests {
 
     fn frame(value: u8) -> Vec<[u8; 3]> {
         vec![[value, 0, 0]]
+    }
+
+    #[test]
+    fn deferred_static_upload_retries_without_another_submission() {
+        let (device, received) = RecordingDevice::new(RgbFrameDelivery::LoopUpload);
+        device.deferred_left.store(2, Ordering::Relaxed);
+        let renderer = WiredRenderer::new();
+        renderer
+            .submit("deferred", device, vec![frame(8)], 100)
+            .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            vec![frame(8)]
+        );
+        assert!(received.recv_timeout(Duration::from_millis(150)).is_err());
+    }
+
+    #[test]
+    fn removing_or_replacing_a_job_cancels_its_queued_device_request() {
+        let (device, _received) = RecordingDevice::new(RgbFrameDelivery::LoopUpload);
+        let renderer = WiredRenderer::new();
+        renderer
+            .submit("request", device.clone(), vec![frame(1)], 100)
+            .unwrap();
+        let old = renderer.shared.0.lock().devices["request"].stop.clone();
+        renderer
+            .submit("request", device, vec![frame(2)], 100)
+            .unwrap();
+        assert!(old.load(Ordering::Acquire));
+        let next = renderer.shared.0.lock().devices["request"].stop.clone();
+        renderer.remove("request");
+        assert!(next.load(Ordering::Acquire));
     }
 
     #[test]

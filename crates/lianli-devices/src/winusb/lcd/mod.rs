@@ -21,6 +21,7 @@ mod core;
 mod h2_lcd;
 mod hs2_oled;
 mod playback;
+mod ring;
 mod slv3;
 mod trait_;
 

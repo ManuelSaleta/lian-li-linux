@@ -209,6 +209,7 @@ impl H2AioController {
             queued_at: std::time::Instant::now(),
             play_safe,
             ring_key: None,
+            cancelled: None,
         });
         // The stream can end between the check above and the queueing:
         // stream_end() has then already drained the queue, and nothing
@@ -225,8 +226,21 @@ impl H2AioController {
     /// Returns false, nothing written, when a stream began while waiting
     /// for the transport, so the caller must queue the command instead.
     fn write_control(&self, label: &str, packet: &[u8], reply_wait: Duration) -> Result<bool> {
+        if self.transport.ring_recovery_pending() && !self.transport.is_streaming() {
+            anyhow::ensure!(
+                self.transport.hold_allowed(),
+                "H2 panel recovery is cooling down"
+            );
+            self.transport.push_and_recover(
+                "HydroShift II control",
+                &[],
+                &[],
+                LCD_WRITE_TIMEOUT,
+                false,
+            )?;
+        }
         let transport = self.transport.lock();
-        if self.transport.is_streaming() {
+        if self.transport.is_streaming() || self.transport.ring_recovery_pending() {
             return Ok(false);
         }
         transport
@@ -280,6 +294,10 @@ impl H2AioController {
     const PARAMS_CACHE_TTL: Duration = Duration::from_millis(300);
 
     pub fn get_h2_params(&self) -> Result<H2Params> {
+        anyhow::ensure!(
+            !self.transport.ring_recovery_pending(),
+            "H2 telemetry unavailable until panel recovery"
+        );
         if let Some((at, cached)) = self.params_cache.lock().as_ref() {
             if at.elapsed() < Self::PARAMS_CACHE_TTL {
                 return Ok(cached.clone());
@@ -429,6 +447,16 @@ impl H2AioController {
     /// Upload full-ring RGB frames via PushRgbData (0xFC); firmware loops
     /// them at `interval_ticks`.
     pub fn send_rgb_frames(&self, frames: &[Vec<[u8; 3]>], interval_ticks: u8) -> Result<()> {
+        self.send_rgb_frames_with_stop(frames, interval_ticks, &Arc::new(AtomicBool::new(false)))
+    }
+
+    fn send_rgb_frames_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        interval_ticks: u8,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        anyhow::ensure!(!stop.load(Ordering::Acquire), "H2 RGB request cancelled");
         if frames.is_empty() {
             return Ok(());
         }
@@ -460,6 +488,21 @@ impl H2AioController {
             return Ok(());
         }
 
+        if self.transport.software_cooling_active() && !self.transport.ring_recovery_pending() {
+            return Err(crate::traits::RgbDeferred {
+                retry_after: Duration::from_secs(10),
+                reason: "RGB changes wait while software fan or pump control uses this device",
+            }
+            .into());
+        }
+
+        if self.transport.is_streaming() && self.transport.ring_is_queued(&payload_key) {
+            return Err(crate::traits::RgbDeferred {
+                retry_after: Duration::from_secs(1),
+                reason: "RGB upload is waiting for a protected LCD transaction",
+            }
+            .into());
+        }
         let compressed = crate::tinyuz::compress(&raw).context("compressing RGB data")?;
 
         let mut payload = compressed;
@@ -475,18 +518,8 @@ impl H2AioController {
         packet.extend_from_slice(&header);
         packet.extend_from_slice(&payload);
 
-        // This packet is a full 512-byte header plus the compressed RGB payload,
-        // so it exceeds one bulk packet; send_control uses write_full so every
-        // byte goes out (a plain write() merely warned on the short write).
-        //
-        // Not play-safe: a PushRgbData during H.264 play mode hangs the panel
-        // even at buffer level 1 (2026-08-23), and one sent after the stream
-        // ended hangs it too (2026-09-06), even after an acknowledged
-        // StopPlay. Once the panel has played anything, the packet is
-        // therefore handed to the LCD stream thread, which stops play,
-        // reopens the handle, reruns the init sequence, sends it, and
-        // resumes (`reinit_and_flush_unsafe`). Straight after enumeration it
-        // goes out directly, as it always did.
+        // StopPlay alone does not prevent the post-upload silent state.
+        // Both idle and streaming uploads require stop, upload, reopen and GetVer.
         let cmd = PendingCmd {
             label: "PushRgbData",
             packet,
@@ -494,6 +527,7 @@ impl H2AioController {
             queued_at: std::time::Instant::now(),
             play_safe: false,
             ring_key: Some(payload_key),
+            cancelled: Some(stop.clone()),
         };
         let sent = if self.transport.is_streaming() {
             debug!("H2: PushRgbData queued — the stream thread will stop play, send it and reopen");
@@ -548,6 +582,13 @@ impl H2AioController {
             payload.len(),
             if sent { "" } else { " (queued)" }
         );
+        if !sent {
+            return Err(crate::traits::RgbDeferred {
+                retry_after: self.transport.ring_retry_delay(),
+                reason: "H2 RGB upload is pending the protected LCD transaction",
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -703,6 +744,10 @@ impl FanDevice for H2AioController {
     fn set_wireless_bound(&self, bound: bool) {
         self.set_wireless_mode(bound);
     }
+
+    fn set_software_cooling_active(&self, active: bool) {
+        self.transport.set_software_cooling_active(active);
+    }
 }
 
 impl AioDevice for H2AioController {
@@ -724,6 +769,34 @@ impl AioDevice for H2AioController {
 }
 
 impl RgbDevice for H2AioController {
+    fn set_sync_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        self.set_software_animation_with_stop(frames, timing, stop)
+    }
+    fn deferred_reason(&self) -> Option<String> {
+        if self.transport.ring_recovery_pending() {
+            Some("The LCD connection has not recovered from an RGB upload. Further uploads are waiting.".into())
+        } else if self.transport.software_cooling_active() {
+            Some("RGB changes wait while software fan or pump control uses this device.".into())
+        } else {
+            None
+        }
+    }
+
+    fn set_software_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        self.validate_software_animation(frames, timing)?;
+        let (_, interval_ticks) = h2_playback_fields(frames.len(), timing)?;
+        self.send_rgb_frames_with_stop(frames, interval_ticks, stop)
+    }
     fn device_name(&self) -> String {
         "HydroShift II LCD RGB Ring".to_string()
     }

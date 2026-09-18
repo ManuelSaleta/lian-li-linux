@@ -238,6 +238,7 @@ const summary = computed(() =>
       </template>
       </div>
     </div>
+    <p v-if="cap.deferred_reason" class="hint">{{ cap.deferred_reason }}</p>
   </div>
 </template>
 

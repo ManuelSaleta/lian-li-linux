@@ -45,4 +45,13 @@ impl RgbDevice for SyncDevice {
     ) -> Result<()> {
         self.inner.set_sync_animation(frames, timing)
     }
+    fn set_software_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        self.inner
+            .set_sync_animation_with_stop(frames, timing, stop)
+    }
 }

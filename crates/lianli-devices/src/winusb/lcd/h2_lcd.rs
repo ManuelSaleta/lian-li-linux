@@ -44,7 +44,7 @@ impl H2WinUsbLcd {
         if let Err(error) = self.core.stop_playback() {
             tracing::warn!("Stopping previous LCD playback failed: {error:#}");
         }
-        self.core.h2_control_init();
+        self.core.h2_control_init()?;
         self.core.initialized = true;
         Ok(())
     }

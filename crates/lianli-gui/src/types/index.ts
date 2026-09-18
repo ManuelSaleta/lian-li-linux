@@ -374,6 +374,7 @@ export interface RgbEffectParameters {
 }
 
 export interface RgbDeviceCapabilities {
+  deferred_reason?: string;
   hardware_group_effects?: boolean;
   group_effect_modes?: string[];
   zone_effect_modes?: string[];

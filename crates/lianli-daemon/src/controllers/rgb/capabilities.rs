@@ -52,6 +52,7 @@ impl RgbController {
                 supports_direction: device.supports_direction(),
                 supports_merge_lighting: device.supports_merge_lighting(),
                 rf_owned: device.rf_owned(),
+                deferred_reason: device.deferred_reason(),
             });
         }
         for (id, device) in &self.wireless_state {
@@ -114,6 +115,7 @@ impl RgbController {
                 supports_direction: false,
                 supports_merge_lighting: false,
                 rf_owned: false,
+                deferred_reason: None,
             });
         }
         caps.sort_by(|a, b| a.device_id.cmp(&b.device_id));

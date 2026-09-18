@@ -767,6 +767,8 @@ pub struct RgbZoneInfo {
 /// RGB capabilities reported per device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RgbDeviceCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_reason: Option<String>,
     #[serde(default)]
     pub hardware_group_effects: bool,
     #[serde(default)]

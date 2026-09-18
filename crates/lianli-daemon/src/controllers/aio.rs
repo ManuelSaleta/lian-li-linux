@@ -75,12 +75,37 @@ impl ResolvedSpeed {
     }
 }
 
+fn software_cooling_configured(config: &AppConfig, device_id: &str) -> bool {
+    let software = |speed: &FanSpeed| !speed.is_off() && !speed.is_mb_sync();
+    config
+        .aio
+        .get(device_id)
+        .is_some_and(|aio| software(&aio.pump_target_rpm) || aio.fan_speeds.iter().any(software))
+        || config.fans.as_ref().is_some_and(|fans| {
+            fans.speeds.iter().any(|group| {
+                group.device_id.as_deref().is_some_and(|id| {
+                    id == device_id
+                        || id
+                            .strip_prefix(device_id)
+                            .is_some_and(|suffix| suffix.starts_with(':'))
+                }) && group.speeds.iter().any(software)
+            })
+        })
+}
+
+fn update_cooling_ownership(wired: &HashMap<String, Box<dyn FanDevice>>, config: &AppConfig) {
+    for (id, device) in wired {
+        device.set_software_cooling_active(software_cooling_configured(config, id));
+    }
+}
+
 impl AioController {
     pub fn new(
         wireless: Arc<WirelessController>,
         wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
         config: AppConfig,
     ) -> Self {
+        update_cooling_ownership(&wired, &config);
         Self {
             wireless,
             wired,
@@ -95,6 +120,7 @@ impl AioController {
 
     pub fn set_config(&self, config: AppConfig) {
         let mut state = self.state.lock();
+        update_cooling_ownership(&self.wired, &config);
         state.config = config;
         state.needs_reinit = true;
     }
@@ -663,6 +689,28 @@ fn write_argb(dst: &mut [u8], rgba: [u8; 4]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cooling_ownership_includes_constants_curves_and_legacy_ports() {
+        let mut config = AppConfig::default();
+        assert!(!super::software_cooling_configured(&config, "h2"));
+        let aio = lianli_shared::aio::AioConfig {
+            pump_target_rpm: FanSpeed::Curve("__mb_sync__".into()),
+            ..Default::default()
+        };
+        config.aio.insert("h2".into(), aio);
+        assert!(!super::software_cooling_configured(&config, "h2"));
+        config.aio.get_mut("h2").unwrap().fan_speeds[0] = FanSpeed::Constant(0);
+        assert!(super::software_cooling_configured(&config, "h2"));
+        config.aio.clear();
+        config.fans = Some(
+            serde_json::from_value(serde_json::json!({
+                "speeds": [{"device_id": "h2:port0", "speeds": ["cpu", "off", "off", "off"]}]
+            }))
+            .unwrap(),
+        );
+        assert!(super::software_cooling_configured(&config, "h2"));
+        assert!(!super::software_cooling_configured(&config, "h"));
+    }
     use super::*;
     use lianli_devices::wireless::WirelessFanType;
 

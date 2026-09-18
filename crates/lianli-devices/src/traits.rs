@@ -135,6 +135,8 @@ pub trait FanDevice: Send + Sync {
     }
 
     fn set_wireless_bound(&self, _bound: bool) {}
+
+    fn set_software_cooling_active(&self, _active: bool) {}
 }
 
 /// Blanket forwarding impl so any `Arc<T>` can be used as a `FanDevice`
@@ -213,6 +215,9 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn set_wireless_bound(&self, bound: bool) {
         (**self).set_wireless_bound(bound)
+    }
+    fn set_software_cooling_active(&self, active: bool) {
+        (**self).set_software_cooling_active(active)
     }
 }
 
@@ -293,6 +298,22 @@ impl<T: AioDevice> AioDevice for std::sync::Arc<T> {
 /// - **Direct mode**: Set per-LED colors directly. Used by OpenRGB `UpdateLEDs`.
 ///   For wired devices, maps to Static mode. For wireless, streams RGB frames via RF.
 pub trait RgbDevice: Send + Sync {
+    fn deferred_reason(&self) -> Option<String> {
+        None
+    }
+
+    fn set_software_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !stop.load(std::sync::atomic::Ordering::Acquire),
+            "RGB worker stopped"
+        );
+        self.set_software_animation(frames, timing)
+    }
     /// Human-readable device name (e.g., "UNI FAN TL Controller").
     fn device_name(&self) -> String;
 
@@ -367,6 +388,19 @@ pub trait RgbDevice: Send + Sync {
 
     fn software_frame_delivery(&self) -> Option<RgbFrameDelivery> {
         None
+    }
+
+    fn set_sync_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !stop.load(std::sync::atomic::Ordering::Acquire),
+            "RGB request cancelled"
+        );
+        self.set_sync_animation(frames, timing)
     }
 
     fn set_sync_animation(&self, frames: &[Vec<[u8; 3]>], timing: RgbPlaybackTiming) -> Result<()> {
@@ -508,6 +542,17 @@ pub trait RgbDevice: Send + Sync {
 /// Blanket forwarding impl so any `Arc<T>` can be used as an `RgbDevice`
 /// without per-driver boilerplate.
 impl<T: RgbDevice + ?Sized> RgbDevice for Arc<T> {
+    fn deferred_reason(&self) -> Option<String> {
+        (**self).deferred_reason()
+    }
+    fn set_software_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        (**self).set_software_animation_with_stop(frames, timing, stop)
+    }
     fn hardware_regions(&self) -> Vec<lianli_shared::rgb::RgbRegionParameters> {
         (**self).hardware_regions()
     }
@@ -561,6 +606,14 @@ impl<T: RgbDevice + ?Sized> RgbDevice for Arc<T> {
     }
     fn set_sync_animation(&self, frames: &[Vec<[u8; 3]>], timing: RgbPlaybackTiming) -> Result<()> {
         (**self).set_sync_animation(frames, timing)
+    }
+    fn set_sync_animation_with_stop(
+        &self,
+        frames: &[Vec<[u8; 3]>],
+        timing: RgbPlaybackTiming,
+        stop: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        (**self).set_sync_animation_with_stop(frames, timing, stop)
     }
     fn validate_sync_animation(
         &self,
@@ -622,6 +675,13 @@ impl<T: RgbDevice + ?Sized> RgbDevice for Arc<T> {
 pub enum RgbFrameDelivery {
     Streaming,
     LoopUpload,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{reason}")]
+pub struct RgbDeferred {
+    pub retry_after: std::time::Duration,
+    pub reason: &'static str,
 }
 
 #[cfg(test)]

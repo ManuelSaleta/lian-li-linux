@@ -1,4 +1,5 @@
 use super::playback::PlaybackState;
+use super::ring::RingDelivery;
 use crate::crypto::PacketBuilder;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
@@ -28,12 +29,49 @@ pub struct PendingCmd {
     /// Ring payload identity of a PushRgbData, recorded by the link once the
     /// packet is actually on the wire so identical applies can be skipped.
     pub ring_key: Option<(Vec<u8>, u8)>,
+    pub cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl PendingCmd {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+    }
+}
+
+fn remaining_timeout(deadline: Instant, maximum: Duration) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    anyhow::ensure!(!remaining.is_zero(), "H2 transaction deadline expired");
+    Ok(remaining.min(maximum))
+}
+
+fn valid_firmware_reply(reply: &[u8]) -> bool {
+    reply.first() == Some(&0x0a)
+        && reply.get(8..40).is_some_and(|version| {
+            let text = version.split(|byte| *byte == 0).next().unwrap_or_default();
+            !text.is_empty()
+                && text
+                    .iter()
+                    .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        })
 }
 
 fn queue_control(queue: &mut Vec<PendingCmd>, mut command: PendingCmd) {
+    if command.is_cancelled() {
+        return;
+    }
     if let Some(previous) = queue.iter().find(|pending| pending.label == command.label) {
+        if command.ring_key.is_some()
+            && !previous.is_cancelled()
+            && previous.queued_at > command.queued_at
+        {
+            return;
+        }
         // Repeated PWM updates must not postpone the safe-window relaxation deadline.
-        command.queued_at = previous.queued_at;
+        if command.play_safe {
+            command.queued_at = previous.queued_at;
+        }
     }
     queue.retain(|pending| pending.label != command.label);
     queue.push(command);
@@ -61,9 +99,8 @@ pub struct LcdLink {
     needs_init: AtomicBool,
     /// When the last push-and-recover cycle ran, to space cycles out.
     last_hold: Mutex<Option<Instant>>,
-    /// Ring payload of the last PushRgbData that reached the wire, used to
-    /// skip identical re applies. Defers never record.
-    last_ring: Mutex<Option<(Vec<u8>, u8)>>,
+    ring: Mutex<RingDelivery>,
+    software_cooling: AtomicBool,
     pending: Mutex<Vec<PendingCmd>>,
 }
 
@@ -76,7 +113,8 @@ impl LcdLink {
             h264_chunk_size: NegotiatedH264ChunkSize::default(),
             needs_init: AtomicBool::new(false),
             last_hold: Mutex::new(None),
-            last_ring: Mutex::new(None),
+            ring: Mutex::new(RingDelivery::default()),
+            software_cooling: AtomicBool::new(true),
             pending: Mutex::new(Vec::new()),
         }
     }
@@ -123,9 +161,33 @@ impl LcdLink {
     /// A colour drag in the GUI queues a write per tick; `defer` keeps only
     /// the latest, and this keeps the stream from being stopped for each.
     pub(crate) fn hold_allowed(&self) -> bool {
+        (!self.software_cooling_active() || self.ring_recovery_pending())
+            && self
+                .last_hold
+                .lock()
+                .is_none_or(|at| at.elapsed() >= HOLD_MIN_INTERVAL)
+    }
+
+    pub(crate) fn set_software_cooling_active(&self, active: bool) {
+        self.software_cooling.store(active, Ordering::Release);
+    }
+
+    pub(crate) fn software_cooling_active(&self) -> bool {
+        self.software_cooling.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ring_recovery_pending(&self) -> bool {
+        self.ring.lock().attempted.is_some()
+    }
+
+    pub(crate) fn ring_retry_delay(&self) -> Duration {
         self.last_hold
             .lock()
-            .is_none_or(|at| at.elapsed() >= HOLD_MIN_INTERVAL)
+            .map_or(Duration::from_millis(250), |at| {
+                HOLD_MIN_INTERVAL
+                    .saturating_sub(at.elapsed())
+                    .max(Duration::from_millis(250))
+            })
     }
 
     /// Close the bulk handle and reopen it from the raw device (the vendor
@@ -134,20 +196,24 @@ impl LcdLink {
     /// down composite siblings like the LED MCU, and on the HydroShift II
     /// locks the header until a power cycle.
     fn reopen_locked(&self, bulk: &mut RusbBulk, name: &str) -> Result<()> {
+        self.reopen_locked_until(bulk, name, Instant::now() + Duration::from_secs(10))
+    }
+
+    fn reopen_locked_until(
+        &self,
+        bulk: &mut RusbBulk,
+        name: &str,
+        deadline: Instant,
+    ) -> Result<()> {
         let raw = self
             .raw_device
             .as_ref()
             .context("no raw device handle to reopen from")?;
-        // FIX: release the interfaces the current handle holds *before*
-        // reopening. The replacement only lands once the new open succeeds,
-        // so without this the old handle still owns interface 0 and every
-        // claim_interface(0) returns EBUSY — the recovery path could never
-        // succeed, it just retried 20 times against a device already in an
-        // error state.
+        // Release the old claims before opening a replacement, avoiding EBUSY.
         bulk.release();
-        std::thread::sleep(REOPEN_DELAY);
+        std::thread::sleep(remaining_timeout(deadline, REOPEN_DELAY)?);
         let mut t = RusbBulk::open_device(raw.clone()).context("reopening device")?;
-        t.detach_and_configure(name)
+        t.detach_and_configure_with_cancel(name, || Instant::now() >= deadline)
             .context("configuring reopened device")?;
         *bulk = t;
         self.h264_chunk_size.clear();
@@ -182,90 +248,101 @@ impl LcdLink {
         write_timeout: Duration,
         from_stream_thread: bool,
     ) -> Result<bool> {
-        let mut bulk = self.bulk.lock();
+        let mut bulk = self
+            .bulk
+            .try_lock_for(Duration::from_millis(100))
+            .context("H2 transport busy; RGB recovery postponed")?;
         if !from_stream_thread && self.is_streaming() {
             return Ok(false);
         }
-        // Wake commands go out under the same guard as the streaming check,
-        // so a stream that begins meanwhile cannot see them land mid play
-        for (label, packet) in preamble {
-            bulk.write_full(packet, write_timeout)
-                .with_context(|| format!("H2 ring: {label} write"))?;
-            let mut buf = [0u8; 512];
-            match bulk.read(&mut buf, WAKE_REPLY_WAIT) {
-                Ok(n) if n > 0 => debug!("H2 ring: reply to {label} ({n} bytes)"),
-                Ok(_) => debug!("H2 ring: no reply to {label} (timeout)"),
-                Err(e) => debug!("H2 ring: no reply to {label}: {e}"),
-            }
+        let recovering = self.ring_recovery_pending();
+        if !recovering && self.software_cooling_active() {
+            return Ok(false);
         }
-        let started = Instant::now();
-        for cmd in cmds {
-            debug!(
-                "H2 ring: sending {} ({} bytes, queued {} ms ago)",
-                cmd.label,
-                cmd.packet.len(),
-                cmd.queued_at.elapsed().as_millis()
-            );
-            bulk.write_full(&cmd.packet, write_timeout)
-                .with_context(|| format!("H2 ring: {} write", cmd.label))?;
-            if let Some(key) = &cmd.ring_key {
-                *self.last_ring.lock() = Some(key.clone());
-            }
-            let mut buf = [0u8; 512];
-            match bulk.read(&mut buf, cmd.reply_wait) {
-                Ok(n) if n > 0 => debug!(
-                    "H2 ring: reply to {} ({n} bytes): {:02x?}",
-                    cmd.label,
-                    &buf[..n.min(8)]
-                ),
-                Ok(_) => debug!("H2 ring: no reply to {} (timeout)", cmd.label),
-                Err(e) => debug!("H2 ring: no reply to {}: {e}", cmd.label),
-            }
+        if !recovering && cmds.iter().any(PendingCmd::is_cancelled) {
+            return Ok(false);
         }
-        let pushed_at = Instant::now();
+        anyhow::ensure!(
+            !lianli_transport::usb::shutting_down(),
+            "H2 RGB operation cancelled"
+        );
+        let deadline = Instant::now() + RING_TRANSACTION_BUDGET;
         *self.last_hold.lock() = Some(Instant::now());
-        // The handle is released before the reopen, so on failure there is
-        // nothing to poll; the driver's write-error recovery retries later.
-        if let Err(e) = self.reopen_locked(&mut bulk, name) {
-            self.set_needs_init(true);
-            return Err(e.context("H2 ring: reopen after push"));
-        }
-        debug!("H2 ring: handle reopened");
-        bulk.read_flush();
-        let mut builder = PacketBuilder::new();
-        let mut answered = None;
-        while pushed_at.elapsed() < PANEL_SILENCE_BUDGET {
-            let ver = builder.get_ver_header_winusb();
-            if let Err(e) = bulk.write_full(&ver, write_timeout) {
-                debug!("H2 ring: GetVer poll write failed: {e}");
-            } else {
-                let mut buf = [0u8; 512];
-                if matches!(bulk.read(&mut buf, PANEL_POLL_READ), Ok(n) if n > 0) {
-                    bulk.read_flush();
-                    answered = Some(pushed_at.elapsed());
-                    break;
+        let mut write_error = None;
+        if !recovering {
+            for (_, packet) in preamble {
+                bulk.write_full(packet, remaining_timeout(deadline, write_timeout)?)?;
+                let mut reply = [0; 512];
+                let _ = bulk.read(&mut reply, remaining_timeout(deadline, WAKE_REPLY_WAIT)?);
+            }
+            for cmd in cmds {
+                if cmd.is_cancelled() {
+                    return Ok(false);
+                }
+                let key = cmd
+                    .ring_key
+                    .clone()
+                    .context("missing H2 ring payload identity")?;
+                let timeout = remaining_timeout(deadline, write_timeout)?;
+                self.ring.lock().begin(key);
+                match lianli_transport::usb::with_teardown_io(timeout, || {
+                    bulk.write_full(&cmd.packet, timeout)
+                }) {
+                    Ok(()) => self.ring.lock().written(),
+                    Err(error) => {
+                        write_error = Some(error);
+                        break;
+                    }
+                }
+                let mut reply = [0; 512];
+                if let Ok(timeout) = remaining_timeout(deadline, cmd.reply_wait) {
+                    let _ = bulk.read(&mut reply, timeout);
                 }
             }
-            std::thread::sleep(PANEL_POLL_GAP);
         }
         self.set_needs_init(true);
-        match answered {
-            Some(after) => info!(
-                "H2 ring: panel answering {} ms after the push, cycle took {} ms",
-                after.as_millis(),
-                started.elapsed().as_millis()
-            ),
-            None => warn!(
-                "H2 ring: panel still silent {} s after the push and reopen",
-                pushed_at.elapsed().as_secs()
-            ),
+        // Once an upload starts, finish its bounded reopen even if its owner stops.
+        // Leaving the panel in the known post-upload silent state is not cancellation.
+        let recovered = lianli_transport::usb::with_teardown_io(
+            deadline.saturating_duration_since(Instant::now()),
+            || -> Result<()> {
+                self.reopen_locked_until(&mut bulk, name, deadline)?;
+                bulk.read_flush();
+                let mut builder = PacketBuilder::new();
+                loop {
+                    let request = builder.get_ver_header_winusb();
+                    bulk.write_full(&request, remaining_timeout(deadline, write_timeout)?)?;
+                    let mut response = [0; 512];
+                    let length = bulk
+                        .read(&mut response, remaining_timeout(deadline, PANEL_POLL_READ)?)
+                        .unwrap_or(0);
+                    if valid_firmware_reply(&response[..length]) {
+                        self.ring.lock().recovered();
+                        return Ok(());
+                    }
+                    std::thread::sleep(remaining_timeout(deadline, PANEL_POLL_GAP)?);
+                }
+            },
+        );
+        recovered.context(
+            "H2 panel did not recover after RGB upload; payload will not be resent before recovery",
+        )?;
+        if let Some(error) = write_error {
+            return Err(error).context("H2 RGB write incomplete; transport recovered");
         }
-        Ok(true)
+        let applied = self.ring.lock().applied.clone();
+        Ok(cmds.iter().all(|cmd| cmd.ring_key == applied))
     }
 
-    /// Ring payload of the last PushRgbData that reached the wire.
     pub(crate) fn last_ring_payload(&self) -> Option<(Vec<u8>, u8)> {
-        self.last_ring.lock().clone()
+        self.ring.lock().applied.clone()
+    }
+
+    pub(crate) fn ring_is_queued(&self, key: &(Vec<u8>, u8)) -> bool {
+        self.pending
+            .lock()
+            .iter()
+            .any(|cmd| !cmd.is_cancelled() && cmd.ring_key.as_ref() == Some(key))
     }
 
     /// Queue a control command for the stream thread. Latest wins per label:
@@ -294,7 +371,10 @@ impl LcdLink {
 
     /// True if a command that must wait for a panel reinit is queued.
     pub(crate) fn has_unsafe_pending(&self) -> bool {
-        self.pending.lock().iter().any(|c| !c.play_safe)
+        self.pending
+            .lock()
+            .iter()
+            .any(|c| !c.play_safe && !c.is_cancelled())
     }
 
     /// Take only the commands that need the panel reinitialised first.
@@ -302,6 +382,7 @@ impl LcdLink {
         let mut q = self.pending.lock();
         let (unsafe_cmds, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *q)
             .into_iter()
+            .filter(|c| !c.is_cancelled())
             .partition(|c| !c.play_safe);
         *q = rest;
         unsafe_cmds
@@ -368,7 +449,7 @@ const WAKE_STEP: Duration = Duration::from_millis(150);
 const WAKE_REPLY_WAIT: Duration = Duration::from_millis(100);
 /// After a PushRgbData and reopen: how long to poll GetVer for the panel
 /// to answer, the gap between polls, and each poll's reply wait.
-const PANEL_SILENCE_BUDGET: Duration = Duration::from_secs(10);
+const RING_TRANSACTION_BUDGET: Duration = Duration::from_secs(3);
 const PANEL_POLL_GAP: Duration = Duration::from_millis(250);
 const PANEL_POLL_READ: Duration = Duration::from_millis(500);
 /// Minimum spacing between push-and-recover cycles while streaming.
@@ -694,7 +775,15 @@ impl WinUsbLcdCore {
     /// HydroShift II control-channel init: GetVer, frame rate, SyncClock,
     /// StopClock. Run by `H2WinUsbLcd::do_init` after enumeration and again
     /// by `reinit_and_flush_unsafe` after a stream.
-    pub(crate) fn h2_control_init(&mut self) {
+    pub(crate) fn h2_control_init(&mut self) -> Result<()> {
+        if self.transport.ring_recovery_pending() {
+            anyhow::ensure!(
+                self.transport.hold_allowed(),
+                "H2 panel recovery is cooling down"
+            );
+            self.transport
+                .push_and_recover(&self.name, &[], &[], self.write_timeout, true)?;
+        }
         self.read_firmware();
         // FIX: this AIO never answers GetVer and set_frame_rate can fail
         // transiently. The `?` aborted do_init and left the shared control
@@ -707,6 +796,7 @@ impl WinUsbLcdCore {
         let stop_clock = self.builder.stop_clock_header_winusb();
         self.send_command(stop_clock, "StopClock");
         self.transport.set_needs_init(false);
+        Ok(())
     }
 
     pub(crate) fn read_firmware(&mut self) {
@@ -1049,32 +1139,36 @@ impl WinUsbLcdCore {
     /// GetVer), then the H2 init again. The caller resumes the stream.
     /// Cycles are spaced by `HOLD_MIN_INTERVAL`; a command that arrives
     /// sooner stays queued for the next chunk.
-    pub(crate) fn reinit_and_flush_unsafe(&mut self, force: bool) -> Result<bool> {
-        if !self.transport.has_unsafe_pending() || !(force || self.transport.hold_allowed()) {
+    pub(crate) fn reinit_and_flush_unsafe(&mut self, _force: bool) -> Result<bool> {
+        if (!self.transport.has_unsafe_pending() && !self.transport.ring_recovery_pending())
+            || !self.transport.hold_allowed()
+        {
             return Ok(false);
         }
-        self.stop_playback()?;
+        if !self.transport.ring_recovery_pending() {
+            self.stop_playback()?;
+        }
         let cmds = self.transport.take_unsafe();
         info!(
             "H2 ring: stopping play for {} queued command(s)",
             cmds.len()
         );
         let started = Instant::now();
-        let stop_clock = self.builder.stop_clock_header_winusb();
-        self.send_command(stop_clock, "StopClock");
-        std::thread::sleep(WAKE_STEP);
-        if let Err(e) =
+        if !self.transport.ring_recovery_pending() {
+            let stop_clock = self.builder.stop_clock_header_winusb();
+            self.send_command(stop_clock, "StopClock");
+            std::thread::sleep(WAKE_STEP);
+        }
+        let result =
             self.transport
-                .push_and_recover(&self.name, &[], &cmds, self.write_timeout, true)
-        {
-            // Nothing confirmed delivered: put the commands back so the
-            // next stream start or control-channel write retries them.
+                .push_and_recover(&self.name, &[], &cmds, self.write_timeout, true);
+        if !matches!(result, Ok(true)) {
             for cmd in cmds {
                 self.transport.defer(cmd);
             }
-            return Err(e);
+            result?;
         }
-        self.h2_control_init();
+        self.h2_control_init()?;
         // The init just reset the panel rate to 30, restore the stream rate
         if let Some(fps) = self.stream_fps {
             if let Err(e) = self.apply_stream_fps(fps) {
@@ -1190,10 +1284,6 @@ impl WinUsbLcdCore {
             if let Err(e) = self.send_deferred(&cmd) {
                 warn!("Deferred {} write failed: {e}", cmd.label);
             }
-        }
-        // No stream left to protect, so the spacing does not apply here.
-        if let Err(e) = self.reinit_and_flush_unsafe(true) {
-            warn!("Panel reinit at stream end failed: {e:#}");
         }
         stopped
     }
@@ -1371,6 +1461,40 @@ fn read_stream_chunk(
 #[cfg(test)]
 mod file_stream_tests {
     #[test]
+    fn cancelled_and_older_ring_requests_cannot_replace_the_latest_colour() {
+        let now = Instant::now();
+        let make = |value, queued_at, cancelled| PendingCmd {
+            label: "PushRgbData",
+            packet: vec![value],
+            reply_wait: Duration::ZERO,
+            queued_at,
+            play_safe: false,
+            ring_key: Some((vec![value], 1)),
+            cancelled: Some(Arc::new(AtomicBool::new(cancelled))),
+        };
+        let mut queue = Vec::new();
+        queue_control(&mut queue, make(2, now, false));
+        queue_control(&mut queue, make(1, now - Duration::from_secs(1), false));
+        queue_control(&mut queue, make(3, now + Duration::from_secs(1), true));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].packet, vec![2]);
+    }
+    #[test]
+    fn ring_recovery_requires_full_firmware_reply_and_a_live_deadline() {
+        let mut response = [0; 512];
+        response[0] = 0x0a;
+        response[8..11].copy_from_slice(b"1.7");
+        assert!(super::valid_firmware_reply(&response[..40]));
+        assert!(!super::valid_firmware_reply(&response[..39]));
+        response[0] = 0xfc;
+        assert!(!super::valid_firmware_reply(&response));
+        assert!(super::remaining_timeout(
+            std::time::Instant::now(),
+            std::time::Duration::from_secs(1)
+        )
+        .is_err());
+    }
+    #[test]
     fn replacement_cooling_commands_keep_the_original_wait_deadline() {
         use super::{queue_control, PendingCmd, CONTROL_RELAX_AFTER};
         use std::time::{Duration, Instant};
@@ -1386,6 +1510,7 @@ mod file_stream_tests {
                     queued_at: now + Duration::from_secs(second),
                     play_safe: true,
                     ring_key: None,
+                    cancelled: None,
                 },
             );
             assert_eq!(queue.len(), 1);
