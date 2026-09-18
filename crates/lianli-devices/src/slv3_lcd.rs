@@ -14,6 +14,7 @@ pub struct Slv3LcdDevice {
     initialized: bool,
     screen: ScreenInfo,
     firmware: Option<String>,
+    new_lcd: Option<bool>,
 }
 
 impl Slv3LcdDevice {
@@ -42,6 +43,7 @@ impl Slv3LcdDevice {
             initialized: false,
             screen: ScreenInfo::WIRELESS_LCD,
             firmware: None,
+            new_lcd: None,
         })
     }
 
@@ -67,24 +69,30 @@ impl Slv3LcdDevice {
         }
         debug!("LCD[bus {} addr {}] init sequence", self.bus, self.address);
 
-        // Init sequence:
-        // 1. CheckNewLcd (0x80) — probe LCD hardware revision
-        let mut buf = [0u8; 511];
-        let check = builder.header(0, 0x80, false);
-        self.transport.write(&check, LCD_WRITE_TIMEOUT)?;
-        let _ = self.transport.read(&mut buf, USB_TIMEOUT);
+        let mut buf = [0u8; 512];
+        let check = builder.lcd_revision_header();
+        self.transport.write_full(&check, LCD_WRITE_TIMEOUT)?;
+        // Vendor CheckNewLcd checks after 10 ms and selects the legacy path without a reply.
+        let length = match self
+            .transport
+            .read(&mut buf, std::time::Duration::from_millis(10))
+        {
+            Ok(length) => length,
+            Err(lianli_transport::error::TransportError::Usb(rusb::Error::Timeout)) => 0,
+            Err(error) => return Err(error.into()),
+        };
+        self.new_lcd = Some(uses_relative_startup_path(&buf[..length]));
 
-        // 3. SetFrameRate(120) — hardcoded 120 for wireless LCDs
+        // Wireless LCDs use the vendor's fixed frame rate of 120.
         let fps = builder.frame_rate_header(120);
         self.transport.write(&fps, LCD_WRITE_TIMEOUT)?;
         let _ = self.transport.read(&mut buf, USB_TIMEOUT);
 
-        // 4. GetVer (0x0A) — read firmware version
         let ver = builder.header(0, 0x0A, false);
         self.transport.write(&ver, LCD_WRITE_TIMEOUT)?;
         let n = self.transport.read(&mut buf, USB_TIMEOUT).unwrap_or(0);
-        if n > 8 {
-            let end = buf[8..]
+        if n > 8 && buf[0] == 0x0a {
+            let end = buf[8..n]
                 .iter()
                 .position(|&b| b == 0)
                 .map(|p| 8 + p)
@@ -124,6 +132,43 @@ impl Slv3LcdDevice {
         self.firmware.as_deref()
     }
 
+    pub fn startup_image_ready(&self) -> Result<()> {
+        self.new_lcd.context(
+            "LCD hardware revision is unknown; reconnect before uploading a startup image",
+        )?;
+        Ok(())
+    }
+
+    pub fn upload_startup_image(
+        &mut self,
+        jpeg: &[u8],
+        stop: &std::sync::atomic::AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        let new_path = self.new_lcd.context(
+            "LCD hardware revision is unknown; reconnect before uploading a startup image",
+        )?;
+        let packet =
+            crate::startup_image::packet(&mut PacketBuilder::new(), jpeg, new_path, true, false)?;
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        lianli_transport::usb::with_teardown_io(std::time::Duration::from_secs(4), || {
+            transfer.begin(stop)?;
+            anyhow::ensure!(
+                self.transport
+                    .write(&packet, std::time::Duration::from_secs(3))
+                    .context("Startup image transfer interrupted. Storage state is unknown")?
+                    == packet.len(),
+                "Startup image transfer incomplete. Storage state is unknown"
+            );
+            let mut reply = [0; 512];
+            Ok(self
+                .transport
+                .read(&mut reply, std::time::Duration::from_secs(1))
+                .is_ok_and(|length| length > 0))
+        })
+    }
+
     pub fn send_frame(&mut self, builder: &mut PacketBuilder, frame: &[u8]) -> Result<()> {
         if frame.len() > self.screen.max_payload {
             bail!(
@@ -148,6 +193,10 @@ impl Slv3LcdDevice {
         let _ = self.transport.read(&mut buf, USB_TIMEOUT);
         Ok(())
     }
+}
+
+fn uses_relative_startup_path(reply: &[u8]) -> bool {
+    crate::startup_image::revision(reply).unwrap_or(false)
 }
 
 /// Brightness LUT for SLV3/TLV2 wireless LCD firmware. Maps 0–100 percent to
@@ -176,6 +225,19 @@ fn slv3_brightness_lut(value: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::slv3_brightness_lut;
+
+    #[test]
+    fn legacy_panels_without_revision_replies_use_the_absolute_boot_path() {
+        assert!(!super::uses_relative_startup_path(&[]));
+        assert!(!super::uses_relative_startup_path(&[0x80]));
+        let mut reply = [0; 10];
+        reply[0] = 0x80;
+        assert!(!super::uses_relative_startup_path(&reply));
+        reply[8] = 2;
+        assert!(super::uses_relative_startup_path(&reply));
+        reply[0] = 0x0a;
+        assert!(!super::uses_relative_startup_path(&reply));
+    }
 
     #[test]
     fn lut_anchors_match_vendor() {

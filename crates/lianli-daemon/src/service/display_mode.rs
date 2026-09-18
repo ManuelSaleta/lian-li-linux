@@ -71,6 +71,10 @@ impl PostSwitchRefresh {
 
 impl ServiceManager {
     pub(super) fn handle_display_switch_to_desktop(&mut self, device_id: &str) {
+        if self.startup_image_job.is_some() {
+            warn!("Startup image upload is still running");
+            return;
+        }
         if self.display_switch.is_some() {
             warn!("A display mode switch is already running");
             return;
@@ -169,6 +173,10 @@ impl ServiceManager {
     }
 
     pub(super) fn handle_display_switch_to_lcd(&mut self, device_id: &str, pid: u16) {
+        if self.startup_image_job.is_some() {
+            warn!("Startup image upload is still running");
+            return;
+        }
         if self.display_switch.is_some() {
             warn!("A display mode switch is already running");
             return;

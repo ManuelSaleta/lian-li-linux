@@ -142,6 +142,16 @@ pub trait FanDevice: Send + Sync {
     fn set_wireless_bound(&self, _bound: bool) {}
 
     fn set_software_cooling_active(&self, _active: bool) {}
+
+    fn set_lcd_startup_theme_enabled(
+        &self,
+        _physical_slot: u8,
+        _enabled: bool,
+        _stop: &std::sync::atomic::AtomicBool,
+        _transfer: &crate::startup_image::Transfer,
+    ) -> Result<()> {
+        anyhow::bail!("This controller does not manage LCD startup themes")
+    }
 }
 
 /// Blanket forwarding impl so any `Arc<T>` can be used as a `FanDevice`
@@ -224,6 +234,16 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     fn set_software_cooling_active(&self, active: bool) {
         (**self).set_software_cooling_active(active)
     }
+
+    fn set_lcd_startup_theme_enabled(
+        &self,
+        physical_slot: u8,
+        enabled: bool,
+        stop: &std::sync::atomic::AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<()> {
+        (**self).set_lcd_startup_theme_enabled(physical_slot, enabled, stop, transfer)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +254,14 @@ pub enum RecoveryAction {
 
 /// A device with an LCD screen.
 pub trait LcdDevice: Send + Sync {
+    fn upload_startup_image(
+        &mut self,
+        _jpeg: &[u8],
+        _stop: &AtomicBool,
+        _transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        anyhow::bail!("Startup image upload is not supported by this LCD backend")
+    }
     fn screen_info(&self) -> &ScreenInfo;
     fn send_jpeg_frame(&mut self, jpeg_data: &[u8]) -> Result<()>;
     fn send_static_frame(&mut self, jpeg_data: &[u8]) -> Result<()> {

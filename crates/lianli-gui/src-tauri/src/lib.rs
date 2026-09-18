@@ -6,6 +6,7 @@ mod ipc;
 mod managed_import;
 mod service_operations;
 mod session_worker;
+mod startup_image_input;
 
 use ipc::PollResult;
 use serde_json::Value;
@@ -342,6 +343,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
+            startup_image_input::pick_startup_image,
             ipc_request,
             poll_daemon,
             connection_info,

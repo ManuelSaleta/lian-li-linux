@@ -12,6 +12,7 @@ mod text_work;
 pub use resource_budget::Retained;
 pub mod rgb;
 pub mod sensor;
+pub mod startup_image;
 mod temporary_media;
 pub use temporary_media::TemporaryMedia;
 pub mod validation;

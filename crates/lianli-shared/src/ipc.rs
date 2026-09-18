@@ -11,6 +11,14 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum IpcRequest {
+    UploadStartupImage {
+        device_id: String,
+        jpeg_base64: String,
+    },
+    GetStartupImageStatus,
+    CancelStartupImage {
+        id: u64,
+    },
     Guarded {
         guard: crate::daemon::WriteGuard,
         request: Box<IpcRequest>,
@@ -123,6 +131,9 @@ pub enum IpcRequest {
     },
     RetryOpenRgb,
     RetryMedia,
+    ClearStartupImageRecovery {
+        device_id: String,
+    },
     ListStateBackups,
     PreviewStateBackup {
         target: crate::backups::BackupTarget,
@@ -282,6 +293,7 @@ impl IpcRequest {
             | Self::GetMergeLightingConfig
             | Self::ListDeviceProfiles
             | Self::GetPixelCleanStatus
+            | Self::GetStartupImageStatus
             | Self::GetPixelCleanPreparation { .. }
             | Self::ListStateBackups
             | Self::GetCatalogInstallStatus
@@ -316,6 +328,7 @@ impl IpcRequest {
             | Self::RetryDesktopDisplay { .. }
             | Self::RetryOpenRgb
             | Self::RetryMedia
+            | Self::ClearStartupImageRecovery { .. }
             | Self::BindWirelessDevice { .. }
             | Self::UnbindWirelessDevice { .. }
             | Self::SetEne6k77FanQuantity { .. }
@@ -333,7 +346,9 @@ impl IpcRequest {
             | Self::DeleteDeviceProfile { .. }
             | Self::ApplyDeviceProfile { .. }
             | Self::StartPixelClean { .. }
-            | Self::StopPixelClean { .. } => false,
+            | Self::StopPixelClean { .. }
+            | Self::UploadStartupImage { .. }
+            | Self::CancelStartupImage { .. } => false,
         }
     }
 
@@ -432,6 +447,8 @@ pub struct DeviceTelemetry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_image: Option<crate::startup_image::StartupImageCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<DeviceTelemetry>,
     pub device_id: String,
     pub family: DeviceFamily,
@@ -528,6 +545,8 @@ pub enum MediaPreparationState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaPreparationStatus {
+    #[serde(default)]
+    pub startup_recovery_required: bool,
     pub generation: u64,
     pub device_id: String,
     pub state: MediaPreparationState,

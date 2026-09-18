@@ -167,6 +167,7 @@ pub struct DeviceRegistry {
     /// Cached USB device list from `enumerate_devices()` — refreshed every
     /// 10 s and surfaced to the GUI via `sync_ipc_state`.
     pub cached_usb_devices: Vec<DeviceInfo>,
+    pub usb_locations: HashMap<String, (u8, Vec<u8>)>,
     /// TL LCD `(port, fan_index)` per device_id. Probed once at init.
     pub tl_lcd_port_index: HashMap<String, (u8, u8)>,
     pub v2_hid_entries: Vec<lianli_devices::wireless::V2HidEntry>,
@@ -188,6 +189,7 @@ impl DeviceRegistry {
             failed_open_ids: HashSet::new(),
             init_retry_count: 0,
             cached_usb_devices: Vec::new(),
+            usb_locations: HashMap::new(),
             tl_lcd_port_index: HashMap::new(),
             v2_hid_entries: Vec::new(),
             aio_lcd_devices: HashMap::new(),
@@ -203,6 +205,7 @@ impl DeviceRegistry {
         self.hid_backends.clear();
         self.usb_backends.clear();
         self.cached_usb_devices.clear();
+        self.usb_locations.clear();
         self.aio_lcd_devices.clear();
         // Keep `last_wired_ids` and `tl_lcd_port_index` — they describe what
         // *should* be plugged in, not what currently is.

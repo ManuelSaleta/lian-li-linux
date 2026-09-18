@@ -5,7 +5,7 @@ use lianli_devices::wireless::WirelessController;
 use lianli_shared::config::AppConfig;
 use lianli_shared::systeminfo::SysSensor;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -29,6 +29,7 @@ mod runtime;
 mod shutdown;
 mod source_preparation;
 mod source_retirement;
+mod startup_image;
 mod streaming;
 mod subsystems;
 mod suspend;
@@ -47,6 +48,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::IpcUpdate => "IpcUpdate",
         DaemonEvent::RetryOpenRgb => "RetryOpenRgb",
         DaemonEvent::RetryMedia => "RetryMedia",
+        DaemonEvent::ClearStartupImageRecovery { .. } => "ClearStartupImageRecovery",
         DaemonEvent::USBCheck => "USBCheck",
         DaemonEvent::DevicePoll => "DevicePoll",
         DaemonEvent::DisplaySwitch { .. } => "DisplaySwitch",
@@ -67,6 +69,7 @@ fn event_label(event: &DaemonEvent) -> &'static str {
         DaemonEvent::DisableLc217Wifi { .. } => "DisableLc217Wifi",
         DaemonEvent::SetLcdBrightness { .. } => "SetLcdBrightness",
         DaemonEvent::StartPixelClean { .. } => "StartPixelClean",
+        DaemonEvent::UploadStartupImage { .. } => "UploadStartupImage",
         DaemonEvent::StopPixelClean { .. } => "StopPixelClean",
         DaemonEvent::BindAll => "BindAll",
         DaemonEvent::UnbindAll => "UnbindAll",
@@ -95,6 +98,13 @@ const USB_ENUM_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum DaemonEvent {
+    UploadStartupImage {
+        id: u64,
+        device_id: String,
+        jpeg: Vec<u8>,
+        capabilities: lianli_shared::startup_image::StartupImageCapabilities,
+        cancel: Arc<AtomicBool>,
+    },
     Coordinated {
         event: Box<DaemonEvent>,
         permit: Arc<lianli_control::write_gate::ServiceWritePermit>,
@@ -102,6 +112,9 @@ pub enum DaemonEvent {
     IpcUpdate, // Somebody changed the DaemonState in the mutex
     RetryOpenRgb,
     RetryMedia,
+    ClearStartupImageRecovery {
+        device_id: String,
+    },
     USBCheck,
     DevicePoll,
     DisplaySwitch {
@@ -224,6 +237,10 @@ pub struct ServiceManager {
     serial_rewrite_backoff: Option<Instant>,
     pixel_clean_sessions: Vec<crate::pixel_cleaner::PixelCleanSession>,
     pixel_clean_preparation: Option<pixel_cleaner::PixelCleanPreparation>,
+    startup_image_job: Option<startup_image::StartupImageJob>,
+    startup_config_pending: bool,
+    startup_image_quarantine: HashSet<String>,
+    startup_absent_since: HashMap<String, Instant>,
     cleaner_reload_pending: bool,
 }
 
@@ -246,6 +263,8 @@ impl ServiceManager {
         let mut state = DaemonState::new(config_path.clone());
         state.info.mode = mode;
         let ipc_state = Arc::new(Mutex::new(state));
+        startup_image::clear_previous_recovery(&config_path)?;
+        let startup_image_quarantine = HashSet::new();
 
         Ok(Self {
             config_path,
@@ -284,6 +303,10 @@ impl ServiceManager {
             serial_rewrite_backoff: None,
             pixel_clean_sessions: Vec::new(),
             pixel_clean_preparation: None,
+            startup_image_job: None,
+            startup_config_pending: false,
+            startup_image_quarantine,
+            startup_absent_since: HashMap::new(),
             cleaner_reload_pending: false,
         })
     }
@@ -689,11 +712,35 @@ impl ServiceManager {
                     }
                 }
                 DaemonEvent::DevicePoll => {
+                    self.poll_startup_image();
                     self.refresh_after_mode_switch();
                     self.check_pixel_clean_sessions();
                     self.device_poll();
                     if self.restart_requested {
                         break;
+                    }
+                }
+                DaemonEvent::UploadStartupImage {
+                    id,
+                    device_id,
+                    jpeg,
+                    capabilities,
+                    cancel,
+                } => {
+                    if let Err(error) = self.start_startup_image(
+                        id,
+                        device_id,
+                        jpeg,
+                        capabilities,
+                        cancel,
+                        _write_permit,
+                    ) {
+                        self.finish_startup_status(
+                            id,
+                            lianli_shared::startup_image::StartupImageState::Failed {
+                                message: error.to_string(),
+                            },
+                        );
                     }
                 }
                 DaemonEvent::DisplaySwitch { device_id } => {
@@ -745,6 +792,11 @@ impl ServiceManager {
                     let _ = reply.send(result.map_err(|error| format!("{error:#}")));
                 }
                 DaemonEvent::IpcUpdate => {
+                    if self.startup_image_job.is_some() {
+                        // Preserve cooling ownership until the storage transaction releases USB.
+                        self.startup_config_pending = true;
+                        continue;
+                    }
                     let ipc_state = self.ipc.state.lock();
                     info!("Config reload triggered via IPC");
                     drop(ipc_state);
@@ -798,6 +850,11 @@ impl ServiceManager {
                 }
                 DaemonEvent::RetryMedia => {
                     self.poll_prepared_media();
+                }
+                DaemonEvent::ClearStartupImageRecovery { device_id } => {
+                    if let Err(error) = self.clear_startup_recovery(&device_id) {
+                        warn!(%device_id, %error, "Could not clear startup image recovery");
+                    }
                 }
                 DaemonEvent::FrameFinished => {
                     stream_worker.wake();

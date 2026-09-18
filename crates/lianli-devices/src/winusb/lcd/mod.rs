@@ -28,11 +28,11 @@ mod trait_;
 pub use self::core::{LcdLink, PendingCmd, SharedTransport};
 use self::trait_::BoxedWinUsbLcd;
 
-pub struct WinUsbLcdDevice(BoxedWinUsbLcd);
+pub struct WinUsbLcdDevice(BoxedWinUsbLcd, u16);
 
 impl WinUsbLcdDevice {
     pub fn open(device: Device<GlobalContext>, pid: u16) -> Result<Self> {
-        Ok(Self(make_device(device, pid)?))
+        Ok(Self(make_device(device, pid)?, pid))
     }
 
     pub fn from_shared_transport(transport: SharedTransport, pid: u16) -> Result<Self> {
@@ -61,34 +61,63 @@ impl WinUsbLcdDevice {
                 supports_stop_play(pid),
             )),
         };
-        Ok(Self(boxed))
+        Ok(Self(boxed, pid))
     }
 
     pub fn shared_transport(&self) -> SharedTransport {
         self.0.shared_transport()
     }
 
+    pub fn upload_startup_image(
+        &mut self,
+        jpeg: &[u8],
+        stop: &std::sync::atomic::AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            matches!(self.1, 0xa018 | 0xa019),
+            "Startup image upload is not supported for this panel"
+        );
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        let link = self.shared_transport();
+        self.stop_playback()?;
+        let command = self.0.packet_builder().lcd_revision_header();
+        let relative_path = link.probe_relative_startup_path(&command)?;
+        let packet =
+            crate::startup_image::packet(self.0.packet_builder(), jpeg, relative_path, true, true)?;
+        link.upload_startup_image(&packet, stop, transfer)
+    }
+
     pub fn firmware_str(&self) -> Option<&str> {
         self.0.firmware_str()
     }
 
+    pub fn shares_cooling_transport(&self) -> bool {
+        matches!(self.1, 0xa021 | 0xa034)
+    }
+
     pub fn stop_playback(&mut self) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.stop_playback()
     }
 
     pub fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.send_frame(frame)
     }
 
     pub fn send_frame_verified(&mut self, frame: &[u8]) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.send_frame_verified(frame)
     }
 
     pub fn set_brightness_val(&mut self, brightness: u8) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.set_brightness_val(brightness)
     }
 
     pub fn switch_to_desktop_mode(&mut self) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.switch_to_desktop_mode()
     }
 
@@ -99,6 +128,7 @@ impl WinUsbLcdDevice {
         stop: &std::sync::atomic::AtomicBool,
         fps: f32,
     ) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.stream_h264(path, looping, stop, fps)
     }
 
@@ -115,17 +145,26 @@ impl WinUsbLcdDevice {
         stop: &std::sync::atomic::AtomicBool,
         fps: f32,
     ) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.stream_h264_reader(reader, stop, fps)
     }
 }
 
 impl LcdDevice for WinUsbLcdDevice {
+    fn upload_startup_image(
+        &mut self,
+        jpeg: &[u8],
+        stop: &std::sync::atomic::AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        WinUsbLcdDevice::upload_startup_image(self, jpeg, stop, transfer)
+    }
     fn screen_info(&self) -> &ScreenInfo {
         self.0.screen_info()
     }
 
     fn send_jpeg_frame(&mut self, jpeg_data: &[u8]) -> Result<()> {
-        self.0.send_frame(jpeg_data)
+        self.send_frame(jpeg_data)
     }
 
     fn set_brightness(&self, _brightness: u8) -> Result<()> {
@@ -137,6 +176,7 @@ impl LcdDevice for WinUsbLcdDevice {
     }
 
     fn initialize(&mut self) -> Result<()> {
+        self.shared_transport().ensure_storage_ready()?;
         self.0.initialize()
     }
 }

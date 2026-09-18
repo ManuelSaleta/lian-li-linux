@@ -240,6 +240,7 @@ impl H2AioController {
             )?;
         }
         let transport = self.transport.lock();
+        self.transport.ensure_storage_ready()?;
         if self.transport.is_streaming() || self.transport.ring_recovery_pending() {
             return Ok(false);
         }
@@ -294,6 +295,7 @@ impl H2AioController {
     const PARAMS_CACHE_TTL: Duration = Duration::from_millis(300);
 
     pub fn get_h2_params(&self) -> Result<H2Params> {
+        self.transport.ensure_storage_ready()?;
         anyhow::ensure!(
             !self.transport.ring_recovery_pending(),
             "H2 telemetry unavailable until panel recovery"
@@ -339,6 +341,7 @@ impl H2AioController {
             };
             let res = {
                 let transport = self.transport.lock();
+                self.transport.ensure_storage_ready()?;
                 if self.transport.is_streaming() {
                     // Same transition guard as write_control. The earlier
                     // check passed, but a stream began before the lock was

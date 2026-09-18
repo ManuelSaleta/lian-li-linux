@@ -260,6 +260,37 @@ impl std::error::Error for LcdBusy {}
 const LCD_BUSY_WAIT: Duration = Duration::from_millis(100);
 
 impl LcdBackend {
+    pub(super) fn startup_image_ready(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Slv3(device) => device.startup_image_ready(),
+            Self::WinUsb(sender) => sender
+                .transport
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("LCD transport unavailable"))?
+                .startup_image_ready(sender.shares_cooling),
+            Self::HidLcd(_) => Ok(()),
+        }
+    }
+    pub(super) fn upload_startup_image(
+        &mut self,
+        jpeg: Vec<u8>,
+        stop: Arc<AtomicBool>,
+        transfer: Arc<lianli_devices::startup_image::Transfer>,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Slv3(device) => device.upload_startup_image(&jpeg, &stop, &transfer),
+            Self::WinUsb(sender) => sender.upload_startup_image(jpeg, stop, transfer),
+            Self::HidLcd(device) => {
+                let _idle = device
+                    .recovery_idle()
+                    .ok_or_else(|| anyhow::anyhow!("LCD stream has not stopped"))?;
+                let mut lcd = device
+                    .try_lock_for(Duration::from_millis(100))
+                    .ok_or_else(|| anyhow::anyhow!("LCD is busy"))?;
+                lcd.upload_startup_image(&jpeg, &stop, &transfer)
+            }
+        }
+    }
     fn send_frame(
         &mut self,
         wireless: Option<&WirelessController>,
@@ -520,6 +551,12 @@ impl StreamRestarter {
 }
 
 pub(super) enum LcdThreadMsg {
+    StartupImage(
+        Vec<u8>,
+        Arc<AtomicBool>,
+        Arc<lianli_devices::startup_image::Transfer>,
+        std::sync::mpsc::SyncSender<anyhow::Result<bool>>,
+    ),
     Frame(Vec<u8>, Arc<FrameDelivery>),
     FrameVerified(Vec<u8>, std::sync::mpsc::SyncSender<anyhow::Result<()>>),
     StreamH264 {
@@ -636,6 +673,7 @@ impl FrameDelivery {
 }
 
 pub(super) struct ThreadedWinUsbSender {
+    shares_cooling: bool,
     transport: Option<lianli_devices::winusb::lcd::SharedTransport>,
     tx: std::sync::mpsc::SyncSender<LcdThreadMsg>,
     stream_control: Arc<StreamControl>,
@@ -645,7 +683,29 @@ pub(super) struct ThreadedWinUsbSender {
 }
 
 impl ThreadedWinUsbSender {
+    fn upload_startup_image(
+        &self,
+        jpeg: Vec<u8>,
+        stop: Arc<AtomicBool>,
+        transfer: Arc<lianli_devices::startup_image::Transfer>,
+    ) -> anyhow::Result<bool> {
+        self.stream_control.cancel();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        self.send_before(
+            LcdThreadMsg::StartupImage(jpeg, stop.clone(), transfer, send),
+            deadline,
+        )?;
+        match receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(result) => result,
+            Err(_) => {
+                stop.store(true, Ordering::Release);
+                anyhow::bail!("Startup upload timed out. Storage state is unknown")
+            }
+        }
+    }
     pub(super) fn new(mut device: WinUsbLcdDevice, index: usize) -> Self {
+        let shares_cooling = device.shares_cooling_transport();
         let transport = Some(device.shared_transport());
         let (tx, rx) = std::sync::mpsc::sync_channel::<LcdThreadMsg>(2);
         let stream_control = Arc::new(StreamControl::default());
@@ -660,6 +720,9 @@ impl ThreadedWinUsbSender {
                     continue;
                 }
                 match msg {
+                    LcdThreadMsg::StartupImage(jpeg, stop, transfer, reply) => {
+                        let _ = reply.send(device.upload_startup_image(&jpeg, &stop, &transfer));
+                    }
                     LcdThreadMsg::Frame(data, delivery) => {
                         delivery.submit(|| device.send_frame(&data))
                     }
@@ -740,6 +803,7 @@ impl ThreadedWinUsbSender {
         });
         Self {
             transport,
+            shares_cooling,
             tx,
             stream_control,
             frame_delivery: Arc::new(FrameDelivery::default()),
@@ -2264,6 +2328,7 @@ mod tests {
                 0,
                 "same-device".into(),
                 LcdBackend::WinUsb(ThreadedWinUsbSender {
+                    shares_cooling: false,
                     transport: None,
                     tx,
                     stream_control: Arc::new(StreamControl::default()),
@@ -2302,6 +2367,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         tx.send(LcdThreadMsg::SetBrightness(40)).unwrap();
         let sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
@@ -2387,6 +2453,7 @@ mod tests {
     fn retired_jpeg_transfers_cannot_fail_replacement_media() {
         let (tx, _rx) = std::sync::mpsc::sync_channel(2);
         let mut sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
@@ -2427,6 +2494,7 @@ mod tests {
     fn rejected_stream_submission_preserves_current_owner_and_transfer_status() {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
@@ -2463,6 +2531,7 @@ mod tests {
     fn replacing_queued_stream_keeps_old_cancellation_and_brightness_order() {
         let (tx, rx) = std::sync::mpsc::sync_channel(3);
         let sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
@@ -2505,6 +2574,7 @@ mod tests {
     fn live_sources_do_not_queue_streaming_before_brightness() {
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control: Arc::new(StreamControl::default()),
@@ -2912,6 +2982,7 @@ mod tests {
                 .unwrap();
         });
         let mut sender = ThreadedWinUsbSender {
+            shares_cooling: false,
             transport: None,
             tx,
             stream_control,

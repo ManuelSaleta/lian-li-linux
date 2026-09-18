@@ -8,7 +8,7 @@ import { useDevicesStore } from "@/stores/devices";
 import { useLcdStore } from "@/stores/lcd";
 import { useIpc } from "@/composables/useIpc";
 import { useDebounce } from "@/composables/useDebounce";
-import { open } from "@tauri-apps/plugin-dialog";
+import { matchesMediaFile, pickMediaFile } from "@/utils/mediaPicker";
 import SensorGaugeEditor from "@/components/lcd/SensorGaugeEditor.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
 import OrientationPicker from "@/components/common/OrientationPicker.vue";
@@ -16,6 +16,7 @@ import LabeledSlider from "@/components/common/LabeledSlider.vue";
 import SensorSelect from "@/components/common/SensorSelect.vue";
 import { enumerateSensorsAsOptions, optionForConfig, decodeOption } from "@/stores/sensorOptions";
 import { screenSupportsH264, aio512FrameDefault } from "@/constants/screen";
+import StartupImageDialog from "./StartupImageDialog.vue";
 import { PIXEL_CLEANER_DURATION_OPTIONS } from "@/constants";
 
 const props = defineProps<{
@@ -106,6 +107,9 @@ const mediaTypeOptions = [
 ] as const;
 
 function onMediaType(v: MediaType) {
+  if ((v === "image" || v === "video" || v === "gif") && props.entry.path && !matchesMediaFile(props.entry.path, v)) {
+    props.entry.path = null;
+  }
   props.entry.type = v;
   config.markDirty();
 }
@@ -119,12 +123,16 @@ function commitPath() {
 }
 
 async function browsePath() {
-  const selected = await open({
-    filters: [{ name: "Media", extensions: ["png", "jpg", "jpeg", "bmp", "gif", "mp4", "webm", "mkv"] }],
-  });
-  if (typeof selected === "string") {
-    localPath.value = selected;
-    commitPath();
+  const type = props.entry.type;
+  if (type !== "image" && type !== "video" && type !== "gif") return;
+  try {
+    const selected = await pickMediaFile(type);
+    if (selected && props.entry.type === type) {
+      localPath.value = selected;
+      commitPath();
+    }
+  } catch (error) {
+    message.error(String(error));
   }
 }
 
@@ -394,6 +402,7 @@ async function handleStopClean() {
     <div class="head">
       <span class="title">LCD {{ index + 1 }}</span>
       <div class="head-actions">
+        <StartupImageDialog v-if="selectedDevice?.startup_image" :device="selectedDevice" />
         <n-button
           v-if="isPreparingThis"
           size="small"

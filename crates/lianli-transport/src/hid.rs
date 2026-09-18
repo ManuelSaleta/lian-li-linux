@@ -348,38 +348,32 @@ impl RusbHid {
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-        self.write_timeout(data, Duration::from_millis(5000))
+        self.with_reopen(
+            |device| device.write_timeout(data, Duration::from_millis(5000)),
+            "write",
+        )
     }
 
-    pub fn write_timeout(
-        &mut self,
-        data: &[u8],
-        timeout: Duration,
-    ) -> Result<usize, TransportError> {
+    pub fn write_timeout(&self, data: &[u8], timeout: Duration) -> Result<usize, TransportError> {
         if timeout.is_zero() {
             return Err(TransportError::Other(
                 "HID write timeout must be positive".into(),
             ));
         }
-        self.with_reopen(
-            |s| {
-                if let Some(ep_out) = s.ep_out {
-                    s.handle
-                        .write_interrupt(ep_out, data, timeout)
-                        .map_err(TransportError::from)
-                } else {
-                    // SET_REPORT control transfer: report type = Output (0x02),
-                    // report ID = data[0]
-                    let report_id = data.first().copied().unwrap_or(0) as u16;
-                    let report_type: u16 = 0x02;
-                    let w_value = (report_type << 8) | report_id;
-                    s.handle
-                        .write_control(0x21, 0x09, w_value, s.iface as u16, data, timeout)
-                        .map_err(TransportError::from)
-                }
-            },
-            "write",
-        )
+        if let Some(ep_out) = self.ep_out {
+            self.handle
+                .write_interrupt(ep_out, data, timeout)
+                .map_err(TransportError::from)
+        } else {
+            // SET_REPORT control transfer: report type = Output (0x02),
+            // report ID = data[0]
+            let report_id = data.first().copied().unwrap_or(0) as u16;
+            let report_type: u16 = 0x02;
+            let w_value = (report_type << 8) | report_id;
+            self.handle
+                .write_control(0x21, 0x09, w_value, self.iface as u16, data, timeout)
+                .map_err(TransportError::from)
+        }
     }
 
     pub fn read_timeout(

@@ -179,15 +179,10 @@ impl HidTransport for HidrawTransport {
                 "HID write timeout must be positive".into(),
             ));
         }
-        self.with_reopen(
-            |s| {
-                let fd = s.write_fd.as_ref().ok_or_else(|| {
-                    TransportError::Other("bounded HID write descriptor unavailable".into())
-                })?;
-                write_fd_timed(fd.as_raw_fd(), data, timeout)
-            },
-            "write_timeout",
-        )
+        let fd = self.write_fd.as_ref().ok_or_else(|| {
+            TransportError::Other("bounded HID write descriptor unavailable".into())
+        })?;
+        write_fd_timed(fd.as_raw_fd(), data, timeout)
     }
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
         self.with_reopen(|s| s.write_timed(data, WRITE_TIMEOUT), "write")

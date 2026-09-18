@@ -69,6 +69,9 @@ const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 const SLV3_FRAME_RATE: u8 = 120;
 
 impl WinUsbLcd for Slv3WinUsbLcd {
+    fn packet_builder(&mut self) -> &mut crate::crypto::PacketBuilder {
+        self.core.builder_mut()
+    }
     fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>) {
         self.core.h264_transferred = Some(transferred);
     }

@@ -9,6 +9,9 @@ use tracing::{debug, warn};
 impl ServiceManager {
     /// Sync current config to IPC shared state.
     pub(super) fn sync_ipc_state(&self) {
+        if self.startup_image_job.is_some() || self.startup_config_pending {
+            return;
+        }
         let mut ipc_state = self.ipc.state.lock();
         ipc_state.config = self.config.clone();
     }
@@ -17,6 +20,11 @@ impl ServiceManager {
     pub(super) fn refresh_usb_device_cache(&mut self) {
         match enumerate_devices() {
             Ok(usb_devices) => {
+                let present: HashSet<_> = usb_devices
+                    .iter()
+                    .map(|device| device.device_id())
+                    .collect();
+                self.reconcile_startup_quarantine(&present);
                 self.refresh_tl_lcd_port_index_cache(&usb_devices);
                 self.build_usb_device_cache(usb_devices);
             }
@@ -30,6 +38,9 @@ impl ServiceManager {
         &mut self,
         usb_devices: &[lianli_devices::detect::DetectedDevice],
     ) {
+        if self.startup_image_job.is_some() || !self.startup_image_quarantine.is_empty() {
+            return;
+        }
         let current_ids: HashSet<String> = usb_devices
             .iter()
             .filter(|d| d.family == DeviceFamily::TlLcd)
@@ -90,6 +101,13 @@ impl ServiceManager {
     }
 
     fn build_usb_device_cache(&mut self, usb_devices: Vec<lianli_devices::detect::DetectedDevice>) {
+        self.registry.usb_locations = usb_devices
+            .iter()
+            .filter_map(|device| {
+                let ports = device.device.port_numbers().ok()?;
+                (!ports.is_empty()).then(|| (device.device_id(), (device.bus, ports)))
+            })
+            .collect();
         if self.registry.v2_hid_entries.is_empty() {
             self.registry.v2_hid_entries =
                 lianli_devices::wireless::query_v2_hid_macs(self.hid_backend());
@@ -150,6 +168,7 @@ impl ServiceManager {
                 };
 
             cached.push(DeviceInfo {
+                startup_image: lianli_shared::startup_image::capabilities(det.family),
                 telemetry: None,
                 device_id: device_id.clone(),
                 family: det.family,
@@ -281,6 +300,7 @@ impl ServiceManager {
             };
 
             devices.push(DeviceInfo {
+                startup_image: None,
                 telemetry: None,
                 device_id: format!("wireless:{}", dev.mac_str()),
                 family,
@@ -360,6 +380,7 @@ impl ServiceManager {
             };
 
             devices.push(DeviceInfo {
+                startup_image: None,
                 telemetry: None,
                 device_id: format!("wireless-unbound:{}", dev.mac_str()),
                 family,
@@ -603,6 +624,7 @@ mod tests {
 
     fn dev(device_id: &str, topology_key: Option<&str>) -> DeviceInfo {
         DeviceInfo {
+            startup_image: None,
             telemetry: None,
             device_id: device_id.to_string(),
             family: DeviceFamily::WiredReceiver,

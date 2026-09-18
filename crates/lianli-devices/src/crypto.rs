@@ -110,6 +110,41 @@ impl PacketBuilder {
         self.header(jpeg_size, CMD_PUSH_JPG, true)
     }
 
+    pub fn startup_image_header(
+        &mut self,
+        jpeg_size: usize,
+        new_path: bool,
+        winusb: bool,
+    ) -> Vec<u8> {
+        let path = if new_path {
+            b"boot.jpg".as_slice()
+        } else {
+            b"/usr/data/boot.jpg".as_slice()
+        };
+        self.startup_image_header_at_path(jpeg_size, path, winusb)
+    }
+
+    fn startup_image_header_at_path(
+        &mut self,
+        jpeg_size: usize,
+        path: &[u8],
+        winusb: bool,
+    ) -> Vec<u8> {
+        let mut params = Vec::with_capacity(8 + path.len());
+        params.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        params.extend_from_slice(&(jpeg_size as u32).to_be_bytes());
+        params.extend_from_slice(path);
+        if winusb {
+            self.build_winusb(0x28, &params)
+        } else {
+            self.build(0x28, &params)
+        }
+    }
+
+    pub fn lcd_revision_header(&mut self) -> Vec<u8> {
+        self.build_winusb(0x80, &[])
+    }
+
     /// Build a brightness control header (cmd 0x0E, value 0-100).
     pub fn brightness_header(&mut self, brightness: u8) -> Vec<u8> {
         self.build(CMD_BRIGHTNESS, &[brightness.min(100)])
@@ -315,6 +350,40 @@ pub fn is_lgbl(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_headers_match_vendor_path_lengths_payload_lengths_and_des_envelopes() {
+        use des::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+        for winusb in [false, true] {
+            for new_path in [false, true] {
+                let mut builder = super::PacketBuilder::new();
+                builder.last_timestamp = 100_000;
+                let header = builder.startup_image_header(0x12345, new_path, winusb);
+                assert_eq!(header.len(), 512);
+                if winusb {
+                    assert_eq!(&header[504..], &[0, 0, 0, 0, 0, 0, 0xa1, 0x1a]);
+                }
+                let mut encrypted = header[..if winusb { 504 } else { 512 }].to_vec();
+                let plain = cbc::Decryptor::<des::Des>::new_from_slices(b"slv3tuzx", b"slv3tuzx")
+                    .unwrap()
+                    .decrypt_padded_mut::<Pkcs7>(&mut encrypted)
+                    .unwrap();
+                let path = if new_path {
+                    b"boot.jpg".as_slice()
+                } else {
+                    b"/usr/data/boot.jpg".as_slice()
+                };
+                let mut expected = vec![0; if winusb { 500 } else { 504 }];
+                expected[0] = 0x28;
+                expected[2] = 0x1a;
+                expected[3] = 0x6d;
+                expected[4..8].copy_from_slice(&100001u32.to_le_bytes());
+                expected[8..12].copy_from_slice(&(path.len() as u32).to_be_bytes());
+                expected[12..16].copy_from_slice(&[0, 1, 0x23, 0x45]);
+                expected[16..16 + path.len()].copy_from_slice(path);
+                assert_eq!(plain, expected);
+            }
+        }
+    }
     use super::{crc16_ccitt, decrypt_lgbl, is_lgbl};
 
     #[test]

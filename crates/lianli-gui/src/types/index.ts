@@ -44,6 +44,7 @@ export type RGB = [number, number, number];
 export type RGBA = [number, number, number, number];
 
 export interface DeviceInfo {
+  startup_image?: { width: number; height: number; max_jpeg_bytes: number; jpeg_target_bytes?: number | null };
   telemetry?: {
     serial: string | null;
     firmware: string | null;
@@ -101,6 +102,7 @@ export interface PixelCleanStatus {
 export interface TelemetrySnapshot {
   desktop_streams?: DesktopStreamStatus[];
   media_preparation?: Record<string, {
+    startup_recovery_required?: boolean;
     generation: number;
     device_id: string;
     state: "waiting_for_device" | "preparing" | "ready" | "failed";

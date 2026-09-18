@@ -103,6 +103,18 @@ impl StateSnapshot {
         hash_directory(&mut generation, &directory)?;
         let mut files = Vec::new();
         let mut total = 0;
+        let recovery = config_path.with_extension("startup-upload.json");
+        if let Some(file) = read_file(
+            &directory,
+            recovery
+                .file_name()
+                .context("Recovery journal has no filename")?,
+            PathBuf::from(recovery.file_name().unwrap()),
+            &mut total,
+        )? {
+            let pending: Vec<String> = parse(&file)?;
+            ensure!(pending.is_empty(), "An LCD startup upload is pending or interrupted. Recover the LCD in the current daemon mode before transferring settings or switching services.");
+        }
         let config_file = read_file(&directory, name, PathBuf::from(name), &mut total)?
             .with_context(|| format!("Configuration {} is missing", config_path.display()))?;
         let config: AppConfig = parse(&config_file)?;
@@ -501,6 +513,19 @@ mod tests {
 
     fn access_control() -> crate::media_staging::CopyControl {
         crate::media_staging::CopyControl::new(std::time::Duration::from_secs(5))
+    }
+
+    #[test]
+    fn interrupted_startup_upload_blocks_state_transfer_until_recovered() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.json");
+        fs::write(&config, b"{}").unwrap();
+        let journal = config.with_extension("startup-upload.json");
+        fs::write(&journal, br#"["lcd"]"#).unwrap();
+        let error = StateSnapshot::read(&config, root.path()).err().unwrap();
+        assert!(error.to_string().contains("startup upload"));
+        fs::write(&journal, b"[]").unwrap();
+        assert!(StateSnapshot::read(&config, root.path()).is_ok());
     }
 
     #[test]

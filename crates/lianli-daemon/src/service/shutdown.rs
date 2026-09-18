@@ -11,6 +11,7 @@ impl ServiceManager {
         info!("shutdown: begin");
         self.ipc.state.lock().catalog_control.stop();
         self.media_preparation.cancel();
+        self.startup_image_job.take();
         self.display_switch.take();
         lianli_transport::usb::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 

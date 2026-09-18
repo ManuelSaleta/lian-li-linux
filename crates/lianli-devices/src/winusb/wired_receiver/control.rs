@@ -156,6 +156,45 @@ impl WiredReceiverController {
 }
 
 impl FanDevice for WiredReceiverController {
+    fn set_lcd_startup_theme_enabled(
+        &self,
+        physical_slot: u8,
+        enabled: bool,
+        stop: &AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.pid, 0x0102 | 0x0104),
+            "Not a Flex LCD receiver"
+        );
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        let mut command = [0; PACKET_SIZE];
+        command[0] = CMD_GET_INFO;
+        let transport = self
+            .transport
+            .try_lock_for(Duration::from_millis(100))
+            .context("Flex receiver is busy")?;
+        let status = startup_command(&transport, &command)?;
+        let mask = startup_theme_mask(&status, physical_slot, enabled)?;
+        command[0] = CMD_WIRELESS_THEME_SWITCH;
+        command[1] = mask;
+        lianli_transport::usb::with_teardown_io(Duration::from_secs(2), || {
+            transfer.begin(stop)?;
+            startup_command(&transport, &command)?;
+            drop(transport);
+            // The vendor waits before committing the receiver's new startup selection.
+            std::thread::sleep(Duration::from_millis(200));
+            let transport = self
+                .transport
+                .try_lock_for(Duration::from_millis(100))
+                .context("Flex receiver is busy while saving startup selection")?;
+            command[0] = CMD_SAVE_OR_CLEAR;
+            command[1] = 1;
+            startup_command(&transport, &command)?;
+            Ok(())
+        })
+    }
+
     fn set_fan_speed(&self, slot: u8, duty: u8) -> Result<()> {
         anyhow::ensure!(
             slot < self.fan_slot_count(),
@@ -214,6 +253,44 @@ impl FanDevice for WiredReceiverController {
     }
 }
 
+fn startup_command(transport: &RusbBulk, command: &[u8; PACKET_SIZE]) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        transport.write(command, LCD_WRITE_TIMEOUT)? == PACKET_SIZE,
+        "Short Flex startup command; no automatic retry was made"
+    );
+    let mut reply = [0; PACKET_SIZE];
+    let length = transport.read(&mut reply, Duration::from_millis(100))?;
+    let reply = &reply[..length];
+    validate_response_length(reply, command[0])?;
+    anyhow::ensure!(
+        reply[0] == command[0],
+        "Unexpected Flex startup response opcode"
+    );
+    Ok(reply.to_vec())
+}
+
+fn startup_theme_mask(status: &[u8], slot: u8, enabled: bool) -> Result<u8> {
+    anyhow::ensure!(
+        status.len() >= 42 && status[0] == CMD_GET_INFO,
+        "Flex startup selection requires a complete receiver status"
+    );
+    let count = if status[20] >= 10 {
+        status[20] - 10
+    } else {
+        status[20]
+    };
+    anyhow::ensure!(
+        (1..=4).contains(&count) && slot < count,
+        "Flex LCD physical slot is out of range"
+    );
+    let mask = status[31] >> 4;
+    Ok(if enabled {
+        mask | (1 << slot)
+    } else {
+        mask & !(1 << slot)
+    })
+}
+
 fn validate_pwm_ack(response: &[u8]) -> Result<()> {
     anyhow::ensure!(
         response.len() >= 2 && response[0] == CMD_SET_FANS_PWM && response[1] == 0,
@@ -259,6 +336,22 @@ fn reverse_fan_slots<T: Copy>(slots: &mut [T; 4], fan_count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_selection_preserves_sibling_bits_in_physical_order() {
+        let mut status = [0; 42];
+        status[0] = CMD_GET_INFO;
+        status[20] = 3;
+        status[31] = 0xb7;
+        assert_eq!(startup_theme_mask(&status, 1, false).unwrap(), 0b1001);
+        assert_eq!(startup_theme_mask(&status, 2, true).unwrap(), 0b1111);
+        status[20] = 13;
+        assert_eq!(startup_theme_mask(&status, 0, false).unwrap(), 0b1010);
+        assert!(startup_theme_mask(&status, 3, false).is_err());
+        assert!(startup_theme_mask(&status[..31], 0, false).is_err());
+        status[20] = 0;
+        assert!(startup_theme_mask(&status, 0, false).is_err());
+    }
 
     #[test]
     fn pwm_ack_requires_opcode_and_success_status() {

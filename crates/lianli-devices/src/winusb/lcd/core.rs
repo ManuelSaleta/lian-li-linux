@@ -101,6 +101,7 @@ pub struct LcdLink {
     last_hold: Mutex<Option<Instant>>,
     ring: Mutex<RingDelivery>,
     software_cooling: AtomicBool,
+    storage_interrupted: AtomicBool,
     pending: Mutex<Vec<PendingCmd>>,
 }
 
@@ -115,12 +116,85 @@ impl LcdLink {
             last_hold: Mutex::new(None),
             ring: Mutex::new(RingDelivery::default()),
             software_cooling: AtomicBool::new(true),
+            storage_interrupted: AtomicBool::new(false),
             pending: Mutex::new(Vec::new()),
         }
     }
 
     pub fn lock(&self) -> MutexGuard<'_, RusbBulk> {
         self.bulk.lock()
+    }
+
+    pub fn ensure_storage_ready(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.storage_interrupted.load(Ordering::Acquire),
+            "LCD storage transfer was interrupted; reconnect the device before further commands"
+        );
+        Ok(())
+    }
+
+    pub fn startup_image_ready(&self, h2: bool) -> Result<()> {
+        self.ensure_storage_ready()?;
+        anyhow::ensure!(
+            !self.ring_recovery_pending(),
+            "LCD recovery is still pending"
+        );
+        anyhow::ensure!(!h2 || !self.software_cooling_active(), "Switch H2 fan and pump control to motherboard or device-managed mode before storing a startup image");
+        Ok(())
+    }
+
+    pub(crate) fn upload_startup_image(
+        &self,
+        packet: &[u8],
+        stop: &AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        let bulk = self
+            .bulk
+            .try_lock_for(Duration::from_millis(100))
+            .context("LCD transport busy")?;
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        self.startup_image_ready(false)?;
+        anyhow::ensure!(
+            !self.is_streaming() && !self.ring_recovery_pending(),
+            "LCD playback or recovery is still active"
+        );
+        self.set_needs_init(true);
+        lianli_transport::usb::with_teardown_io(Duration::from_secs(5), || {
+            transfer.begin(stop)?;
+            self.storage_interrupted.store(true, Ordering::Release);
+            anyhow::ensure!(
+                bulk.write(packet, Duration::from_secs(3))
+                    .context("Startup image transfer interrupted. Storage state is unknown")?
+                    == packet.len(),
+                "Startup image transfer incomplete. Storage state is unknown"
+            );
+            let mut reply = [0; 512];
+            let response_received = bulk
+                .read(&mut reply, Duration::from_secs(1))
+                .is_ok_and(|length| length > 0);
+            self.storage_interrupted.store(false, Ordering::Release);
+            Ok(response_received)
+        })
+    }
+
+    pub(crate) fn probe_relative_startup_path(&self, command: &[u8]) -> Result<bool> {
+        self.ensure_storage_ready()?;
+        let bulk = self
+            .bulk
+            .try_lock_for(Duration::from_millis(100))
+            .context("LCD transport busy during startup revision probe")?;
+        anyhow::ensure!(
+            bulk.write(command, Duration::from_millis(200))? == command.len(),
+            "Short LCD revision probe write"
+        );
+        let mut reply = [0; 512];
+        let length = match bulk.read(&mut reply, Duration::from_millis(10)) {
+            Ok(length) => length,
+            Err(lianli_transport::TransportError::Usb(rusb::Error::Timeout)) => 0,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(crate::startup_image::revision(&reply[..length]).unwrap_or(false))
     }
 
     /// Last valid device-reported block size; absent until negotiation and after reopen.
@@ -256,6 +330,7 @@ impl LcdLink {
             return Ok(false);
         }
         let recovering = self.ring_recovery_pending();
+        self.ensure_storage_ready()?;
         if !recovering && self.software_cooling_active() {
             return Ok(false);
         }
@@ -776,6 +851,7 @@ impl WinUsbLcdCore {
     /// StopClock. Run by `H2WinUsbLcd::do_init` after enumeration and again
     /// by `reinit_and_flush_unsafe` after a stream.
     pub(crate) fn h2_control_init(&mut self) -> Result<()> {
+        self.transport.ensure_storage_ready()?;
         if self.transport.ring_recovery_pending() {
             anyhow::ensure!(
                 self.transport.hold_allowed(),

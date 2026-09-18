@@ -166,6 +166,7 @@ asset, including images, video and fonts referenced by templates.
 - [Service setup, switching and recovery](docs/service-modes.md)
 - [USB permissions and udev rules](docs/usb-permissions.md)
 - [LCD assets and managed storage](docs/lcd-assets.md)
+- [Startup image uploads](docs/startup-images.md)
 - [Configuration and template backups](docs/state-backups.md)
 
 ## Configuration

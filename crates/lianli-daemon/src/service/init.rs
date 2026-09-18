@@ -136,6 +136,10 @@ impl ServiceManager {
     /// AIOs only get legacy-group migration — no config means no PWM writes,
     /// leaving the device's firmware in control until the user configures it.
     pub(super) fn ensure_aio_defaults(&mut self) {
+        if self.startup_image_job.is_some() {
+            self.startup_config_pending = true;
+            return;
+        }
         let mut wired_aio_ids: Vec<String> = Vec::new();
         // Wired AIOs: fan devices with pump control (HydroShift LCD family).
         for info in &self.registry.fan_device_info {
@@ -216,6 +220,9 @@ impl ServiceManager {
     }
 
     pub(super) fn check_wired_hotplug(&mut self) {
+        if self.startup_image_job.is_some() {
+            return;
+        }
         let (current_ids, current_topos) = match self.snapshot_wired() {
             Ok(sets) => sets,
             Err(e) => {
@@ -374,6 +381,7 @@ impl ServiceManager {
         };
 
         let present_ids: HashSet<String> = usb_devs.iter().map(Self::rusb_device_id).collect();
+        self.reconcile_startup_quarantine(&present_ids);
         self.ipc
             .state
             .lock()
@@ -409,6 +417,14 @@ impl ServiceManager {
                 continue;
             };
             let base_id = Self::rusb_device_id(det);
+            if self.startup_image_quarantine.contains(&base_id) {
+                self.ipc
+                    .state
+                    .lock()
+                    .state_health
+                    .device_open_failed(&base_id, super::startup_image::RECOVERY_MESSAGE);
+                continue;
+            }
 
             if already_opened.contains(&base_id) {
                 self.ipc.state.lock().state_health.device_opened(&base_id);
@@ -612,6 +628,7 @@ impl ServiceManager {
                     name.to_string()
                 };
                 self.registry.fan_device_info.push(DeviceInfo {
+                    startup_image: None,
                     telemetry: None,
                     device_id,
                     family,
@@ -668,6 +685,10 @@ impl ServiceManager {
         quantity: u8,
     ) -> anyhow::Result<()> {
         use anyhow::Context;
+        anyhow::ensure!(
+            self.startup_image_job.is_none(),
+            "Wait for the startup image upload before changing fan quantity"
+        );
         let (base_id, port) = device_id.rsplit_once(":port").unwrap_or((device_id, "0"));
         let port = port.parse::<u8>().context("Invalid fan port")?;
         let port_device_id = format!("{base_id}:port{port}");

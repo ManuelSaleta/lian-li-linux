@@ -60,6 +60,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(2_000);
 const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 impl WinUsbLcd for H2WinUsbLcd {
+    fn packet_builder(&mut self) -> &mut crate::crypto::PacketBuilder {
+        self.core.builder_mut()
+    }
     fn observe_h264_transfer(&mut self, transferred: std::sync::Arc<AtomicBool>) {
         self.core.h264_transferred = Some(transferred);
     }

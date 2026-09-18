@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useDialog } from "naive-ui";
+import { useDialog, useMessage } from "naive-ui";
 import { FolderOpen, Plus, Trash2 } from "lucide-vue-next";
 import type { Widget, RGBA, RGB, SensorSourceConfig, SensorRange, GradientStop } from "@/types";
-import { open } from "@tauri-apps/plugin-dialog";
+import { pickMediaFile } from "@/utils/mediaPicker";
 import SensorSelect from "@/components/common/SensorSelect.vue";
 
 const props = defineProps<{
@@ -18,6 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const dialog = useDialog();
+const message = useMessage();
 
 const w = computed(() => props.widget);
 
@@ -296,8 +297,15 @@ function removeListItem(key: string, index: number) {
 }
 
 async function browsePath(key: string) {
-  const sel = await open({ filters: [{ name: "Files", extensions: ["png", "jpg", "jpeg", "bmp", "gif", "mp4", "webm", "ttf", "otf"] }] });
-  if (typeof sel === "string") emit("patchKind", w.value!.id, key, sel);
+  const widget = w.value;
+  if (!widget || (widget.kind.type !== "image" && widget.kind.type !== "video")) return;
+  const type = widget.kind.type;
+  try {
+    const selected = await pickMediaFile(type === "video" ? "animation" : "image");
+    if (selected && w.value === widget && widget.kind.type === type) emit("patchKind", widget.id, key, selected);
+  } catch (error) {
+    message.error(String(error));
+  }
 }
 </script>
 

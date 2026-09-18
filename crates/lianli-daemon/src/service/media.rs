@@ -129,21 +129,29 @@ impl ServiceManager {
             .iter()
             .enumerate()
             .map(|(index, cfg)| {
+                let recovery = cfg.serial.as_ref().is_some_and(|serial| {
+                    self.startup_image_quarantine
+                        .iter()
+                        .any(|id| lcd_id_matches(serial, id))
+                });
                 (
                     index,
                     MediaPreparationStatus {
+                        startup_recovery_required: recovery,
                         runtime: None,
                         last_playback_error: None,
                         generation,
                         device_id: cfg.device_id(),
-                        state: if !targets.contains_key(&index) {
+                        state: if recovery {
+                            MediaPreparationState::Failed
+                        } else if !targets.contains_key(&index) {
                             MediaPreparationState::WaitingForDevice
                         } else if preparing.contains(&index) {
                             MediaPreparationState::Preparing
                         } else {
                             MediaPreparationState::Ready
                         },
-                        error: None,
+                        error: recovery.then(|| super::startup_image::RECOVERY_MESSAGE.into()),
                     },
                 )
             })
@@ -259,6 +267,9 @@ impl ServiceManager {
     }
 
     pub(super) fn refresh_targets(&mut self) {
+        if self.startup_image_job.is_some() {
+            return;
+        }
         if self.config.as_ref().is_none_or(|cfg| cfg.lcds.is_empty())
             && self.targets.lock().is_empty()
         {
@@ -297,6 +308,9 @@ impl ServiceManager {
                 continue;
             }
             let device_id = det.device_id();
+            if self.startup_image_quarantine.contains(&device_id) {
+                continue;
+            }
             if self.mode_switch_suppressed(&device_id) {
                 debug!("LCD candidate skipped (recent mode switch): {device_id}");
                 continue;
@@ -816,6 +830,7 @@ mod tests {
         service.ipc.state.lock().telemetry.media_preparation.insert(
             0,
             MediaPreparationStatus {
+                startup_recovery_required: false,
                 runtime: None,
                 last_playback_error: None,
                 generation: 2,

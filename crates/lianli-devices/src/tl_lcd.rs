@@ -35,7 +35,6 @@ const CMD_WRITE_JPG: u8 = 0x41;
 const CMD_WRITE_AVI: u8 = 0x45;
 #[allow(dead_code)]
 const CMD_WRITE_BOOT_AVI: u8 = 0x47;
-#[allow(dead_code)]
 const CMD_WRITE_BOOT_JPG: u8 = 0x48;
 const CMD_WRITE_SYNC_JPG: u8 = 0x46;
 
@@ -357,6 +356,57 @@ impl TlLcdDevice {
 }
 
 impl LcdDevice for TlLcdDevice {
+    fn upload_startup_image(
+        &mut self,
+        jpeg: &[u8],
+        stop: &std::sync::atomic::AtomicBool,
+        transfer: &crate::startup_image::Transfer,
+    ) -> Result<bool> {
+        use std::time::{Duration, Instant};
+        anyhow::ensure!(
+            !jpeg.is_empty() && jpeg.len() <= 101_888,
+            "TL startup JPEG exceeds the upload limit"
+        );
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        let _chain = CHAIN_LOCK
+            .try_lock_for(Duration::from_millis(100))
+            .context("TL LCD chain busy")?;
+        let mut device = self
+            .device
+            .try_lock_for(Duration::from_millis(100))
+            .context("TL LCD busy")?;
+        crate::startup_image::ensure_not_cancelled(stop)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        lianli_transport::usb::with_teardown_io(Duration::from_secs(30), || {
+            for (index, chunk) in jpeg.chunks(MAX_PAYLOAD_PER_PACKET).enumerate() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                anyhow::ensure!(
+                    remaining >= Duration::from_millis(1),
+                    "Startup transfer timed out. Storage state is unknown"
+                );
+                let packet =
+                    build_packet(CMD_WRITE_BOOT_JPG, jpeg.len() as u32, index as u32, chunk);
+                if index == 0 {
+                    transfer.begin(stop)?;
+                }
+                anyhow::ensure!(
+                    device.write_timeout(&packet, remaining.min(Duration::from_secs(1)))?
+                        == packet.len(),
+                    "TL startup transfer interrupted; do not automatically retry"
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                anyhow::ensure!(
+                    !remaining.is_zero(),
+                    "Startup acknowledgement deadline expired"
+                );
+                let mut response = [0; 64];
+                let length = device
+                    .read_timeout(&mut response, remaining.as_millis().clamp(1, 200) as i32)?;
+                validate_boot_ack(&response[..length])?;
+            }
+            Ok(true)
+        })
+    }
     fn screen_info(&self) -> &ScreenInfo {
         &ScreenInfo::TLLCD
     }
@@ -433,7 +483,20 @@ impl LcdDevice for TlLcdDevice {
     }
 }
 
-/// Build a 512-byte TLLCD HID packet.
+fn validate_boot_ack(response: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        response.len() >= HEADER_LEN
+            && response[0] == REPORT_ID
+            && response[1] == CMD_WRITE_BOOT_JPG,
+        "Invalid TL startup acknowledgement. Storage state is unknown"
+    );
+    anyhow::ensure!(
+        payload_length(response) <= response.len() - HEADER_LEN,
+        "Truncated TL startup acknowledgement"
+    );
+    Ok(())
+}
+
 fn build_packet(
     cmd: u8,
     total_data_size: u32,
@@ -555,6 +618,22 @@ impl crate::registry::DeviceDriver for TlLcdDriver {
 
 #[cfg(test)]
 mod settings_tests {
+    #[test]
+    fn boot_jpeg_packets_and_acknowledgements_use_the_tl_hid_layout() {
+        let packet = super::build_packet(0x48, 0x10000, 0x0102, &[0xab; 501]);
+        assert_eq!(&packet[..11], &[2, 0x48, 0, 1, 0, 0, 0, 1, 2, 1, 245]);
+        assert_eq!(&packet[11..], &[0xab; 501]);
+        let mut reply = [0; 64];
+        reply[0] = 2;
+        reply[1] = 0x48;
+        assert!(super::validate_boot_ack(&reply[..11]).is_ok());
+        assert!(super::validate_boot_ack(&reply[..10]).is_err());
+        reply[1] = 0x41;
+        assert!(super::validate_boot_ack(&reply).is_err());
+        reply[1] = 0x48;
+        reply[10] = 54;
+        assert!(super::validate_boot_ack(&reply).is_err());
+    }
     use super::*;
     use lianli_transport::{HidTransport, TransportError};
     use std::sync::Arc;

@@ -9,6 +9,7 @@ const devices = useDevicesStore();
 const ipc = useIpc();
 const message = useMessage();
 const retrying = ref(false);
+const clearing = ref<string>();
 const failed = computed(() => Object.values(daemon.mediaPreparation).some(status => status.state === "failed" || status.runtime?.stage === "failed"));
 
 async function retry() {
@@ -22,6 +23,20 @@ async function retry() {
     message.error(String(error));
   } finally {
     retrying.value = false;
+  }
+}
+
+async function clearRecovery(deviceId: string) {
+  if (clearing.value || !daemon.canWrite) return;
+  clearing.value = deviceId;
+  try {
+    await ipc.request("ClearStartupImageRecovery", { device_id: deviceId });
+    message.info("Recovery reset requested. Playback will retry shortly.");
+    await daemon.refresh();
+  } catch (error) {
+    message.error(String(error));
+  } finally {
+    clearing.value = undefined;
   }
 }
 </script>
@@ -38,6 +53,7 @@ async function retry() {
         <div><dt>Encoder</dt><dd>{{ status.runtime?.encoder?.name ?? '—' }}</dd></div>
       </dl>
       <p v-if="status.error" class="failure">{{ status.error }}</p>
+      <n-button v-if="status.startup_recovery_required && daemon.info?.capabilities.includes('startup_recovery_clear')" size="small" :loading="clearing === status.device_id" :disabled="!!clearing || !daemon.canWrite" @click="clearRecovery(status.device_id)">Clear recovery and retry playback</n-button>
       <details v-if="status.last_playback_error || status.runtime">
         <summary>Playback details</summary>
         <p v-if="status.runtime">{{ status.runtime.stage.replaceAll('_', ' ') }} · Hardware video {{ status.runtime.hardware_video_allowed ? 'enabled' : 'disabled' }}</p>

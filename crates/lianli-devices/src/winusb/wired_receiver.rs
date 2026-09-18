@@ -68,6 +68,7 @@ pub struct ReceiverStatus {
 
 pub struct WiredReceiverController {
     transport: Mutex<RusbBulk>,
+    pid: u16,
     params: ReceiverParams,
     render_family: RgbRenderFamily,
     fan_count: Mutex<u8>,
@@ -108,6 +109,7 @@ impl WiredReceiverController {
 
         let ctrl = Self {
             transport: Mutex::new(transport),
+            pid,
             params,
             render_family,
             fan_count: Mutex::new(4),

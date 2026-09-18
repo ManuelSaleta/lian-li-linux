@@ -128,6 +128,9 @@ impl ServiceManager {
         target_id: Option<String>,
         minutes: u16,
     ) -> Result<u64, String> {
+        if self.startup_image_job.is_some() {
+            return Err("Startup image upload is still running".into());
+        }
         if minutes == 0 {
             return Err("Duration must be positive".into());
         }

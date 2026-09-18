@@ -7,6 +7,7 @@ pub mod galahad2_trinity;
 pub mod hydroshift_lcd;
 pub mod registry;
 pub mod slv3_lcd;
+pub mod startup_image;
 pub mod strimer_plus;
 pub mod tinyuz;
 pub mod tl_fan;

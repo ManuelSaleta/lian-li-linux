@@ -3,6 +3,26 @@
 
 use lianli_shared::ipc::IpcResponse;
 
+pub fn clear_startup_recovery(
+    state: &super::SharedState,
+    tx: super::EventSender,
+    device_id: String,
+) -> IpcResponse {
+    if !state
+        .lock()
+        .telemetry
+        .media_preparation
+        .values()
+        .any(|status| status.device_id == device_id && status.startup_recovery_required)
+    {
+        return IpcResponse::error("This LCD has no startup recovery block. Refresh its status");
+    }
+    match tx.send(crate::service::DaemonEvent::ClearStartupImageRecovery { device_id }) {
+        Ok(()) => IpcResponse::ok(serde_json::json!(null)),
+        Err(_) => IpcResponse::error("The daemon stopped before accepting recovery clearance"),
+    }
+}
+
 pub fn retry_media(state: &super::SharedState, tx: super::EventSender) -> IpcResponse {
     use lianli_shared::ipc::{MediaPreparationState, MediaRuntimeStage};
     let mut state = state.lock();
@@ -123,6 +143,40 @@ mod tests {
     use std::sync::{mpsc, Arc};
 
     #[test]
+    fn startup_recovery_clear_requires_a_block_and_queues_the_selected_device() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(crate::ipc::DaemonState::new(
+            root.path().join("config.json"),
+        )));
+        let (tx, rx) = mpsc::channel();
+        let id = "serial:hid:lcd".to_string();
+        assert!(matches!(
+            clear_startup_recovery(&state, tx.clone().into(), id.clone()),
+            IpcResponse::Error { .. }
+        ));
+        let mut status: lianli_shared::ipc::MediaPreparationStatus =
+            serde_json::from_value(serde_json::json!({
+                "generation": 1, "device_id": id, "state": "failed", "error": "Recovery required"
+            }))
+            .unwrap();
+        assert!(!status.startup_recovery_required);
+        status.startup_recovery_required = true;
+        state.lock().telemetry.media_preparation.insert(0, status);
+        assert!(matches!(
+            clear_startup_recovery(&state, tx.clone().into(), id.clone()),
+            IpcResponse::Ok { .. }
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(), DaemonEvent::ClearStartupImageRecovery { device_id } if device_id == id)
+        );
+        drop(rx);
+        assert!(matches!(
+            clear_startup_recovery(&state, tx.into(), id),
+            IpcResponse::Error { .. }
+        ));
+    }
+
+    #[test]
     fn media_retry_requires_failure_coalesces_and_does_not_save_configuration() {
         use lianli_shared::ipc::{
             MediaPreparationState, MediaPreparationStatus, MediaRuntimeStage, MediaRuntimeStatus,
@@ -138,6 +192,7 @@ mod tests {
         state.lock().telemetry.media_preparation.insert(
             0,
             MediaPreparationStatus {
+                startup_recovery_required: false,
                 generation: 1,
                 device_id: "fixture".into(),
                 state: MediaPreparationState::Failed,

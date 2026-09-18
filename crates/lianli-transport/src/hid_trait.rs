@@ -2,6 +2,7 @@ use crate::error::TransportError;
 
 pub trait HidTransport: Send {
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError>;
+    /// Attempt a bounded write once; never reopen and replay a stateful command.
     fn write_timeout(
         &mut self,
         _data: &[u8],

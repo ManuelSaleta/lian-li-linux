@@ -205,6 +205,7 @@ mod tests {
         state.telemetry.media_preparation.insert(
             0,
             MediaPreparationStatus {
+                startup_recovery_required: false,
                 generation: 1,
                 device_id: "test".into(),
                 state: MediaPreparationState::Ready,

@@ -37,6 +37,8 @@ pub struct PixelCleanState {
 
 /// Shared state between the daemon main loop and the IPC server thread.
 pub struct DaemonState {
+    pub startup_image: Option<lianli_shared::startup_image::StartupImageStatus>,
+    pub startup_image_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub info: DaemonInfo,
     pub write_gate: Arc<lianli_control::write_gate::ServiceWriteGate>,
     pub config: Option<AppConfig>,
@@ -86,6 +88,7 @@ pub fn build_info() -> lianli_shared::daemon::DaemonBuildInfo {
             "backup_cleanup".into(),
             "openrgb_retry".into(),
             "media_retry".into(),
+            "startup_recovery_clear".into(),
             "catalog_install_status".into(),
             "catalog_storage".into(),
             "managed_media_storage".into(),
@@ -110,6 +113,8 @@ impl DaemonState {
             .unwrap_or_default();
         let build = build_info();
         Self {
+            startup_image: None,
+            startup_image_cancel: None,
             info: DaemonInfo {
                 version: build.version,
                 protocol_version: build.protocol_version,
@@ -311,6 +316,23 @@ fn handle_request(
     state: &Arc<Mutex<DaemonState>>,
     tx: super::EventSender,
 ) -> IpcResponse {
+    if matches!(
+        request,
+        IpcRequest::SwitchDisplayMode { .. }
+            | IpcRequest::ClearStartupImageRecovery { .. }
+            | IpcRequest::RebootWirelessLcd { .. }
+            | IpcRequest::SetLcdBrightness { .. }
+            | IpcRequest::StartPixelClean { .. }
+    ) && state
+        .lock()
+        .startup_image
+        .as_ref()
+        .is_some_and(|job| job.status.is_pending())
+    {
+        return IpcResponse::error(
+            "Wait for the startup image upload to finish before changing LCD state",
+        );
+    }
     match request {
         IpcRequest::Guarded { .. } => IpcResponse::error("Request was not authorized"),
         IpcRequest::StopService { .. } => {
@@ -319,6 +341,9 @@ fn handle_request(
         IpcRequest::Ping => super::system::ping(),
         IpcRequest::RetryOpenRgb => super::system::retry_openrgb(state, tx),
         IpcRequest::RetryMedia => super::system::retry_media(state, tx),
+        IpcRequest::ClearStartupImageRecovery { device_id } => {
+            super::system::clear_startup_recovery(state, tx, device_id)
+        }
         IpcRequest::GetDaemonInfo => super::system::daemon_info(state),
         IpcRequest::ListStateBackups => {
             super::backups::run(state, super::backups::Operation::List, tx)
@@ -547,6 +572,14 @@ fn handle_request(
                 _ => IpcResponse::error("Unknown or expired pixel cleaner preparation"),
             }
         }
+        IpcRequest::UploadStartupImage {
+            device_id,
+            jpeg_base64,
+        } => super::lcd::upload_startup_image(state, &tx, device_id, jpeg_base64),
+        IpcRequest::GetStartupImageStatus => {
+            IpcResponse::ok(serde_json::json!(state.lock().startup_image))
+        }
+        IpcRequest::CancelStartupImage { id } => super::lcd::cancel_startup_image(state, id),
         IpcRequest::GetPixelCleanStatus => {
             let state = state.lock();
             let statuses = state.pixel_clean_statuses();

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Copy, Image as ImageIcon, Palette, Save, X } from "lucide-vue-next";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open } from "@tauri-apps/plugin-dialog";
+import { pickMediaFile } from "@/utils/mediaPicker";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { LcdTemplate, Widget, Widget as W, RGBA, RGB, SensorSourceConfig } from "@/types";
 import { useConfigStore } from "@/stores/config";
@@ -174,11 +174,14 @@ function setBgColorMode() {
 }
 
 async function pickBgImage() {
-  const sel = await open({
-    filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "bmp"] }],
-  });
-  if (typeof sel === "string" && template.value) {
-    template.value.background = { type: "image", path: sel };
+  const target = template.value;
+  try {
+    const selected = await pickMediaFile("image");
+    if (selected && target && template.value === target) {
+      target.background = { type: "image", path: selected };
+    }
+  } catch (error) {
+    setStatus(String(error), true);
   }
 }
 
