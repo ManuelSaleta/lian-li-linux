@@ -6,5 +6,6 @@
 
 pub mod aio;
 pub(crate) mod cooling;
+mod failure_log;
 pub mod fan;
 pub mod rgb;

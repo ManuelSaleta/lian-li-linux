@@ -60,6 +60,23 @@ pub struct H2Params {
     pub mac: Option<[u8; 6]>,
 }
 
+fn pwm_refresh_due(
+    elapsed: Duration,
+    previous_pump: u8,
+    previous_fans: [u8; 3],
+    pump: u8,
+    fans: [u8; 3],
+) -> bool {
+    let changed =
+        |before: u8, after: u8| before.abs_diff(after) >= 8 || (after == 255 && before != 255);
+    elapsed >= Duration::from_millis(3600)
+        || changed(previous_pump, pump)
+        || previous_fans
+            .into_iter()
+            .zip(fans)
+            .any(|(before, after)| changed(before, after))
+}
+
 fn selected_duties(mut previous: [u8; 3], duties: &[Option<u8>]) -> [u8; 3] {
     for (previous, selected) in previous.iter_mut().zip(duties) {
         if let Some(duty) = selected {
@@ -382,48 +399,12 @@ impl H2AioController {
         if self.is_wireless.load(Ordering::Relaxed) {
             return Ok(());
         }
-        // FIX: drop a SyncPumpFan that repeats the previous one too soon. The
-        // controller calls set_fan_speeds() and then set_pump_speed(), and each
-        // sends a full packet — but SyncPumpFan already carries pump *and* fans,
-        // so the second is an exact duplicate ~0.1ms behind the first. That put
-        // two commands per second on the wire against the ~3.6s L-Connect uses,
-        // roughly seven times the vendor's rate, and this controller stops
-        // answering writes after about 26s of it (measured at +26.294s,
-        // +26.498s and +26.522s across three runs). Reads keep working, so the
-        // fans just decay to minimum with nothing in the log.
-        //
-        // Identical packets still refresh every RESYNC_INTERVAL, far inside the
-        // ~13s the firmware waits before falling back on its own, and any change
-        // in pump or fan duty goes out immediately.
-        // Rate limit: L-Connect re-sends about every 3.6s, and this controller
-        // stops answering writes after a fixed number of them regardless of
-        // content — 2/s died at 26.5s, 1/s at 47.1s. Skipping only *identical*
-        // packets was not enough, because a curve's duty jitters by a point or
-        // two every tick and every jittered packet went out anyway.
-        //
-        // So gate on elapsed time, not equality, and let a meaningful change
-        // through immediately so the UI still feels responsive.
-        const RESYNC_INTERVAL: Duration = Duration::from_millis(3600);
-        const SIGNIFICANT_DUTY_STEP: u8 = 8;
-        {
-            let last = self.last_sync.lock();
-            if let Some((at, prev_pump, prev_fans)) = *last {
-                // The pump needs the same deadband as the fans, and for the same
-                // reason: its duty comes from a curve evaluated every second and
-                // jitters by a point or two per tick. Comparing it exactly let
-                // every jittered tick through, which put the packet rate back
-                // where this gate exists to stop it. Compared in duty space so
-                // one threshold covers both, rather than in the pump's PWM
-                // period, whose scale is model-dependent and non-linear.
-                let changed = prev_pump.abs_diff(pump_duty) >= SIGNIFICANT_DUTY_STEP
-                    || prev_fans
-                        .iter()
-                        .zip(fan_duties.iter())
-                        .any(|(a, b)| a.abs_diff(*b) >= SIGNIFICANT_DUTY_STEP);
-                if !changed && at.elapsed() < RESYNC_INTERVAL {
-                    return Ok(());
-                }
-            }
+        // Firmware wedges under frequent writes; retain its 3.6s refresh cadence.
+        // A rising full-speed target must bypass the jitter deadband for safety.
+        if self.last_sync.lock().is_some_and(|(at, pump, fans)| {
+            !pwm_refresh_due(at.elapsed(), pump, fans, pump_duty, fan_duties)
+        }) {
+            return Ok(());
         }
         let pump_pwm = self.duty_to_pwm(pump_duty);
 
@@ -842,6 +823,52 @@ impl RgbDevice for H2AioController {
 mod playback_tests {
     use super::h2_playback_fields;
     use lianli_shared::rgb::RgbPlaybackTiming;
+
+    #[test]
+    fn full_speed_transition_bypasses_deadband_without_repeated_refreshes() {
+        use super::pwm_refresh_due;
+        use std::time::Duration;
+        assert!(pwm_refresh_due(
+            Duration::ZERO,
+            250,
+            [250; 3],
+            255,
+            [250; 3]
+        ));
+        for index in 0..3 {
+            let mut fans = [250; 3];
+            fans[index] = 255;
+            assert!(pwm_refresh_due(Duration::ZERO, 250, [250; 3], 250, fans));
+        }
+        assert!(!pwm_refresh_due(
+            Duration::from_millis(3599),
+            255,
+            [255; 3],
+            255,
+            [255; 3]
+        ));
+        assert!(pwm_refresh_due(
+            Duration::from_millis(3600),
+            255,
+            [255; 3],
+            255,
+            [255; 3]
+        ));
+        assert!(!pwm_refresh_due(
+            Duration::ZERO,
+            250,
+            [250; 3],
+            254,
+            [251; 3]
+        ));
+        assert!(pwm_refresh_due(
+            Duration::ZERO,
+            100,
+            [100; 3],
+            108,
+            [100; 3]
+        ));
+    }
 
     #[test]
     fn uses_full_frame_count_and_one_byte_tick_fields() {

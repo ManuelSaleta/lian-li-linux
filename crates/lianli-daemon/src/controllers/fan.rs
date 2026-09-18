@@ -152,6 +152,7 @@ fn fan_control_thread(inputs: FanControlInputs) {
     let mut sensor_cache = FanSensors::default();
     let mut fan_states: HashMap<usize, FanState> = HashMap::new();
     let mut unavailable_wireless = HashSet::new();
+    let mut failures = super::failure_log::FailureLog::default();
 
     // Auto-detect CPU/GPU temp sensors for the wireless LCD clock-sync payload.
     let cpu_temp_source = picker::find_default_cpu_temp(all_sensors);
@@ -321,9 +322,11 @@ fn fan_control_thread(inputs: FanControlInputs) {
                             .filter(|d| d.fan_type.supports_hw_mobo_sync())
                             .map(|d| d.mac);
                         if let Some(mac) = hw_sync_device {
-                            if let Err(err) = w.set_hardware_pwm_sync(&mac) {
-                                warn!("Failed to enable hardware PWM sync for {device_id}: {err}");
-                            }
+                            failures.record(
+                                device_id,
+                                "set hardware PWM sync",
+                                w.set_hardware_pwm_sync(&mac),
+                            );
                             continue;
                         }
                     }
@@ -366,7 +369,7 @@ fn fan_control_thread(inputs: FanControlInputs) {
             // Try to apply to the right device
             if let Some(ref device_id) = group.device_id {
                 if device_id.starts_with("wireless:") {
-                    if apply_wireless_by_id(&wireless, device_id, &speeds) {
+                    if apply_wireless_by_id(&wireless, device_id, &speeds, &mut failures) {
                         unavailable_wireless.remove(&group_idx);
                     } else if unavailable_wireless.insert(group_idx) {
                         warn!("Fan group {group_idx}: waiting for wireless device {device_id}");
@@ -382,11 +385,13 @@ fn fan_control_thread(inputs: FanControlInputs) {
                         }
                         let stop = dev.stop_pwm();
                         let mapped = map_stop(&speeds, stop);
-                        if let Err(err) = dev.set_fan_speed(port, mapped[0]) {
-                            warn!("Failed to set fan speed for {device_id}: {err}");
-                        }
+                        failures.record(
+                            device_id,
+                            "set fan speed",
+                            dev.set_fan_speed(port, mapped[0]),
+                        );
                     } else {
-                        warn!("Fan group {group_idx}: device '{device_id}' not found");
+                        failures.record(device_id, "set fan speed", Err("device not found"));
                     }
                 } else if let Some(dev) = wired.get(device_id) {
                     if dev
@@ -398,22 +403,20 @@ fn fan_control_thread(inputs: FanControlInputs) {
                     }
                     let stop = dev.stop_pwm();
                     let mapped = map_stop(&speeds, stop);
-                    if let Err(err) = dev.set_fan_speeds(&mapped) {
-                        warn!("Failed to set fan speeds for {device_id}: {err}");
-                    }
+                    failures.record(device_id, "set fan speeds", dev.set_fan_speeds(&mapped));
                     if dev.has_pump_control() {
-                        if let Err(err) = dev.set_pump_speed(mapped[3]) {
-                            warn!("Failed to set pump speed for {device_id}: {err}");
-                        }
+                        failures.record(device_id, "set pump speed", dev.set_pump_speed(mapped[3]));
                     }
                 } else {
-                    warn!("Fan group {group_idx}: device '{device_id}' not found");
+                    failures.record(device_id, "set fan speeds", Err("device not found"));
                 }
             } else {
                 if let Some(ref w) = wireless {
-                    if let Err(err) = w.set_fan_speeds(group_idx as u8, &speeds) {
-                        warn!("Failed to set fan speeds for wireless device {group_idx}: {err}");
-                    }
+                    failures.record(
+                        &format!("wireless group {group_idx}"),
+                        "set fan speeds",
+                        w.set_fan_speeds(group_idx as u8, &speeds),
+                    );
                     if pwm_changed {
                         wireless_pwm_changed = true;
                     }
@@ -460,6 +463,7 @@ fn apply_wireless_by_id(
     wireless: &Option<Arc<WirelessController>>,
     device_id: &str,
     speeds: &[u8; 4],
+    failures: &mut super::failure_log::FailureLog,
 ) -> bool {
     let Some(w) = wireless else {
         return false;
@@ -467,9 +471,11 @@ fn apply_wireless_by_id(
     let mac_str = device_id.strip_prefix("wireless:").unwrap_or(device_id);
     let devices = w.devices();
     if let Some(dev) = devices.iter().find(|d| d.mac_str() == mac_str) {
-        if let Err(err) = w.set_fan_speeds(dev.list_index, speeds) {
-            warn!("Failed to set fan speeds for {device_id}: {err}");
-        }
+        failures.record(
+            device_id,
+            "set fan speeds",
+            w.set_fan_speeds(dev.list_index, speeds),
+        );
         true
     } else {
         false

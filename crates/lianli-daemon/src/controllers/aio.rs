@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 const TICK: Duration = Duration::from_secs(1);
 
 struct SensorCache {
+    failures: super::failure_log::FailureLog,
     commands: lianli_shared::sensors::CommandSampler,
     resolved: HashMap<SensorSource, ResolvedSensor>,
     temperatures: HashMap<SensorSource, TemperatureState>,
@@ -32,6 +33,7 @@ struct SensorCache {
 impl Default for SensorCache {
     fn default() -> Self {
         Self {
+            failures: super::failure_log::FailureLog::default(),
             commands: lianli_shared::sensors::CommandSampler::default(),
             resolved: HashMap::new(),
             temperatures: HashMap::new(),
@@ -243,6 +245,11 @@ fn control_wireless(
             let sent_at = Instant::now();
             match wireless.switch_to_wireless_theme(&device.mac) {
                 Ok(sequence) => {
+                    sensor_cache.failures.record::<anyhow::Error>(
+                        &device_id,
+                        "switch wireless theme",
+                        Ok(()),
+                    );
                     switched.insert(
                         device.mac,
                         ThemeSwitch {
@@ -253,10 +260,9 @@ fn control_wireless(
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        "AIO {}: switch_to_wireless_theme failed: {e:#}",
-                        device.mac_str()
-                    );
+                    sensor_cache
+                        .failures
+                        .record(&device_id, "switch wireless theme", Err(e));
                 }
             }
         }
@@ -269,9 +275,11 @@ fn control_wireless(
             all_sensors,
             wireless_hold,
         );
-        if let Err(e) = wireless.set_aio_params(&device.mac, &param) {
-            warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
-        }
+        sensor_cache.failures.record(
+            &device_id,
+            "set AIO parameters",
+            wireless.set_aio_params(&device.mac, &param),
+        );
 
         let hold = wireless_hold
             .entry(device.mac)
@@ -292,9 +300,11 @@ fn control_wireless(
         *hold = fan_pwm;
         // All slots device-managed → withhold the RF write entirely.
         if any_target {
-            if let Err(e) = wireless.set_fan_speeds_by_mac(&device.mac, &fan_pwm) {
-                warn!("AIO {}: set_fan_speeds failed: {e:#}", device.mac_str());
-            }
+            sensor_cache.failures.record(
+                &device_id,
+                "set fan speeds",
+                wireless.set_fan_speeds_by_mac(&device.mac, &fan_pwm),
+            );
         }
     }
 }
@@ -363,9 +373,11 @@ fn apply_wired_fans(
     {
         if slot.is_mb_sync() {
             if dev.supports_mb_sync() {
-                if let Err(error) = dev.set_mb_rpm_sync(i as u8, true) {
-                    warn!("AIO {base_id}: setting fan motherboard sync failed: {error:#}");
-                }
+                sensor_cache.failures.record(
+                    base_id,
+                    "set fan motherboard sync",
+                    dev.set_mb_rpm_sync(i as u8, true),
+                );
             }
             continue;
         }
@@ -376,9 +388,11 @@ fn apply_wired_fans(
     if duties.iter().all(Option::is_none) {
         return;
     }
-    if let Err(e) = dev.set_selected_fan_speeds(&duties) {
-        warn!("AIO {base_id}: setting selected fan speeds failed: {e:#}");
-    }
+    sensor_cache.failures.record(
+        base_id,
+        "set fan speeds",
+        dev.set_selected_fan_speeds(&duties),
+    );
 }
 
 fn apply_wired_pump(
@@ -405,25 +419,29 @@ fn apply_wired_pump(
         // Unresolvable MB-sync source: fall back to the device floor, which
         // set_pump_speed_source clamps anyway.
         let duty = percent.map(|p| (p * 2.55) as u8).unwrap_or(0);
-        if let Err(e) = dev.set_pump_speed_source(1, duty) {
-            warn!("AIO {base_id}: set_pump_speed_source failed: {e:#}");
-        }
+        sensor_cache.failures.record(
+            base_id,
+            "set pump motherboard sync",
+            dev.set_pump_speed_source(1, duty),
+        );
         return;
     }
     match pump {
         FanSpeed::Constant(b) => {
-            if let Err(e) = dev.set_pump_speed(*b) {
-                warn!("AIO {base_id}: set_pump_speed failed: {e:#}");
-            }
+            sensor_cache
+                .failures
+                .record(base_id, "set pump speed", dev.set_pump_speed(*b));
         }
         FanSpeed::Curve(_) => {
             if let Some(speed) = resolve_speed(pump, curves, sensor_cache, all_sensors) {
                 // Vendor-faithful chain: curve % → RPM in variant envelope →
                 // RPM→PWM table → write. Implemented driver-side where the
                 // envelope lives.
-                if let Err(e) = dev.set_pump_curve_percent(0, speed.percent) {
-                    warn!("AIO {base_id}: set_pump_curve_percent failed: {e:#}");
-                }
+                sensor_cache.failures.record(
+                    base_id,
+                    "set pump speed",
+                    dev.set_pump_curve_percent(0, speed.percent),
+                );
             }
         }
     }
