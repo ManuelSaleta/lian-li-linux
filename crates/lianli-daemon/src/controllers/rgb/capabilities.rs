@@ -5,6 +5,7 @@ impl RgbController {
         let mut caps = Vec::new();
         for (id, device) in &self.wired {
             let profile = self.render_profile(id);
+            let hardware_regions = device.hardware_regions();
             let software_modes = if self.software_controlled(id) {
                 self.regional_profile(id)
                     .map_or_else(Vec::new, lianli_media::rgb::parameters::modes)
@@ -18,6 +19,7 @@ impl RgbController {
                 }
             }
             caps.push(RgbDeviceCapabilities {
+                hardware_group_effects: !hardware_regions.is_empty(),
                 group_effect_modes: device.group_effect_modes(),
                 zone_effect_modes: device.zone_effect_modes(),
                 device_id: id.clone(),
@@ -28,12 +30,18 @@ impl RgbController {
                 device_name: device.device_name(),
                 supported_modes: modes,
                 software_modes,
-                effect_regions: self
-                    .regional_profile(id)
-                    .map_or_else(Vec::new, lianli_media::rgb::parameters::scopes),
+                effect_regions: if hardware_regions.is_empty() {
+                    self.regional_profile(id)
+                        .map_or_else(Vec::new, lianli_media::rgb::parameters::scopes)
+                } else {
+                    hardware_regions.iter().map(|region| region.scope).collect()
+                },
                 render_profile: profile,
-                region_parameters: profile
-                    .map_or_else(Vec::new, lianli_media::rgb::parameters::for_regions),
+                region_parameters: if hardware_regions.is_empty() {
+                    profile.map_or_else(Vec::new, lianli_media::rgb::parameters::for_regions)
+                } else {
+                    hardware_regions
+                },
                 effect_parameters: profile
                     .map_or_else(Vec::new, lianli_media::rgb::parameters::for_profile),
                 zones: device.zone_info(),
@@ -77,6 +85,7 @@ impl RgbController {
             let mut supported_modes = software_modes.clone();
             supported_modes.push(RgbMode::Direct);
             caps.push(RgbDeviceCapabilities {
+                hardware_group_effects: false,
                 group_effect_modes: Vec::new(),
                 zone_effect_modes: Vec::new(),
                 device_id: id.clone(),

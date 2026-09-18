@@ -84,6 +84,8 @@ pub enum RgbMode {
     Groove,
     Tunnel,
     BreathingRainbow,
+    StaticColorful,
+    BreathingColorful,
     // Strimer Plus modes
     Snooker,
     BlowUp,
@@ -412,6 +414,8 @@ impl RgbMode {
             Self::Boomerang => "Boomerang",
             Self::CandyBox => "Candy Box",
             Self::Transformation => "Transformation",
+            Self::StaticColorful => "Static corner colors",
+            Self::BreathingColorful => "Breathing corner colors",
         }
     }
 
@@ -763,6 +767,8 @@ pub struct RgbZoneInfo {
 /// RGB capabilities reported per device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RgbDeviceCapabilities {
+    #[serde(default)]
+    pub hardware_group_effects: bool,
     #[serde(default)]
     pub group_effect_modes: Vec<RgbMode>,
     #[serde(default)]

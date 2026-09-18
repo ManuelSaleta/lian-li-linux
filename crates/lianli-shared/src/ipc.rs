@@ -587,3 +587,32 @@ pub struct TelemetrySnapshot {
     #[serde(default)]
     pub pixel_clean_statuses: HashMap<String, PixelCleanStatus>,
 }
+
+#[cfg(test)]
+mod quantity_tests {
+    use super::*;
+
+    #[test]
+    fn set_config_accepts_numeric_ene_port_keys_from_gui_and_wire() {
+        let mut config = serde_json::to_value(AppConfig::default()).unwrap();
+        config["ene6k77"] =
+            serde_json::json!({"6243168001": {"fan_quantities": {"0": 0, "1": 4, "2": 3, "3": 1}}});
+        let request = serde_json::json!({"method": "SetConfig", "params": {"config": config}});
+        for parsed in [
+            serde_json::from_value::<IpcRequest>(request.clone()),
+            serde_json::from_str::<IpcRequest>(&request.to_string()),
+        ] {
+            let IpcRequest::SetConfig { config } = parsed.unwrap() else {
+                panic!("wrong request")
+            };
+            assert_eq!(
+                config.ene6k77["6243168001"].fan_quantities,
+                HashMap::from([(0, 0), (1, 4), (2, 3), (3, 1)])
+            );
+        }
+        let mut malformed = request;
+        malformed["params"]["config"]["ene6k77"]["6243168001"]["fan_quantities"] =
+            serde_json::json!({"hid:6243168001:port2": 3});
+        assert!(serde_json::from_value::<IpcRequest>(malformed).is_err());
+    }
+}

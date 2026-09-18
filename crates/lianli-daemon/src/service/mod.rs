@@ -122,6 +122,7 @@ pub enum DaemonEvent {
     SetEne6k77FanQuantity {
         device_id: String,
         quantity: u8,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     FrameFinished,
     MediaPrepared,
@@ -742,8 +743,10 @@ impl ServiceManager {
                 DaemonEvent::SetEne6k77FanQuantity {
                     device_id,
                     quantity,
+                    reply,
                 } => {
-                    self.handle_set_ene6k77_fan_quantity(&device_id, quantity);
+                    let result = self.handle_set_ene6k77_fan_quantity(&device_id, quantity);
+                    let _ = reply.send(result.map_err(|error| format!("{error:#}")));
                 }
                 DaemonEvent::IpcUpdate => {
                     let ipc_state = self.ipc.state.lock();
@@ -773,6 +776,7 @@ impl ServiceManager {
                             self.start_aio_control();
                         }
                         self.start_openrgb_server();
+                        self.apply_ene6k77_quantities();
                         self.apply_rgb_config();
                         if let Some(ref ta) = self.controllers.thermal_alert {
                             if let Some(ref cfg) = self.config {

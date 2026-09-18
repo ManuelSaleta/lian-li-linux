@@ -231,6 +231,14 @@ impl RgbController {
             anyhow::bail!("RGB device not found: {id}");
         }
         self.applied.remove(id);
+        if let Some((base, _)) = id.rsplit_once(":group") {
+            for sibling in self.wired.keys().filter(|key| {
+                key.rsplit_once(":group")
+                    .is_some_and(|(other, _)| other == base)
+            }) {
+                self.mb_sync_state.insert(sibling.clone(), enabled);
+            }
+        }
         self.mb_sync_state.insert(id.to_owned(), enabled);
         Ok(())
     }

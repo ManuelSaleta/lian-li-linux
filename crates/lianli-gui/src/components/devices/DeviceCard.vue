@@ -9,6 +9,7 @@ import { useLcdStore } from "@/stores/lcd";
 import { useAioStore } from "@/stores/aio";
 import { useConfigStore } from "@/stores/config";
 import { useIpc } from "@/composables/useIpc";
+import { fanQuantityPort, stageFanQuantity } from "@/utils/fanQuantity";
 import {
   FAMILY_DISPLAY,
   familySupportsDisplaySwitch,
@@ -52,30 +53,24 @@ const coolantText = computed(() =>
 
 const pending = computed(() => devices.pending.get(d.value.device_id));
 
-// ── Fan quantity stepper (ENE 6K77) ────────────────────────────────────────
 const supportsFanQuantity = computed(
   () => (d.value.max_fan_quantity ?? 0) > 0 && d.value.has_fan,
 );
 
-const fanQty = computed({
-  get: () => d.value.fan_quantity ?? 0,
-  set: (v: number) => {
-    const clamped = Math.max(0, Math.min(d.value.max_fan_quantity ?? 0, v));
-    devices.pending.set(d.value.device_id, "fan-quantity");
-    fans.scheduleFanQuantity(d.value.device_id, clamped);
-  },
-});
+const quantityPort = computed(() => fanQuantityPort(d.value.device_id));
+const fanQty = computed(() => config.config.ene6k77[d.value.serial ?? ""]?.fan_quantities[quantityPort.value ?? ""] ?? d.value.fan_quantity ?? 0);
 
-// Persist the fan quantity into the ENE6K77 config map for the next save.
 function onFanQty(v: number | null) {
   if (v === null) return;
-  const serial = d.value.serial ?? d.value.device_id;
-  const ene = config.config.ene6k77[serial] ?? { fan_quantities: {} };
-  ene.fan_quantities[d.value.device_id] = v;
-  config.config.ene6k77[serial] = ene;
+  const quantity = stageFanQuantity(config.config, d.value, v);
+  if (quantity === undefined) return;
   config.markDirty();
   devices.pending.set(d.value.device_id, "fan-quantity");
-  fans.scheduleFanQuantity(d.value.device_id, v);
+  const deviceId = d.value.device_id;
+  fans.scheduleFanQuantity(deviceId, quantity, (error) => {
+    devices.pending.clear(deviceId);
+    if (error) message.error(String(error));
+  });
 }
 
 const supportsDisplaySwitch = computed(() =>

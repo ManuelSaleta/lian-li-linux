@@ -1,39 +1,54 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { onScopeDispose, ref } from "vue";
 import { useIpc } from "@/composables/useIpc";
-import { useDebounce } from "@/composables/useDebounce";
+import { useConfigStore } from "@/stores/config";
 import type { FanSpeed } from "@/types";
 
-/**
- * Fan-side effects. The ENE6K77 fan-quantity stepper is debounced 400ms;
- * everything else is sent immediately. Fan speed/PWM changes go through
- * config save (SetConfig) rather than live IPC, matching the Slint GUI.
- */
 export const useFansStore = defineStore("fans", () => {
   const ipc = useIpc();
-
-  // Debounced fan-quantity overrides keyed by device_id.
+  const config = useConfigStore();
   const pendingQuantities = ref<Map<string, number>>(new Map());
+  const callbacks = new Map<string, (error?: unknown) => void>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running: Promise<void> | undefined;
 
-  /**
-   * Debounce a fan-quantity change by 400ms. Rapid stepper clicks collapse
-   * into the final value, then a single SetEne6k77FanQuantity is sent.
-   */
+  async function flushQuantities(): Promise<void> {
+    clearTimeout(timer);
+    if (running) await running;
+    if (!pendingQuantities.value.size) return;
+    running = (async () => {
+      let failure: unknown;
+      while (pendingQuantities.value.size) {
+        const [deviceId, quantity] = pendingQuantities.value.entries().next().value!;
+        const done = callbacks.get(deviceId);
+        pendingQuantities.value.delete(deviceId);
+        callbacks.delete(deviceId);
+        try {
+          await ipc.request("SetEne6k77FanQuantity", { device_id: deviceId, quantity });
+          await config.refreshRgbCapabilities();
+          done?.();
+        } catch (error) {
+          done?.(error);
+          failure ??= error;
+        }
+      }
+      if (failure) throw failure;
+    })();
+    try { await running; } finally { running = undefined; }
+  }
+
+  const unregister = config.registerFlush(flushQuantities);
+  onScopeDispose(() => { clearTimeout(timer); unregister(); });
+
   function scheduleFanQuantity(
     deviceId: string,
     quantity: number,
-    onDone?: () => void,
+    onDone?: (error?: unknown) => void,
   ) {
     pendingQuantities.value.set(deviceId, quantity);
-    const flush = useDebounce(() => {
-      const q = pendingQuantities.value.get(deviceId);
-      if (q === undefined) return;
-      pendingQuantities.value.delete(deviceId);
-      void ipc
-        .request("SetEne6k77FanQuantity", { device_id: deviceId, quantity: q })
-        .finally(() => onDone?.());
-    }, 400);
-    flush();
+    if (onDone) callbacks.set(deviceId, onDone);
+    clearTimeout(timer);
+    timer = setTimeout(() => { void flushQuantities().catch(() => {}); }, 400);
   }
 
   function fanSpeedLabel(speed: FanSpeed, curves: string[]): string {

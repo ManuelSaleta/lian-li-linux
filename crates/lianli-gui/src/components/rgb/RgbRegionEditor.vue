@@ -129,7 +129,8 @@ function patchEffect(patch: Partial<RgbEffect>, flip?: boolean) {
   touchRegion();
 }
 function onColor(index: number, value: RGB | RGBA) {
-  const colors = [...paletteColors.value];
+  const colors = props.cap.hardware_group_effects && perFanColors.value ? [...(current.value?.effect.colors ?? [])] : [...paletteColors.value];
+  while (colors.length <= index) colors.push([0, 0, 0]);
   colors[index] = [value[0], value[1], value[2]];
   patchEffect({ colors });
 }

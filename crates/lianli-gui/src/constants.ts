@@ -183,6 +183,8 @@ export const RGB_MODES: { mode: RgbMode; label: string }[] = [
   { mode: "Groove", label: "Groove" },
   { mode: "Tunnel", label: "Tunnel" },
   { mode: "BreathingRainbow", label: "Breathing Rainbow" },
+  { mode: "StaticColorful", label: "Static corner colors" },
+  { mode: "BreathingColorful", label: "Breathing corner colors" },
   { mode: "Snooker", label: "Snooker" },
   { mode: "BlowUp", label: "Blow Up" },
   { mode: "ShockWave", label: "Shock Wave" },

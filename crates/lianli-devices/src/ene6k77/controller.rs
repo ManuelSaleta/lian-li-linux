@@ -104,7 +104,12 @@ impl Ene6k77Controller {
             bail!("Group index {group} out of range (0-3)");
         }
         let max = self.model.max_fans_per_group();
-        let qty = quantity.min(max);
+        anyhow::ensure!(
+            quantity <= max,
+            "Fan quantity {quantity} exceeds {max} for {}",
+            self.model.name()
+        );
+        let qty = quantity;
 
         let cmd = match self.model {
             Ene6k77Model::AlFan => {
@@ -223,10 +228,21 @@ impl Ene6k77Controller {
         }
     }
 
-    /// Set LED effect for a group.
-    ///
-    /// **NOTE**: ENE uses R,B,G byte order (not R,G,B).
-    pub fn set_group_effect(&self, group: u8, effect: &RgbEffect) -> Result<()> {
+    pub fn set_group_effects(&self, group: u8, effects: &[RgbEffect]) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        for effect in effects {
+            self.write_group_effect(group, effect)?;
+        }
+        self.set_fan_quantity(group, self.fan_quantity(group))?;
+        let frame = self.model.frame_commit_value();
+        self.send_feature(&[REPORT_ID, 0x60, (frame >> 8) as u8, frame as u8])?;
+        thread::sleep(CMD_DELAY);
+        Ok(())
+    }
+
+    fn write_group_effect(&self, group: u8, effect: &RgbEffect) -> Result<()> {
         if group >= 4 {
             bail!("Group index {group} out of range (0-3)");
         }
@@ -295,15 +311,6 @@ impl Ene6k77Controller {
             )?;
         }
 
-        let qty = self.fan_quantity(group);
-        if let Err(e) = self.set_fan_quantity(group, qty) {
-            debug!("re-affirm fan quantity for group {group}: {e:#}");
-        }
-
-        let frame = self.model.frame_commit_value();
-        self.send_feature(&[REPORT_ID, 0x60, (frame >> 8) as u8, frame as u8])?;
-        thread::sleep(CMD_DELAY);
-
         debug!(
             "Set group {group}: colors={:?} speed={speed_byte} dir={dir_byte} brightness={brightness_byte} scope={:?}",
             &effect.colors, effect.scope
@@ -336,43 +343,16 @@ impl Ene6k77Controller {
     }
 
     fn send_ring_colors(&self, port: u8, effect: &RgbEffect, leds_per_fan: usize) -> Result<()> {
-        let max_fans = self.model.max_fans_per_group() as usize;
-        let palette = self.model.palette_size();
-
-        let colors = if matches!(effect.mode, RgbMode::Static | RgbMode::Breathing) {
-            if leds_per_fan == 12 && effect.colors.len() >= 2 {
-                // Outer-ring "colorful" expansion: 4 corners × 3 LEDs each
-                expand_outer_corner(&effect.colors, max_fans)
-            } else {
-                expand_per_led(&effect.colors, max_fans, leds_per_fan)
-            }
-        } else if matches!(effect.mode, RgbMode::Meteor)
-            && matches!(self.model, Ene6k77Model::AlV2Fan)
-        {
-            // ALV2Fan Meteor cycleFill: wrap palette modulo instead of black padding
-            expand_palette_cycle(&effect.colors, max_fans, palette)
-        } else {
-            expand_palette(&effect.colors, max_fans, palette)
-        };
-
+        let colors = ring_colors(self.model, effect, leds_per_fan)?;
         self.send_color_setting(port, &colors)?;
         thread::sleep(CMD_DELAY);
         Ok(())
     }
 
     fn send_color_setting(&self, port: u8, colors: &[[u8; 3]]) -> Result<()> {
-        let mut buf = Vec::with_capacity(2 + colors.len() * 3);
-        buf.push(REPORT_ID);
-        buf.push(0x30 | port);
-        for c in colors {
-            buf.push(c[0]); // R
-            buf.push(c[2]); // B
-            buf.push(c[1]); // G
-        }
-        match self.send_output(&buf) {
-            Ok(()) => debug!("Port {port}: wrote {} color bytes", buf.len()),
-            Err(e) => warn!("Port {port}: color output report failed: {e}"),
-        }
+        let buf = color_report(port, colors);
+        self.send_output(&buf)
+            .with_context(|| format!("Port {port}: color output report failed"))?;
         Ok(())
     }
 
@@ -460,7 +440,12 @@ impl Ene6k77Controller {
 
     fn send_output(&self, data: &[u8]) -> Result<()> {
         let mut dev = self.device.lock();
-        dev.write(data).context("ENE 6K77: send output report")?;
+        let written = dev.write(data).context("ENE 6K77: send output report")?;
+        anyhow::ensure!(
+            written == data.len(),
+            "ENE 6K77: incomplete color report ({written}/{})",
+            data.len()
+        );
         Ok(())
     }
 
@@ -581,16 +566,46 @@ impl FanDevice for Ene6k77Controller {
 fn expand_per_led(ui: &[[u8; 3]], num_fans: usize, leds_per_fan: usize) -> Vec<[u8; 3]> {
     let mut out = vec![[0u8; 3]; num_fans * leds_per_fan];
     for fan in 0..num_fans {
-        let c = ui
-            .get(fan)
-            .copied()
-            .or_else(|| ui.first().copied())
-            .unwrap_or([0, 0, 0]);
+        let c = ui.get(fan).copied().unwrap_or([0, 0, 0]);
         for led in 0..leds_per_fan {
             out[fan * leds_per_fan + led] = c;
         }
     }
     out
+}
+
+fn color_report(port: u8, colors: &[[u8; 3]]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(2 + colors.len() * 3);
+    bytes.extend([REPORT_ID, 0x30 | port]);
+    for &[red, green, blue] in colors {
+        bytes.extend([red, blue, green]);
+    }
+    bytes
+}
+
+fn ring_colors(
+    model: Ene6k77Model,
+    effect: &RgbEffect,
+    leds_per_fan: usize,
+) -> Result<Vec<[u8; 3]>> {
+    let max_fans = model.max_fans_per_group() as usize;
+    let palette = model.palette_size();
+    Ok(match effect.mode {
+        RgbMode::StaticColorful | RgbMode::BreathingColorful => {
+            anyhow::ensure!(
+                leds_per_fan == 12 && matches!(model, Ene6k77Model::AlFan | Ene6k77Model::AlV2Fan),
+                "Corner colors require an AL outer ring"
+            );
+            expand_outer_corner(&effect.colors, max_fans)
+        }
+        RgbMode::Static | RgbMode::Breathing => {
+            expand_per_led(&effect.colors, max_fans, leds_per_fan)
+        }
+        RgbMode::Meteor if model == Ene6k77Model::AlV2Fan => {
+            expand_palette_cycle(&effect.colors, max_fans, palette)
+        }
+        _ => expand_palette(&effect.colors, max_fans, palette),
+    })
 }
 
 fn expand_palette(ui: &[[u8; 3]], num_fans: usize, palette: usize) -> Vec<[u8; 3]> {
@@ -640,7 +655,7 @@ fn map_mode_inner_for(model: Ene6k77Model, mode: RgbMode) -> u8 {
     }
 }
 
-fn map_mode_outer_for(model: Ene6k77Model, mode: RgbMode) -> Option<u8> {
+pub(super) fn map_mode_outer_for(model: Ene6k77Model, mode: RgbMode) -> Option<u8> {
     match model {
         Ene6k77Model::SlInfinity => Some(map_mode_sl_inf(mode)),
         Ene6k77Model::AlFan | Ene6k77Model::AlV2Fan => map_mode_al_outer(model, mode),
@@ -680,6 +695,13 @@ fn map_mode_al_inner(mode: RgbMode) -> u8 {
 }
 
 fn map_mode_al_outer(model: Ene6k77Model, mode: RgbMode) -> Option<u8> {
+    if matches!(model, Ene6k77Model::AlFan | Ene6k77Model::AlV2Fan) {
+        match mode {
+            RgbMode::StaticColorful => return Some(1),
+            RgbMode::BreathingColorful => return Some(2),
+            _ => {}
+        }
+    }
     let byte = match model {
         Ene6k77Model::AlFan => match mode {
             RgbMode::Off => 0,
@@ -776,6 +798,257 @@ fn map_mode_sl_inf(mode: RgbMode) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::RgbDevice;
+    use lianli_transport::{HidTransport, TransportError};
+    use std::sync::Arc;
+
+    type Reports = Arc<Mutex<Vec<Vec<u8>>>>;
+    struct RecordedHid {
+        reports: Reports,
+        fail_colors: bool,
+    }
+
+    impl HidTransport for RecordedHid {
+        fn write(&mut self, data: &[u8]) -> std::result::Result<usize, TransportError> {
+            if self.fail_colors {
+                return Err(TransportError::Write("disconnected".into()));
+            }
+            self.reports.lock().push(data.to_vec());
+            Ok(data.len())
+        }
+        fn send_feature_report(
+            &mut self,
+            data: &[u8],
+        ) -> std::result::Result<usize, TransportError> {
+            self.write(data)
+        }
+        fn read_timeout(
+            &mut self,
+            _: &mut [u8],
+            _: i32,
+        ) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn get_feature_report(
+            &mut self,
+            _: &mut [u8],
+        ) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn get_input_report(&mut self, _: &mut [u8]) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn read_flush(&mut self) {}
+    }
+
+    fn recorded_controller(
+        model: Ene6k77Model,
+        fail_colors: bool,
+    ) -> (Arc<Ene6k77Controller>, Reports) {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let device = Arc::new(Mutex::new(Box::new(RecordedHid {
+            reports: reports.clone(),
+            fail_colors,
+        }) as Box<dyn HidTransport>));
+        (
+            Arc::new(Ene6k77Controller {
+                device,
+                model,
+                pid: 0,
+                firmware: None,
+                fan_quantities: Mutex::new([2; 4]),
+            }),
+            reports,
+        )
+    }
+
+    #[test]
+    fn quantity_packets_keep_each_model_layout_and_reject_invalid_counts() {
+        for (model, expected) in [
+            (Ene6k77Model::SlFan, [0xe0, 0x10, 0x32, 0x23, 0, 0]),
+            (Ene6k77Model::SlRedragon, [0xe0, 0x10, 0x32, 0x23, 0, 0]),
+            (Ene6k77Model::SlV2Fan, [0xe0, 0x10, 0x60, 0x23, 0, 0]),
+            (Ene6k77Model::SlV2aFan, [0xe0, 0x10, 0x60, 0x23, 0, 0]),
+            (Ene6k77Model::AlFan, [0xe0, 0x10, 0x40, 3, 3, 0]),
+            (Ene6k77Model::AlV2Fan, [0xe0, 0x10, 0x60, 3, 3, 0]),
+            (Ene6k77Model::SlInfinity, [0xe0, 0x10, 0x60, 3, 3, 0]),
+        ] {
+            let (controller, reports) = recorded_controller(model, false);
+            assert!(controller.set_fan_quantity(4, 1).is_err());
+            assert!(controller
+                .set_fan_quantity(0, model.max_fans_per_group() + 1)
+                .is_err());
+            assert!(reports.lock().is_empty());
+            controller.set_fan_quantity(2, 3).unwrap();
+            assert_eq!(reports.lock()[0], expected);
+            assert_eq!(controller.fan_quantity(2), 3);
+            controller.set_fan_quantity(2, 0).unwrap();
+            assert!(controller.group_devices()[2].1.zone_info().is_empty());
+        }
+    }
+
+    #[test]
+    fn live_fan_color_updates_preserve_other_fans_and_rings() {
+        let (controller, reports) = recorded_controller(Ene6k77Model::SlInfinity, false);
+        let (_, group) = controller.group_devices().remove(2);
+        group
+            .set_all_effects(&RgbEffect {
+                colors: vec![[1, 2, 3]],
+                ..Default::default()
+            })
+            .unwrap();
+        reports.lock().clear();
+        group
+            .set_zone_effect(
+                1,
+                &RgbEffect {
+                    scope: RgbScope::Outer,
+                    colors: vec![[4, 5, 6]],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let reports = reports.lock();
+        let inner = reports.iter().find(|report| report[1] == 0x34).unwrap();
+        let outer = reports.iter().find(|report| report[1] == 0x35).unwrap();
+        assert_eq!(&inner[2..], [1, 3, 2].repeat(32));
+        assert_eq!(&outer[2..38], [1, 3, 2].repeat(12));
+        assert_eq!(&outer[38..74], [4, 6, 5].repeat(12));
+        assert_eq!(&outer[74..], [1, 3, 2].repeat(24));
+        assert_eq!(reports.iter().filter(|report| report[1] == 0x60).count(), 1);
+        assert_eq!(reports.last().unwrap(), &[0xe0, 0x60, 0, 1]);
+    }
+
+    #[test]
+    fn failed_color_upload_does_not_report_success_or_commit_a_frame() {
+        let (controller, reports) = recorded_controller(Ene6k77Model::SlInfinity, true);
+        assert!(controller.group_devices()[0]
+            .1
+            .set_all_effects(&RgbEffect::default())
+            .is_err());
+        assert!(reports.lock().is_empty());
+    }
+
+    #[test]
+    fn group_capabilities_keep_model_specific_rings_and_palette_limits() {
+        for model in [
+            Ene6k77Model::SlFan,
+            Ene6k77Model::SlRedragon,
+            Ene6k77Model::SlV2Fan,
+            Ene6k77Model::SlV2aFan,
+            Ene6k77Model::SlInfinity,
+            Ene6k77Model::AlFan,
+            Ene6k77Model::AlV2Fan,
+        ] {
+            let (controller, _) = recorded_controller(model, false);
+            let regions = controller.group_devices()[0].1.hardware_regions();
+            assert_eq!(regions.len(), if model.uses_double_port() { 3 } else { 1 });
+            for region in regions {
+                assert_eq!(
+                    region
+                        .effects
+                        .iter()
+                        .any(|p| p.mode == RgbMode::StaticColorful),
+                    region.scope == RgbScope::Outer
+                        && matches!(model, Ene6k77Model::AlFan | Ene6k77Model::AlV2Fan)
+                );
+                let static_mode = region
+                    .effects
+                    .iter()
+                    .find(|p| p.mode == RgbMode::Static)
+                    .unwrap();
+                assert!(static_mode.per_fan_colors);
+                assert_eq!(static_mode.max_colors, 2);
+                let meteor = region
+                    .effects
+                    .iter()
+                    .find(|p| p.mode == RgbMode::Meteor)
+                    .unwrap();
+                assert!(!meteor.per_fan_colors);
+                assert_eq!(meteor.max_colors as usize, model.palette_size());
+            }
+        }
+    }
+
+    #[test]
+    fn dual_ring_static_and_breathing_use_one_color_per_fan() {
+        for model in [
+            Ene6k77Model::AlFan,
+            Ene6k77Model::AlV2Fan,
+            Ene6k77Model::SlInfinity,
+        ] {
+            for mode in [RgbMode::Static, RgbMode::Breathing] {
+                let effect = RgbEffect {
+                    mode,
+                    colors: vec![[1, 2, 3], [4, 5, 6]],
+                    ..Default::default()
+                };
+                for leds in [8, 12] {
+                    let colors = ring_colors(model, &effect, leds).unwrap();
+                    assert_eq!(colors.len(), model.max_fans_per_group() as usize * leds);
+                    assert_eq!(&colors[..leds], vec![[1, 2, 3]; leds]);
+                    assert_eq!(&colors[leds..2 * leds], vec![[4, 5, 6]; leds]);
+                    assert!(colors[2 * leds..].iter().all(|color| *color == [0; 3]));
+                }
+            }
+        }
+        assert_eq!(
+            color_report(3, &[[1, 2, 3], [4, 5, 6]]),
+            [0xe0, 0x33, 1, 3, 2, 4, 6, 5]
+        );
+    }
+
+    #[test]
+    fn corner_colors_are_explicit_and_only_supported_by_al_outer_rings() {
+        for mode in [RgbMode::StaticColorful, RgbMode::BreathingColorful] {
+            let effect = RgbEffect {
+                mode,
+                colors: vec![[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]],
+                ..Default::default()
+            };
+            for model in [Ene6k77Model::AlFan, Ene6k77Model::AlV2Fan] {
+                let colors = ring_colors(model, &effect, 12).unwrap();
+                for fan in colors.as_chunks::<12>().0 {
+                    for (corner, color) in effect.colors.iter().enumerate() {
+                        assert_eq!(&fan[corner * 3..corner * 3 + 3], &[*color; 3]);
+                    }
+                }
+                assert!(ring_colors(model, &effect, 8).is_err());
+            }
+            assert!(ring_colors(Ene6k77Model::SlInfinity, &effect, 12).is_err());
+        }
+    }
+
+    #[test]
+    fn meteor_palette_cycle_fill_is_specific_to_al_v2() {
+        let effect = RgbEffect {
+            mode: RgbMode::Meteor,
+            colors: vec![[1, 2, 3], [4, 5, 6]],
+            ..Default::default()
+        };
+        for model in [
+            Ene6k77Model::AlFan,
+            Ene6k77Model::SlInfinity,
+            Ene6k77Model::AlV2Fan,
+        ] {
+            let colors = ring_colors(model, &effect, 12).unwrap();
+            let width = model.palette_size();
+            assert_eq!(colors.len(), model.max_fans_per_group() as usize * width);
+            for fan in colors.chunks_exact(width) {
+                assert_eq!(&fan[..2], &effect.colors);
+                for (index, color) in fan.iter().enumerate().skip(2) {
+                    assert_eq!(
+                        *color,
+                        if model == Ene6k77Model::AlV2Fan {
+                            effect.colors[index % 2]
+                        } else {
+                            [0; 3]
+                        }
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn slv2_palette_expansion_matches_vendor_byte_count() {
@@ -791,14 +1064,13 @@ mod tests {
     }
 
     #[test]
-    fn slv2_led_expansion_fans_five_and_six_receive_color() {
-        // Fans beyond the user color list receive the first color, not black.
-        let ui = vec![[1, 2, 3]];
+    fn slv2_led_expansion_preserves_fan_colors_and_pads_with_black() {
+        let ui = vec![[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]];
         let out = expand_per_led(&ui, 6, 16);
         assert_eq!(out.len(), 96);
         for fan in 0..6 {
             for led in 0..16 {
-                assert_eq!(out[fan * 16 + led], [1, 2, 3]);
+                assert_eq!(out[fan * 16 + led], ui.get(fan).copied().unwrap_or([0; 3]));
             }
         }
     }

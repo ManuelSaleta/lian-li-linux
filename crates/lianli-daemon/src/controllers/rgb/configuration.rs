@@ -9,6 +9,9 @@ impl RgbController {
         }
         self.prepare_sync(config)?;
         for device in &config.devices {
+            if !device.mb_rgb_sync {
+                self.configured_group_effects(device, &self.presets)?;
+            }
             if device.mb_rgb_sync || !self.software_controlled(&device.device_id) {
                 continue;
             }
@@ -81,13 +84,26 @@ impl RgbController {
                 continue;
             }
             let result = (|| -> anyhow::Result<()> {
+                let mb_rgb_sync = device.mb_rgb_sync
+                    || device
+                        .device_id
+                        .rsplit_once(":group")
+                        .is_some_and(|(base, _)| {
+                            config.devices.iter().any(|sibling| {
+                                sibling.mb_rgb_sync
+                                    && sibling
+                                        .device_id
+                                        .rsplit_once(":group")
+                                        .is_some_and(|(other, _)| other == base)
+                            })
+                        });
                 let preset = device.active_preset.as_ref().and_then(|name| {
                     presets
                         .iter()
                         .find(|preset| &preset.name == name && preset.device_id == device.device_id)
                 });
                 let signature = serde_json::to_string(&(
-                    device.mb_rgb_sync,
+                    mb_rgb_sync,
                     &device.zones,
                     &device.regions,
                     preset.map(|preset| (&preset.zones, &preset.regions)),
@@ -96,11 +112,14 @@ impl RgbController {
                     return Ok(());
                 }
                 self.configured.remove(&device.device_id);
-                if device.mb_rgb_sync {
+                if mb_rgb_sync {
                     self.set_mb_rgb_sync(&device.device_id, true)?;
                 } else if self.software_controlled(&device.device_id) {
                     let next = self.configured_render(device, presets)?;
                     self.apply_render(&device.device_id, next)?;
+                } else if let Some(effects) = self.configured_group_effects(device, presets)? {
+                    self.set_mb_rgb_sync(&device.device_id, false)?;
+                    self.wired[&device.device_id].set_group_effects(&effects)?;
                 } else {
                     for zone in &device.zones {
                         self.set_effect(&device.device_id, zone.zone_index, &zone.effect)?;
@@ -124,6 +143,43 @@ impl RgbController {
                 );
             }
         }
+    }
+
+    fn configured_group_effects(
+        &self,
+        device: &lianli_shared::rgb::RgbDeviceConfig,
+        presets: &[RgbPreset],
+    ) -> anyhow::Result<Option<Vec<RgbEffect>>> {
+        let Some(wired) = self
+            .wired
+            .get(&device.device_id)
+            .filter(|wired| !wired.hardware_regions().is_empty())
+        else {
+            return Ok(None);
+        };
+        let mut effective = device.clone();
+        if let Some(preset) = device.active_preset.as_ref().and_then(|name| {
+            presets
+                .iter()
+                .find(|preset| &preset.name == name && preset.device_id == device.device_id)
+        }) {
+            effective.regions = preset.regions.clone();
+            effective.zones = preset
+                .zones
+                .iter()
+                .filter_map(|zone| {
+                    zone.effect
+                        .clone()
+                        .map(|effect| lianli_shared::rgb::RgbZoneConfig {
+                            zone_index: zone.zone,
+                            effect,
+                            swap_lr: false,
+                            swap_tb: false,
+                        })
+                })
+                .collect();
+        }
+        wired.resolve_group_config(&effective)
     }
 
     fn configured_render(
@@ -243,6 +299,97 @@ mod tests {
             effect_memory: Vec::new(),
             zones: Vec::new(),
         }
+    }
+
+    struct GroupDevice(mpsc::Sender<Vec<RgbEffect>>);
+
+    impl RgbDevice for GroupDevice {
+        fn device_name(&self) -> String {
+            "group".into()
+        }
+        fn supported_modes(&self) -> Vec<RgbMode> {
+            vec![RgbMode::Static]
+        }
+        fn zone_info(&self) -> Vec<RgbZoneInfo> {
+            vec![]
+        }
+        fn set_zone_effect(&self, _: u8, _: &RgbEffect) -> anyhow::Result<()> {
+            anyhow::bail!("independent fan effects are unsupported")
+        }
+        fn hardware_regions(&self) -> Vec<lianli_shared::rgb::RgbRegionParameters> {
+            vec![lianli_shared::rgb::RgbRegionParameters {
+                scope: lianli_shared::rgb::RgbScope::All,
+                effects: vec![],
+            }]
+        }
+        fn resolve_group_config(
+            &self,
+            config: &RgbDeviceConfig,
+        ) -> anyhow::Result<Option<Vec<RgbEffect>>> {
+            Ok(Some(
+                config
+                    .regions
+                    .iter()
+                    .flatten()
+                    .map(|region| region.effect.clone())
+                    .collect(),
+            ))
+        }
+        fn set_group_effects(&self, effects: &[RgbEffect]) -> anyhow::Result<()> {
+            self.0.send(effects.to_vec())?;
+            Ok(())
+        }
+        fn supports_mb_rgb_sync(&self) -> bool {
+            true
+        }
+        fn set_mb_rgb_sync(&self, _: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hardware_groups_apply_presets_once_and_reapply_after_quantity_changes() {
+        let (sender, received) = mpsc::channel();
+        let mut controller = RgbController::new(
+            HashMap::from([(
+                "ene:group0".into(),
+                Arc::new(GroupDevice(sender)) as Arc<dyn RgbDevice>,
+            )]),
+            None,
+        );
+        let mut device = saved_device("ene:group0");
+        device.active_preset = Some("preset".into());
+        let config = RgbAppConfig {
+            devices: vec![device],
+            ..Default::default()
+        };
+        let effects = vec![lianli_shared::rgb::RgbRegionConfig {
+            effect: RgbEffect {
+                colors: vec![[1, 2, 3], [4, 5, 6]],
+                ..Default::default()
+            },
+            flip: false,
+        }];
+        let presets = vec![RgbPreset {
+            name: "preset".into(),
+            device_id: "ene:group0".into(),
+            zones: Vec::new(),
+            regions: Some(effects.clone()),
+        }];
+        controller.apply_config(&config, &presets);
+        assert_eq!(
+            received.try_recv().unwrap(),
+            vec![effects[0].effect.clone()]
+        );
+        controller.apply_config(&config, &presets);
+        assert!(received.try_recv().is_err());
+        controller.invalidate_device_config("ene:group0");
+        controller.apply_config(&config, &presets);
+        assert_eq!(
+            received.try_recv().unwrap(),
+            vec![effects[0].effect.clone()]
+        );
+        controller.stop();
     }
 
     #[test]

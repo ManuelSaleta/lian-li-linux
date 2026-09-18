@@ -55,6 +55,7 @@ watch(
   [devConfig, () => props.cap.zones.length],
   ([cfg]) => {
     const cap = props.cap;
+    if (cap.hardware_group_effects) return;
     const mode = cfg.zones.length > 0 && cfg.zones.every((zone) => zone.effect.mode === "Direct") ? "Direct" : "Static";
     while (cfg.zones.length < cap.zones.length) {
       cfg.zones.push({
@@ -77,16 +78,18 @@ watch(
 );
 
 const mbSync = computed({
-  get: () => devConfig.value.mb_rgb_sync,
+  get: () => props.cap.hardware_group_effects
+    ? config.ensureRgb().devices.some((dev) => dev.mb_rgb_sync && dev.device_id.replace(/:group\d+$/, "") === props.cap.device_id.replace(/:group\d+$/, ""))
+    : devConfig.value.mb_rgb_sync,
   set: (v: boolean) => {
     // MB sync is controller-wide — propagate to all sibling ports.
-    const baseId = props.cap.device_id.split(":port")[0];
+    const baseId = props.cap.device_id.replace(/:(?:port|group)\d+$/, "");
     const rgbCfg = config.ensureRgb();
     for (const dev of rgbCfg.devices) {
-      if (dev.device_id.split(":port")[0] === baseId) {
+      if (dev.device_id.replace(/:(?:port|group)\d+$/, "") === baseId) {
         dev.mb_rgb_sync = v;
         dev.active_preset = null;
-        if (v) {
+        if (v && !props.cap.hardware_group_effects) {
           for (const zone of dev.zones) {
             zone.effect = { ...zone.effect, mode: "Static" };
           }
@@ -175,6 +178,8 @@ const summary = computed(() =>
 
       <!-- When MB sync is active, hide zone config — the motherboard controls RGB -->
       <template v-if="!mbSync">
+        <p v-if="cap.hardware_group_effects" class="muted">Mode, speed, brightness and direction apply to the whole group or ring. Static and Breathing support a separate color for each fan.</p>
+        <p v-if="cap.hardware_group_effects && !devConfig.regions" class="muted">Existing fan settings remain saved. Conflicting effects use the last fan's group settings; compatible Static and Breathing colors are combined. Start group effects below to choose explicit group and ring settings.</p>
         <div v-if="regional || portGroups" class="control-tabs">
           <n-button size="small" :type="controlTab === 'regions' ? 'primary' : 'default'" @click="controlTab = 'regions'">Group effects</n-button>
           <n-button v-if="cap.supports_direct || portGroups" size="small" :type="controlTab === 'direct' ? 'primary' : 'default'" @click="controlTab = 'direct'">Direct / zones</n-button>

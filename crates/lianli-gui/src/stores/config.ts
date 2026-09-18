@@ -96,7 +96,7 @@ export const useConfigStore = defineStore("config", () => {
 
   async function save() {
     // Flush any pending debounced effect requests first.
-    flushRegistry.forEach((fn) => fn());
+    await Promise.all([...flushRegistry].map((fn) => fn()));
     const staged = imported.value;
     if (staged?.copies.length) {
       const current = await ipc.request<LcdTemplate[]>("GetLcdTemplates", null, staged.instance);
@@ -129,8 +129,8 @@ export const useConfigStore = defineStore("config", () => {
   }
 
   // Registry of flush callbacks invoked before save (debounced RGB/direction).
-  const flushRegistry = new Set<() => void>();
-  function registerFlush(fn: () => void) {
+  const flushRegistry = new Set<() => void | Promise<void>>();
+  function registerFlush(fn: () => void | Promise<void>) {
     flushRegistry.add(fn);
     return () => flushRegistry.delete(fn);
   }
@@ -161,6 +161,10 @@ export const useConfigStore = defineStore("config", () => {
 
   function rgbCapsFor(deviceId: string): RgbDeviceCapabilities | undefined {
     return rgbCaps.value.find((c) => c.device_id === deviceId);
+  }
+
+  async function refreshRgbCapabilities() {
+    rgbCaps.value = await ipc.request<RgbDeviceCapabilities[]>("GetRgbCapabilities");
   }
 
   function rgbDeviceConfig(deviceId: string) {
@@ -221,6 +225,7 @@ export const useConfigStore = defineStore("config", () => {
     ensureRgb,
     ensureFans,
     rgbCapsFor,
+    refreshRgbCapabilities,
     rgbDeviceConfig,
     presetsFor,
     aioConfigFor,

@@ -370,6 +370,9 @@ fn handle_request(
         IpcRequest::GetTelemetry => super::system::get_telemetry(state),
 
         IpcRequest::SetConfig { config } => {
+            if let Some(error) = super::fan::validate_quantities(&config, &state.lock().devices) {
+                return IpcResponse::error(error);
+            }
             if let Some(rgb_config) = &config.rgb {
                 if let Some(response) = super::rgb::validate_saved_config(state, rgb_config) {
                     return response;

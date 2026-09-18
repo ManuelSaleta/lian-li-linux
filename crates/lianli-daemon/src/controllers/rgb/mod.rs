@@ -398,6 +398,10 @@ impl RgbController {
         self.clear_pending();
         self.mb_sync_state.clear();
     }
+
+    pub fn invalidate_device_config(&mut self, id: &str) {
+        self.configured.remove(id);
+    }
 }
 
 #[cfg(test)]

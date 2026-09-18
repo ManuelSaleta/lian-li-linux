@@ -298,6 +298,21 @@ pub trait RgbDevice: Send + Sync {
         Vec::new()
     }
 
+    fn hardware_regions(&self) -> Vec<lianli_shared::rgb::RgbRegionParameters> {
+        Vec::new()
+    }
+
+    fn resolve_group_config(
+        &self,
+        _config: &lianli_shared::rgb::RgbDeviceConfig,
+    ) -> Result<Option<Vec<RgbEffect>>> {
+        Ok(None)
+    }
+
+    fn set_group_effects(&self, _effects: &[RgbEffect]) -> Result<()> {
+        anyhow::bail!("Hardware group effects are unsupported")
+    }
+
     fn zone_effect_modes(&self) -> Vec<RgbMode> {
         self.supported_modes()
     }
@@ -488,6 +503,18 @@ pub trait RgbDevice: Send + Sync {
 /// Blanket forwarding impl so any `Arc<T>` can be used as an `RgbDevice`
 /// without per-driver boilerplate.
 impl<T: RgbDevice + ?Sized> RgbDevice for Arc<T> {
+    fn hardware_regions(&self) -> Vec<lianli_shared::rgb::RgbRegionParameters> {
+        (**self).hardware_regions()
+    }
+    fn resolve_group_config(
+        &self,
+        config: &lianli_shared::rgb::RgbDeviceConfig,
+    ) -> Result<Option<Vec<RgbEffect>>> {
+        (**self).resolve_group_config(config)
+    }
+    fn set_group_effects(&self, effects: &[RgbEffect]) -> Result<()> {
+        (**self).set_group_effects(effects)
+    }
     fn device_name(&self) -> String {
         (**self).device_name()
     }
