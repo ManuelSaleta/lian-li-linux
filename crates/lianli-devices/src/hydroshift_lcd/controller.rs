@@ -863,6 +863,10 @@ impl FanDevice for HydroShiftLcdController {
         true
     }
 
+    fn supports_pump_mb_sync(&self) -> bool {
+        true
+    }
+
     fn poll_coolant_temp(&self) -> Option<f32> {
         self.poll_coolant_reading()
             .filter(|reading| reading.observed_at.elapsed() < Duration::from_secs(5))

@@ -361,6 +361,14 @@ fn apply_wired_fans(
         .take(dev.fan_slot_count() as usize)
         .enumerate()
     {
+        if slot.is_mb_sync() {
+            if dev.supports_mb_sync() {
+                if let Err(error) = dev.set_mb_rpm_sync(i as u8, true) {
+                    warn!("AIO {base_id}: setting fan motherboard sync failed: {error:#}");
+                }
+            }
+            continue;
+        }
         if let Some(speed) = resolve_speed(slot, curves, sensor_cache, all_sensors) {
             duties[i] = Some(speed.duty);
         }
@@ -424,7 +432,7 @@ fn apply_wired_pump(
 /// Resolve a [`FanSpeed`] to a concrete target.
 ///
 /// Returns `None` (meaning: do not write) for the reserved "off" key,
-/// and MB-sync entries (handled separately for pumps, unsupported for fans).
+/// and MB-sync entries (handled separately for supported channels).
 fn resolve_speed(
     speed: &FanSpeed,
     curves: &HashMap<String, FanCurve>,
@@ -643,6 +651,7 @@ mod tests {
     struct SelectedFan {
         count: u8,
         writes: Mutex<Vec<(u8, u8)>>,
+        sync: Option<Mutex<Vec<(u8, bool)>>>,
     }
 
     impl FanDevice for SelectedFan {
@@ -658,6 +667,17 @@ mod tests {
         }
         fn fan_slot_count(&self) -> u8 {
             self.count
+        }
+        fn supports_mb_sync(&self) -> bool {
+            self.sync.is_some()
+        }
+        fn set_mb_rpm_sync(&self, slot: u8, enabled: bool) -> anyhow::Result<()> {
+            self.sync
+                .as_ref()
+                .expect("unsupported sync called")
+                .lock()
+                .push((slot, enabled));
+            Ok(())
         }
     }
 
@@ -675,6 +695,7 @@ mod tests {
         let mut device = SelectedFan {
             count: 1,
             writes: Mutex::new(Vec::new()),
+            sync: None,
         };
         let (mut cache, sensors) = fresh_cache();
         apply_wired_fans(
@@ -716,6 +737,30 @@ mod tests {
             &sensors
         )
         .is_none());
+    }
+
+    #[test]
+    fn supported_fan_sync_is_dispatched_instead_of_silently_skipped() {
+        let device = SelectedFan {
+            count: 1,
+            writes: Mutex::new(Vec::new()),
+            sync: Some(Mutex::new(Vec::new())),
+        };
+        let config = AioConfig {
+            fan_speeds: std::array::from_fn(|_| FanSpeed::Curve("__mb_sync__".into())),
+            ..Default::default()
+        };
+        let (mut cache, sensors) = fresh_cache();
+        apply_wired_fans(
+            "test",
+            &device,
+            &config,
+            &HashMap::new(),
+            &mut cache,
+            &sensors,
+        );
+        assert!(device.writes.lock().is_empty());
+        assert_eq!(*device.sync.as_ref().unwrap().lock(), vec![(0, true)]);
     }
 
     fn fresh_cache() -> (SensorCache, Vec<SensorInfo>) {

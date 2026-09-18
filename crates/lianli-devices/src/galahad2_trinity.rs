@@ -12,7 +12,6 @@ use crate::traits::{AioDevice, FanDevice, RgbDevice};
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -86,7 +85,7 @@ pub struct Galahad2TrinityController {
     device: SharedHid,
     model: Galahad2TrinityModel,
     handshake_cache: Mutex<Option<(Galahad2Handshake, Instant)>>,
-    mb_sync: AtomicBool,
+    fan_pwm: Mutex<u8>,
     firmware_version: Mutex<Option<String>>,
 }
 
@@ -101,7 +100,7 @@ impl Galahad2TrinityController {
             device,
             model,
             handshake_cache: Mutex::new(None),
-            mb_sync: AtomicBool::new(false),
+            fan_pwm: Mutex::new(100),
             firmware_version: Mutex::new(None),
         };
 
@@ -357,7 +356,9 @@ impl Galahad2TrinityController {
                 Err(e) => warn!("Galahad2 Trinity handshake refresh failed: {e}"),
             }
         }
-        cached.map(|(hs, _)| hs)
+        cached
+            .filter(|(_, ts)| ts.elapsed() < Duration::from_secs(5))
+            .map(|(hs, _)| hs)
     }
 
     /// Write a fire-and-forget command (no response expected: 0x8a, 0x8b, 0x83, 0x85).
@@ -375,10 +376,12 @@ impl Galahad2TrinityController {
         let copy_len = data.len();
         pkt[5] = copy_len as u8;
         pkt[HEADER_LEN..HEADER_LEN + copy_len].copy_from_slice(data);
-        self.device
+        let written = self
+            .device
             .lock()
             .write(&pkt)
             .context("Galahad2 Trinity: write command")?;
+        anyhow::ensure!(written == pkt.len(), "short Trinity control write");
         Ok(())
     }
 }
@@ -388,8 +391,10 @@ use lianli_shared::fan::duty_to_percent;
 impl FanDevice for Galahad2TrinityController {
     fn set_fan_speed(&self, _slot: u8, duty: u8) -> Result<()> {
         let pwm = duty_to_percent(duty).max(10);
-        let mb = self.mb_sync.load(Ordering::Relaxed) as u8;
+        let mut state = self.fan_pwm.lock();
+        let mb = 0;
         self.send_write_command(CMD_SET_FAN_PWM, &[mb, pwm])?;
+        *state = pwm;
         debug!("Set fan PWM to {pwm}% (mb_sync={mb})");
         Ok(())
     }
@@ -402,8 +407,10 @@ impl FanDevice for Galahad2TrinityController {
     }
 
     fn read_fan_rpm(&self) -> Result<Vec<u16>> {
-        let hs = self.refresh_handshake();
-        Ok(vec![hs.map(|h| h.fan_rpm).unwrap_or(0)])
+        let hs = self
+            .refresh_handshake()
+            .context("Trinity RPM reading unavailable")?;
+        Ok(vec![hs.fan_rpm])
     }
 
     fn fan_slot_count(&self) -> u8 {
@@ -415,7 +422,8 @@ impl FanDevice for Galahad2TrinityController {
     }
 
     fn set_mb_rpm_sync(&self, _port: u8, sync: bool) -> Result<()> {
-        self.mb_sync.store(sync, Ordering::Relaxed);
+        let state = self.fan_pwm.lock();
+        self.send_write_command(CMD_SET_FAN_PWM, &[u8::from(sync), *state])?;
         Ok(())
     }
 
@@ -423,7 +431,16 @@ impl FanDevice for Galahad2TrinityController {
         true
     }
 
+    fn supports_pump_mb_sync(&self) -> bool {
+        true
+    }
+
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
+        self.set_pump_speed_source(0, duty)
+    }
+
+    fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
+        anyhow::ensure!(source <= 1, "invalid Trinity pump source");
         let mut pwm = duty_to_percent(duty);
         let envelope = self.model.pump_envelope();
         let min_pwm = envelope.min_pwm();
@@ -431,7 +448,7 @@ impl FanDevice for Galahad2TrinityController {
             debug!("Pump PWM {pwm}% clamped to variant floor {min_pwm}%");
             pwm = min_pwm;
         }
-        let mb = self.mb_sync.load(Ordering::Relaxed) as u8;
+        let mb = source;
         self.send_write_command(CMD_SET_PUMP_PWM, &[mb, pwm])?;
         debug!(
             "Set pump PWM to {pwm}% (model={}, mb_sync={mb})",
@@ -439,11 +456,15 @@ impl FanDevice for Galahad2TrinityController {
         );
         Ok(())
     }
+
+    fn read_pump_rpm(&self) -> Option<u16> {
+        self.refresh_handshake().map(|hs| hs.pump_rpm)
+    }
 }
 
 impl AioDevice for Galahad2TrinityController {
     fn read_pump_rpm(&self) -> Result<u16> {
-        Ok(self.refresh_handshake().map(|hs| hs.pump_rpm).unwrap_or(0))
+        FanDevice::read_pump_rpm(self).context("Trinity pump RPM unavailable")
     }
 
     fn read_coolant_temp(&self) -> Result<f32> {
@@ -564,5 +585,81 @@ impl crate::registry::DeviceDriver for Galahad2TrinityDriver {
             shared_hid: Some(backend),
             shared_usb: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lianli_transport::{HidTransport, TransportError};
+
+    struct RecordedHid(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl HidTransport for RecordedHid {
+        fn write(&mut self, bytes: &[u8]) -> std::result::Result<usize, TransportError> {
+            self.0.lock().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn read_timeout(
+            &mut self,
+            _: &mut [u8],
+            _: i32,
+        ) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn send_feature_report(&mut self, _: &[u8]) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn get_feature_report(
+            &mut self,
+            _: &mut [u8],
+        ) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn get_input_report(&mut self, _: &mut [u8]) -> std::result::Result<usize, TransportError> {
+            unreachable!()
+        }
+        fn read_flush(&mut self) {}
+    }
+
+    #[test]
+    fn fan_and_pump_sources_are_independent_and_software_reclaims_control() {
+        for model in [
+            Galahad2TrinityModel::Performance,
+            Galahad2TrinityModel::Regular,
+        ] {
+            let reports = Arc::new(Mutex::new(Vec::new()));
+            let controller = Galahad2TrinityController {
+                device: Arc::new(Mutex::new(Box::new(RecordedHid(reports.clone())))),
+                model,
+                handshake_cache: Mutex::new(Some((
+                    Galahad2Handshake {
+                        fan_rpm: 1000,
+                        pump_rpm: 2500,
+                    },
+                    Instant::now(),
+                ))),
+                fan_pwm: Mutex::new(100),
+                firmware_version: Mutex::new(None),
+            };
+            controller.set_mb_rpm_sync(0, true).unwrap();
+            controller.set_pump_speed(255).unwrap();
+            controller.set_pump_speed_source(1, 255).unwrap();
+            controller.set_fan_speed(0, 128).unwrap();
+            controller.set_pump_speed(255).unwrap();
+            let writes = reports.lock();
+            let actual: Vec<_> = writes.iter().map(|p| (p[1], p[5], p[6], p[7])).collect();
+            assert_eq!(
+                actual,
+                vec![
+                    (0x8b, 2, 1, 100),
+                    (0x8a, 2, 0, 100),
+                    (0x8a, 2, 1, 100),
+                    (0x8b, 2, 0, 50),
+                    (0x8a, 2, 0, 100)
+                ]
+            );
+            assert_eq!(FanDevice::read_pump_rpm(&controller), Some(2500));
+        }
     }
 }

@@ -379,6 +379,11 @@ fn handle_request(
                 }
             }
             let mut state = state.lock();
+            if let Some(error) =
+                super::config::validate_aio_modes(&config, state.config.as_ref(), &state.devices)
+            {
+                return IpcResponse::error(error);
+            }
             super::persist_and_notify(&mut state, &tx, "SetConfig", *config)
         }
 

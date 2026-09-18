@@ -79,6 +79,7 @@ fn rpm_to_output(rpm: u16) -> u16 {
 pub struct Hs2OledLedController {
     transport: Mutex<RusbBulk>,
     firmware: Mutex<Option<String>>,
+    pump_source: Mutex<Option<bool>>,
 }
 
 impl Hs2OledLedController {
@@ -92,17 +93,21 @@ impl Hs2OledLedController {
         Ok(Self {
             transport: Mutex::new(transport),
             firmware: Mutex::new(None),
+            pump_source: Mutex::new(None),
         })
     }
 
     fn send_and_read(&self, tx: &[u8; PACKET_SIZE]) -> Result<[u8; PACKET_SIZE]> {
         let transport = self.transport.lock();
-        transport.write(tx, LCD_WRITE_TIMEOUT)?;
+        transport.write_full(tx, LCD_WRITE_TIMEOUT)?;
         let mut rx = [0u8; PACKET_SIZE];
-        match transport.read(&mut rx, LCD_READ_TIMEOUT) {
-            Ok(_) => Ok(rx),
-            Err(_) => Ok(rx), // best-effort read
+        let result = transport.read(&mut rx, LCD_READ_TIMEOUT);
+        if matches!(tx[0], CMD_GET_VER | CMD_GET_TEMP | CMD_GET_PUMP) {
+            let len = result.context("HS2 OLED telemetry read")?;
+            anyhow::ensure!(len >= 3, "short HS2 OLED telemetry response");
         }
+        // The vendor does not define acknowledgement fields for writes.
+        Ok(rx)
     }
 
     /// GetLedVer (0x10) — firmware version.
@@ -160,17 +165,18 @@ impl Hs2OledLedController {
 
     /// SetMBSync (0x64) — inverted: 0=sync on, 1=sync off.
     pub fn set_mb_sync(&self, enabled: bool) -> Result<()> {
-        let tx = [
-            CMD_SET_MB_SYNC,
-            if enabled { 0 } else { 1 },
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
+        let mut source = self.pump_source.lock();
+        self.apply_pump_source(&mut source, enabled)
+    }
+
+    fn apply_pump_source(&self, source: &mut Option<bool>, enabled: bool) -> Result<()> {
+        if *source == Some(enabled) {
+            return Ok(());
+        }
+        *source = None;
+        let tx = pump_source_packet(enabled);
         self.send_and_read(&tx)?;
+        *source = Some(enabled);
         Ok(())
     }
 
@@ -227,6 +233,10 @@ impl Hs2OledLedController {
     }
 }
 
+fn pump_source_packet(motherboard: bool) -> [u8; PACKET_SIZE] {
+    [CMD_SET_MB_SYNC, u8::from(!motherboard), 0, 0, 0, 0, 0, 0]
+}
+
 fn build_rgb_packets(colors: &[[u8; 3]]) -> [[u8; RGB_PACKET_SIZE]; 3] {
     let mut packets = [[0; RGB_PACKET_SIZE]; 3];
     for (chunk, packet) in packets.iter_mut().enumerate() {
@@ -274,11 +284,37 @@ impl FanDevice for Hs2OledLedController {
         true
     }
 
+    fn supports_pump_mb_sync(&self) -> bool {
+        true
+    }
+
     fn set_pump_speed(&self, duty: u8) -> Result<()> {
+        self.set_pump_speed_source(0, duty)
+    }
+
+    fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
+        anyhow::ensure!(source <= 1, "invalid OLED pump source");
+        let mut applied_source = self.pump_source.lock();
+        self.apply_pump_source(&mut applied_source, source == 1)?;
+        if source == 1 {
+            return Ok(());
+        }
         let pct = lianli_shared::fan::duty_to_percent(duty) as f32 / 100.0;
         let rpm = (1600.0 + pct * (2735.0 - 1600.0)).round() as u16;
         let output = rpm_to_output(rpm);
-        self.set_pump_output(output)
+        let result = self.set_pump_output(output);
+        if result.is_err() {
+            *applied_source = None;
+        }
+        result
+    }
+
+    fn read_pump_rpm(&self) -> Option<u16> {
+        self.read_pump_rpm_raw().ok()
+    }
+
+    fn poll_coolant_temp(&self) -> Option<f32> {
+        self.read_temps().ok().map(|(temp, _)| f32::from(temp))
     }
 }
 
@@ -427,7 +463,13 @@ impl crate::registry::DeviceDriver for Hs2OledLedDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_rgb_packets, rpm_to_output, CMD_PUSH_RGB};
+    use super::{build_rgb_packets, pump_source_packet, rpm_to_output, CMD_PUSH_RGB};
+
+    #[test]
+    fn pump_source_uses_inverted_oled_selector() {
+        assert_eq!(pump_source_packet(true), [0x64, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(pump_source_packet(false), [0x64, 1, 0, 0, 0, 0, 0, 0]);
+    }
 
     #[test]
     fn rpm_table_clamps_low() {

@@ -164,6 +164,7 @@ impl ServiceManager {
                 fan_count: None,
                 per_fan_control: None,
                 mb_sync_support: false,
+                pump_mb_sync_support: false,
                 rgb_zone_count: None,
                 screen_width: screen.map(|s| s.width),
                 screen_height: screen.map(|s| s.height),
@@ -293,6 +294,7 @@ impl ServiceManager {
                 fan_count: Some(fan_count),
                 per_fan_control: Some(!is_rgb_only),
                 mb_sync_support: dev.fan_type.supports_hw_mobo_sync(),
+                pump_mb_sync_support: false,
                 rgb_zone_count: Some(rgb_zone_count),
                 screen_width: None,
                 screen_height: None,
@@ -370,6 +372,7 @@ impl ServiceManager {
                 fan_count: Some(dev.fan_count),
                 per_fan_control: None,
                 mb_sync_support: false,
+                pump_mb_sync_support: false,
                 rgb_zone_count: None,
                 screen_width: None,
                 screen_height: None,
@@ -430,16 +433,11 @@ impl ServiceManager {
                 for &(port, count) in &ports {
                     let port_rpms = if per_fan {
                         let end = (offset + count as usize).min(all_rpms.len());
-                        let mut v = all_rpms[offset..end].to_vec();
+                        let v = all_rpms[offset..end].to_vec();
                         offset = end;
                         // AIO pump RPM rides in the last telemetry slot
                         // (GUI reads rpms[fan_count]).
-                        if count > 0 {
-                            if let Some(pump) = dev.read_pump_rpm() {
-                                v.push(pump);
-                            }
-                        }
-                        v
+                        with_pump_rpm(v, count, dev.read_pump_rpm())
                     } else {
                         all_rpms
                             .get(port as usize)
@@ -559,9 +557,38 @@ fn retained_cache_entry(
     Some(d)
 }
 
+fn with_pump_rpm(mut rpms: Vec<u16>, fan_count: u8, pump: Option<u16>) -> Vec<u16> {
+    if let Some(pump) = pump {
+        rpms.resize(usize::from(fan_count), 0);
+        rpms.push(pump);
+    }
+    rpms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pump_telemetry_occupies_its_own_slot_even_without_fans() {
+        assert_eq!(with_pump_rpm(vec![], 0, Some(2500)), vec![2500]);
+        assert_eq!(
+            with_pump_rpm(vec![1000], 3, Some(2500)),
+            vec![1000, 0, 0, 2500]
+        );
+        assert_eq!(with_pump_rpm(vec![1000], 1, None), vec![1000]);
+    }
+
+    #[test]
+    fn older_device_info_defaults_pump_sync_to_unavailable() {
+        let mut value = serde_json::to_value(dev("old", None)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("pump_mb_sync_support");
+        let decoded: DeviceInfo = serde_json::from_value(value).unwrap();
+        assert!(!decoded.pump_mb_sync_support);
+    }
 
     fn dev(device_id: &str, topology_key: Option<&str>) -> DeviceInfo {
         DeviceInfo {
@@ -579,6 +606,7 @@ mod tests {
             fan_count: Some(3),
             per_fan_control: None,
             mb_sync_support: false,
+            pump_mb_sync_support: false,
             rgb_zone_count: None,
             screen_width: None,
             screen_height: None,

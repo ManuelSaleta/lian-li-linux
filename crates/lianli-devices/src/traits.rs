@@ -64,12 +64,14 @@ pub trait FanDevice: Send + Sync {
     /// Set pump speed with an explicit PWM source selector byte
     /// (0 = device MCU, 1 = motherboard). Mirrors the vendor behavior where
     /// motherboard-sync mode still carries the curve-derived PWM alongside
-    /// the source byte. Default: forward to `set_pump_speed`, ignoring the
-    /// source (protocols without a source selector).
+    /// the source byte. Devices without a source selector reject MB mode.
     fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
-        self.set_pump_speed(duty)?;
-        let _ = source;
-        Ok(())
+        anyhow::ensure!(source == 0, "pump motherboard sync is not supported");
+        self.set_pump_speed(duty)
+    }
+
+    fn supports_pump_mb_sync(&self) -> bool {
+        false
     }
 
     /// Set pump speed from a fan-curve's 0-100% output. Implementations with
@@ -175,6 +177,9 @@ impl<T: FanDevice + ?Sized> FanDevice for Arc<T> {
     }
     fn set_pump_speed_source(&self, source: u8, duty: u8) -> Result<()> {
         (**self).set_pump_speed_source(source, duty)
+    }
+    fn supports_pump_mb_sync(&self) -> bool {
+        (**self).supports_pump_mb_sync()
     }
     fn set_pump_curve_percent(&self, source: u8, percent: f32) -> Result<()> {
         (**self).set_pump_curve_percent(source, percent)

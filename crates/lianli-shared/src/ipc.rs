@@ -431,6 +431,8 @@ pub struct DeviceInfo {
     pub fan_count: Option<u8>,
     pub per_fan_control: Option<bool>,
     pub mb_sync_support: bool,
+    #[serde(default)]
+    pub pump_mb_sync_support: bool,
     pub rgb_zone_count: Option<u8>,
     pub screen_width: Option<u32>,
     pub screen_height: Option<u32>,

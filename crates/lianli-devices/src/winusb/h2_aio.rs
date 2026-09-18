@@ -681,6 +681,16 @@ impl FanDevice for H2AioController {
         true
     }
 
+    fn read_pump_rpm(&self) -> Option<u16> {
+        if self.is_wireless_mode() {
+            return None;
+        }
+        self.get_h2_params()
+            .ok()
+            .filter(|p| p.observed_at.elapsed() < Duration::from_secs(5))
+            .map(|p| p.pump_rpm)
+    }
+
     fn poll_coolant_temp(&self) -> Option<f32> {
         self.poll_coolant_reading()
             .filter(|reading| reading.observed_at.elapsed() < Duration::from_secs(5))

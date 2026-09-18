@@ -57,6 +57,7 @@ export interface DeviceInfo {
   fan_count: number | null;
   per_fan_control: boolean | null;
   mb_sync_support: boolean;
+  pump_mb_sync_support?: boolean;
   rgb_zone_count: number | null;
   screen_width: number | null;
   screen_height: number | null;

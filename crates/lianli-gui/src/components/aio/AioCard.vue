@@ -23,7 +23,7 @@ const hasFan = computed(() => props.device.has_fan ?? false);
 
 const pumpRpm = computed(() => {
   const rpms = devices.fanRpms(props.device.device_id);
-  return rpms.length > 0 ? rpms[Math.min(fanCount.value, rpms.length - 1)] : null;
+  return rpms[fanCount.value] ?? null;
 });
 const fanRpms = computed(() => {
   const rpms = devices.fanRpms(props.device.device_id);
@@ -32,9 +32,10 @@ const fanRpms = computed(() => {
 const coolant = computed(() => devices.coolantTemp(props.device.device_id));
 
 const pumpMode = computed(() => speedMode(aio.value.pump_target_rpm));
-const speedOptions = computed(() => buildSpeedOptions());
+const pumpOptions = computed(() => buildSpeedOptions(Boolean(props.device.pump_mb_sync_support)));
+const fanOptions = computed(() => buildSpeedOptions(props.device.mb_sync_support));
 
-function buildSpeedOptions() {
+function buildSpeedOptions(mbSync: boolean) {
   const curves = config.config.fan_curves.map((c) => ({
     label: `Curve: ${c.name}`,
     value: `curve:${c.name}`,
@@ -43,7 +44,7 @@ function buildSpeedOptions() {
     { label: "Off", value: "off" },
     ...curves,
     { label: "Constant PWM", value: "constant" },
-    { label: "MB Sync", value: "__mb_sync__" },
+    ...(mbSync ? [{ label: "MB Sync", value: "__mb_sync__" }] : []),
   ];
 }
 
@@ -144,7 +145,7 @@ const mac = computed(() =>
       <!-- Pump -->
       <div class="field">
         <label class="muted">Pump speed</label>
-        <n-select size="small" :value="pumpMode" :options="speedOptions" :disabled="!hasPump" @update:value="onPumpMode" />
+        <n-select size="small" :value="pumpMode" :options="pumpOptions" :disabled="!hasPump" @update:value="onPumpMode" />
         <LabeledSlider
           v-if="pumpMode === 'constant'"
           :model-value="pumpPwm()"
@@ -153,6 +154,7 @@ const mac = computed(() =>
           @update:model-value="setPumpPwm"
         />
         <span v-if="!hasPump" class="note">Control channel unavailable</span>
+        <span v-else-if="pumpMode === '__mb_sync__' && !device.pump_mb_sync_support" class="note">Saved motherboard sync is unavailable on this device. Choose another mode to control the pump.</span>
       </div>
 
       <!-- Attached fans -->
@@ -161,10 +163,11 @@ const mac = computed(() =>
         <n-select
           size="small"
           :value="speedMode(aio.fan_speeds[slot - 1])"
-          :options="speedOptions"
+          :options="fanOptions"
           :disabled="!hasFan"
           @update:value="(v: string) => onFanMode(slot - 1, v)"
         />
+        <span v-if="speedMode(aio.fan_speeds[slot - 1]) === '__mb_sync__' && !device.mb_sync_support" class="note">Saved motherboard sync is unavailable on this device. Choose another mode to control this fan.</span>
         <LabeledSlider
           v-if="speedMode(aio.fan_speeds[slot - 1]) === 'constant'"
           :model-value="fanPwm(slot - 1)"
