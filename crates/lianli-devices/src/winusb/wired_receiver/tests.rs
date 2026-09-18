@@ -3,6 +3,14 @@ use super::{checked_frame_count, rgb_flash_header, ReceiverParams};
 use lianli_shared::rgb::{RgbPlaybackTiming, RgbRenderFamily, RgbRenderProfile};
 
 #[test]
+fn receiver_responses_cannot_read_zero_filled_missing_fields() {
+    for (command, minimum) in [(0x12, 42), (0x10, 19), (0x13, 2), (0x14, 1)] {
+        assert!(super::validate_response_length(&vec![0; minimum - 1], command).is_err());
+        assert!(super::validate_response_length(&vec![0; minimum], command).is_ok());
+    }
+}
+
+#[test]
 fn accepts_expected_command() {
     assert!(validate_rgb_ack(&[0x18], 0x18).is_ok());
 }

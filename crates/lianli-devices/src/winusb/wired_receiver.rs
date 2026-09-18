@@ -71,6 +71,7 @@ pub struct WiredReceiverController {
     params: ReceiverParams,
     render_family: RgbRenderFamily,
     fan_count: Mutex<u8>,
+    fan_pwm: Mutex<Option<[u8; 4]>>,
     /// True when this receiver chains right-to-left (SL-INF daisy-chain with
     /// `fan_num >= 10`). Per-fan PWM/RGB ordering must be reversed on send.
     is_inf_right_attach: Mutex<bool>,
@@ -110,6 +111,7 @@ impl WiredReceiverController {
             params,
             render_family,
             fan_count: Mutex::new(4),
+            fan_pwm: Mutex::new(None),
             is_inf_right_attach: Mutex::new(false),
             firmware: Mutex::new(None),
             led_buffer: Mutex::new(Vec::new()),
@@ -153,16 +155,18 @@ impl WiredReceiverController {
     }
 
     /// Send a command and read the response (TX+RX pattern).
-    fn send_and_read(&self, tx: &[u8; PACKET_SIZE]) -> Result<[u8; PACKET_SIZE]> {
+    fn send_and_read(&self, tx: &[u8; PACKET_SIZE]) -> Result<Vec<u8>> {
         let transport = self.transport.lock();
         transport
-            .write(tx, LCD_WRITE_TIMEOUT)
+            .write_full(tx, LCD_WRITE_TIMEOUT)
             .context("wired receiver write")?;
         let mut rx = [0u8; PACKET_SIZE];
-        transport
+        let len = transport
             .read(&mut rx, LCD_READ_TIMEOUT)
             .context("wired receiver read")?;
-        Ok(rx)
+        let response = &rx[..len];
+        validate_response_length(response, tx[0])?;
+        Ok(response.to_vec())
     }
 
     /// GetInfo (0x12) — full status blob with MAC, fans, RPM, firmware.
@@ -170,6 +174,8 @@ impl WiredReceiverController {
         let mut tx = [0u8; PACKET_SIZE];
         tx[0] = CMD_GET_INFO;
         let rx = self.send_and_read(&tx)?;
+
+        anyhow::ensure!(rx[0] == CMD_GET_INFO, "unexpected receiver status opcode");
 
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&rx[1..7]);
@@ -219,6 +225,7 @@ impl WiredReceiverController {
         let mut tx = tx;
         tx[0] = CMD_GET_VER;
         let rx = self.send_and_read(&tx)?;
+        anyhow::ensure!(rx[0] == CMD_GET_VER, "unexpected receiver firmware opcode");
         let fw_bytes = &rx[3..19];
         let end = fw_bytes
             .iter()
@@ -227,6 +234,21 @@ impl WiredReceiverController {
         let fw = String::from_utf8_lossy(&fw_bytes[..end]).trim().to_string();
         Ok(fw)
     }
+}
+
+fn validate_response_length(response: &[u8], command: u8) -> Result<()> {
+    let required = match command {
+        CMD_GET_INFO => 42,
+        CMD_GET_VER => 19,
+        CMD_SET_FANS_PWM => 2,
+        _ => 1,
+    };
+    anyhow::ensure!(
+        response.len() >= required,
+        "receiver command {command:#04x}: short response ({} bytes, need {required})",
+        response.len()
+    );
+    Ok(())
 }
 
 pub struct WiredReceiverDriver;
