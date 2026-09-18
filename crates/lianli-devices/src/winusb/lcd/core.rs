@@ -378,6 +378,23 @@ const SLOW_CHUNK_WRITE: Duration = Duration::from_millis(100);
 const WAIT_BUFFER_POLL: Duration = Duration::from_millis(50);
 const WAIT_BUFFER_NO_STOP_CAP: u32 = 600;
 
+pub(crate) struct LcdResponse {
+    bytes: [u8; 512],
+    length: usize,
+}
+
+impl std::ops::Deref for LcdResponse {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes[..self.length]
+    }
+}
+
+fn buffer_level(response: &[u8]) -> Option<u8> {
+    response.get(8).copied()
+}
+
 pub(crate) struct WinUsbLcdCore {
     pub(crate) h264_transferred: Option<Arc<AtomicBool>>,
     transport: SharedTransport,
@@ -634,7 +651,7 @@ impl WinUsbLcdCore {
         bail!("device unresponsive after recovery attempts; re-discovery required")
     }
 
-    fn read_response(&mut self, context: &str) -> Option<[u8; 512]> {
+    fn read_response(&mut self, context: &str) -> Option<LcdResponse> {
         let mut buf = [0u8; 512];
         match self.tx_read(&mut buf) {
             Ok(n) if n > 0 => {
@@ -643,7 +660,10 @@ impl WinUsbLcdCore {
                     &buf[..n.min(32)]
                 );
                 self.tx_read_flush();
-                return Some(buf);
+                return Some(LcdResponse {
+                    bytes: buf,
+                    length: n,
+                });
             }
             Ok(_) => debug!("No response for {context} (timeout)"),
             Err(e) => warn!("Read after {context} failed: {e}"),
@@ -696,7 +716,7 @@ impl WinUsbLcdCore {
             Err(e) => warn!("GetVer write failed: {e}"),
         }
         if let Some(resp) = self.read_response("GetVer") {
-            let fw_bytes = &resp[8..40.min(resp.len())];
+            let fw_bytes = resp.get(8..40.min(resp.len())).unwrap_or_default();
             let end = fw_bytes
                 .iter()
                 .position(|&b| b == 0)
@@ -743,7 +763,7 @@ impl WinUsbLcdCore {
         self.send_command(h, "ClearPng");
     }
 
-    pub(crate) fn stop_clock_resp(&mut self) -> Option<[u8; 512]> {
+    pub(crate) fn stop_clock_resp(&mut self) -> Option<LcdResponse> {
         let h = self.builder.stop_clock_header_winusb();
         match self.tx_write_full(&h) {
             Ok(_) => self.note_write_success(),
@@ -861,8 +881,8 @@ impl WinUsbLcdCore {
         }
 
         let resp = self.read_response("frame ack");
-        if let Some(buf) = resp {
-            if buf[8] > 3 {
+        if let Some(level) = resp.as_deref().and_then(buffer_level) {
+            if level > 3 {
                 self.wait_buffer(2, None);
             }
         }
@@ -927,7 +947,7 @@ impl WinUsbLcdCore {
         match self.tx_read(&mut buf) {
             Ok(n) if n > 0 => {
                 self.tx_read_flush();
-                Some(buf[8])
+                buffer_level(&buf[..n])
             }
             _ => {
                 self.tx_read_flush();
@@ -936,21 +956,19 @@ impl WinUsbLcdCore {
         }
     }
 
-    /// Vendor-faithful: poll QueryBlock every 50ms until the buffer drains to
-    /// `threshold` or less. When a `stop` flag is supplied (H264 streaming) it
-    /// is honoured as the cancellation token; otherwise a safety cap prevents
-    /// an indefinite hang on a wedged device.
-    ///
-    /// Returns the last buffer level read, if any.
+    /// Poll QueryBlock at the vendor cadence, with a total wait bound.
+    /// Returns the last observed level; callers must check the threshold.
     pub(crate) fn wait_buffer(&mut self, threshold: u8, stop: Option<&AtomicBool>) -> Option<u8> {
         let mut iter = 0u32;
         let mut last = None;
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(s) = stop {
-                if s.load(Ordering::Relaxed) {
-                    return last;
-                }
-            } else if iter >= WAIT_BUFFER_NO_STOP_CAP {
+            if lianli_transport::usb::shutting_down()
+                || stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
+            {
+                return last;
+            }
+            if iter >= WAIT_BUFFER_NO_STOP_CAP || Instant::now() >= deadline {
                 debug!("Buffer wait capped after {} polls", WAIT_BUFFER_NO_STOP_CAP);
                 return last;
             }
@@ -1113,13 +1131,18 @@ impl WinUsbLcdCore {
         if let Some(transferred) = &self.h264_transferred {
             transferred.store(true, Ordering::Release);
         }
-        let mut level = resp.map(|buf| buf[8]);
-        if let Some(buf) = resp {
-            if buf[8] > 3 {
-                level = self.wait_buffer(2, Some(stop)).or(level);
-            }
+        let mut level = resp
+            .as_deref()
+            .and_then(buffer_level)
+            .or_else(|| self.query_buffer_level())
+            .context("LCD buffer feedback unavailable or truncated; stopping H.264 playback")?;
+        if level > 3 {
+            level = self
+                .wait_buffer(2, Some(stop))
+                .filter(|level| *level <= 2)
+                .context("LCD buffer did not drain; stopping H.264 playback")?;
         }
-        self.flush_pending_control(level);
+        self.flush_pending_control(Some(level));
         Ok(())
     }
 
@@ -1423,6 +1446,26 @@ mod file_stream_tests {
 
 #[cfg(test)]
 mod h264_negotiation_tests {
+    #[test]
+    fn short_replies_do_not_fabricate_empty_buffer_credit() {
+        for length in 0..9 {
+            let response = super::LcdResponse {
+                bytes: [0; 512],
+                length,
+            };
+            assert_eq!(response.len(), length);
+            assert_eq!(super::buffer_level(&response), None);
+        }
+        let mut bytes = [0; 512];
+        bytes[8] = 4;
+        let response = super::LcdResponse { bytes, length: 9 };
+        assert_eq!(super::buffer_level(&response), Some(4));
+        bytes[8] = 0;
+        assert_eq!(
+            super::buffer_level(&super::LcdResponse { bytes, length: 9 }),
+            Some(0)
+        );
+    }
     use super::*;
 
     fn response(size: u32) -> [u8; 12] {
