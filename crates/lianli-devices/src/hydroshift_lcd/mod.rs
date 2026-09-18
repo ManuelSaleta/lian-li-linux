@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::warn;
 mod controller;
 mod protocol;
+mod responses;
 mod rgb;
 
 pub use controller::{find_au_split, pace_frame, HydroShiftLcdController};

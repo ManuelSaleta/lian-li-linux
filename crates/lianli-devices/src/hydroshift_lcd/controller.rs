@@ -118,6 +118,21 @@ fn read_access_units(
     Ok(())
 }
 
+fn wait_for_initialization(duration: Duration) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        anyhow::ensure!(
+            !lianli_transport::usb::shutting_down(),
+            "AIO initialization cancelled"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
 fn write_a_command_raw(dev: &mut dyn HidTransport, cmd: u8, data: &[u8]) -> Result<()> {
     let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
     if data.len() > max_payload {
@@ -144,7 +159,7 @@ fn try_parse_handshake(buf: &[u8]) -> Option<AioHandshake> {
         return None;
     }
     let data_len = buf[5] as usize;
-    let data = &buf[A_HEADER_LEN..];
+    let data = buf.get(A_HEADER_LEN..A_HEADER_LEN + data_len)?;
     let temp_valid = data_len >= 5 && data[4] != 0;
     let coolant_temp = if data_len >= 7 {
         let integer = data[5] as f32;
@@ -240,10 +255,14 @@ impl HydroShiftLcdController {
         }
         let name = self.variant.name();
         info!("Initializing {name} — waiting 10s for device to settle");
-        thread::sleep(Duration::from_secs(10));
+        wait_for_initialization(Duration::from_secs(10))?;
 
         if self.firmware_version.get().is_none() {
             for attempt in 1..=30u32 {
+                anyhow::ensure!(
+                    !lianli_transport::usb::shutting_down(),
+                    "AIO initialization cancelled"
+                );
                 match self.read_firmware_internal(INIT_READ_TIMEOUT_MS) {
                     Ok(fw) => {
                         let v = parse_firmware_version(&fw);
@@ -258,7 +277,7 @@ impl HydroShiftLcdController {
                         if attempt % 5 == 0 {
                             warn!("Firmware read attempt {attempt}/30 failed: {e:#}");
                         }
-                        thread::sleep(Duration::from_secs(2));
+                        wait_for_initialization(Duration::from_secs(2))?;
                     }
                 }
             }
@@ -279,7 +298,7 @@ impl HydroShiftLcdController {
         let stop = Arc::clone(&self.drain_stop);
         thread::spawn(move || background_reader(device, handshake, stop));
 
-        thread::sleep(Duration::from_secs(2));
+        wait_for_initialization(Duration::from_secs(2))?;
 
         if let Err(e) = self.apply_lcd_settings() {
             warn!("  apply_lcd_settings failed: {e:#}");
@@ -606,81 +625,52 @@ impl HydroShiftLcdController {
 
     fn read_firmware_internal(&self, timeout_ms: i32) -> Result<String> {
         let mut dev = self.device.lock();
-
         write_a_command_raw(&mut *dev, CMD_GET_FIRMWARE, &[])?;
-
-        // Loop reading until we see a firmware response, discarding stale
-        // responses from a previous session (e.g. handshake/reset).
-        let mut buf = [0u8; A_PACKET_SIZE];
-        let version_str = loop {
-            let n = dev
-                .read_timeout(&mut buf, timeout_ms)
-                .context("AIO LCD: read firmware")?;
-
-            if n == 0 {
-                bail!("AIO LCD: no firmware response (timeout after {timeout_ms}ms)");
+        let mut reader = super::responses::ResponseReader::new(timeout_ms);
+        let version = loop {
+            let response = reader.read(|buf, timeout| {
+                dev.read_timeout(buf, timeout)
+                    .context("AIO LCD: read firmware")
+            })?;
+            if response[1] == CMD_GET_FIRMWARE {
+                break super::responses::firmware_text(&response)?;
             }
-
-            debug!("firmware read: {n} bytes, cmd={:#04x}", buf[1]);
-
-            if buf[1] == CMD_GET_FIRMWARE {
-                let data_len = buf[5] as usize;
-                let data = &buf[A_HEADER_LEN..A_HEADER_LEN + data_len.min(58)];
-                break String::from_utf8_lossy(data)
-                    .trim_end_matches('\0')
-                    .to_string();
-            }
-
-            debug!("firmware read: skipping stale response {:#04x}", buf[1]);
         };
-
-        // Response 2 (date/time string) must be consumed to keep buffer in sync.
-        let n2 = dev.read_timeout(&mut buf, timeout_ms).unwrap_or(0);
-        if n2 > 0 {
-            let len2 = buf[5] as usize;
-            let data2 = &buf[A_HEADER_LEN..A_HEADER_LEN + len2.min(58)];
-            debug!(
-                "firmware date: {}",
-                String::from_utf8_lossy(data2).trim_end_matches('\0')
-            );
+        // The date follows the version; consume it within the same deadline.
+        while let Ok(response) = reader.read(|buf, timeout| {
+            dev.read_timeout(buf, timeout)
+                .context("AIO LCD: read firmware date")
+        }) {
+            if response[1] == CMD_GET_FIRMWARE {
+                let date = super::responses::firmware_text(&response)?;
+                debug!("firmware date: {date}");
+                break;
+            }
         }
-
-        Ok(version_str)
+        anyhow::ensure!(
+            !lianli_transport::usb::shutting_down(),
+            "AIO firmware read cancelled"
+        );
+        Ok(version)
     }
 
     fn send_a_command(&self, cmd: u8, data: &[u8], timeout_ms: i32) -> Result<Vec<u8>> {
         let mut dev = self.device.lock();
         write_a_command_raw(&mut *dev, cmd, data)?;
-
-        let mut buf = [0u8; A_PACKET_SIZE];
+        let mut reader = super::responses::ResponseReader::new(timeout_ms);
         loop {
-            let n = dev
-                .read_timeout(&mut buf, timeout_ms)
-                .context("AIO LCD: read A-response")?;
-
-            if n == 0 {
-                bail!(
-                    "AIO LCD: no response to A-command {cmd:#04x} (timeout after {timeout_ms}ms)"
-                );
+            let response = reader.read(|buf, timeout| {
+                dev.read_timeout(buf, timeout)
+                    .context("AIO LCD: read A-response")
+            })?;
+            if response[1] == cmd {
+                return Ok(response);
             }
-
-            if buf[1] == cmd {
-                debug!(
-                    "A-cmd {cmd:#04x}: response {n} bytes, raw={:02x?}",
-                    &buf[..n.min(20)]
-                );
-                return Ok(buf[..n].to_vec());
-            }
-
-            if cmd != CMD_HANDSHAKE && buf[1] == CMD_HANDSHAKE {
-                if let Some(hs) = try_parse_handshake(&buf[..n]) {
+            if cmd != CMD_HANDSHAKE && response[1] == CMD_HANDSHAKE {
+                if let Some(hs) = try_parse_handshake(&response) {
                     *self.last_handshake.lock() = Some(hs);
                 }
             }
-            debug!(
-                "A-cmd {cmd:#04x}: skipping non-matching response cmd={:#04x}",
-                buf[1]
-            );
         }
     }
 
@@ -1075,6 +1065,12 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
 mod tests {
     use super::{find_au_split, read_access_units};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn truncated_handshake_cannot_supply_coolant_fields() {
+        let response = [1, super::CMD_HANDSHAKE, 0, 0, 0, 7, 0, 1, 0, 2];
+        assert!(super::try_parse_handshake(&response).is_none());
+    }
 
     #[test]
     fn reader_bounds_unframed_data_and_preserves_final_access_unit() {
