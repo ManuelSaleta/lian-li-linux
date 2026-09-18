@@ -169,7 +169,16 @@ output-configuration client. A compositor that rejects partial configuration
 fails setup and cleans up the owned output.
 
 Position is controlled by Hyprland's monitor rules and automatic layout. The
-capture connection does not set a Wayland position override, because Hyprland
+generated `LianLi-…` output name is stable for each display's USB-derived EDID
+identity across daemon restarts and LCD/desktop mode switches. Names change once
+when upgrading from versions that generated random names. Configure your monitor
+rule using the new name. USB serials take priority; displays without serials use
+their USB port path, so moving one to another port changes its identity. If USB
+topology is unavailable, the existing identity fallback uses the USB address and
+cannot guarantee a stable name across reconnection. Duplicate identities are
+reported as a name conflict instead of claiming another worker's output.
+
+The capture connection does not set a Wayland position override, because Hyprland
 would give that override priority over subsequent native layout changes.
 
 Capture composites the cursor, requests a full initial frame and then waits for

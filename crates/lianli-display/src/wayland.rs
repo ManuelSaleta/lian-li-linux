@@ -51,7 +51,7 @@ impl HyprlandCapture {
             state.check_error()?;
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Desktop setup cancelled");
-        let output = control.create_output()?;
+        let output = control.create_output(&request.edid)?;
         state.serial = None;
         state.target_name = output.name().to_owned();
         let mut capture = Self {

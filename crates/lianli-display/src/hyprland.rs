@@ -111,11 +111,11 @@ impl Control {
             .context("Invalid Hyprland monitor response")
     }
 
-    pub fn create_output(&self) -> Result<OwnedOutput> {
-        let name = unique_name()?;
+    pub fn create_output(&self, edid: &[u8]) -> Result<OwnedOutput> {
+        let name = output_name(edid)?;
         ensure!(
             !self.monitors()?.iter().any(|monitor| monitor.name == name),
-            "Headless output name is already in use"
+            "Headless output {name} is already in use; another worker or a duplicate display identity owns this name"
         );
         let mut output = OwnedOutput {
             journal: Journal::create(self, &name)?,
@@ -240,11 +240,17 @@ fn validate_version(version: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn unique_name() -> Result<String> {
-    let mut random = [0; 12];
-    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+fn output_name(edid: &[u8]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    ensure!(matches!(edid.len(), 128 | 256), "Unsupported EDID size");
+    ensure!(
+        edid[12..16] != [0; 4],
+        "Display has no stable EDID identity"
+    );
+    // TURZX injects its USB-derived serial here; modes and checksums may change.
+    let digest = Sha256::digest(&edid[8..16]);
     let mut name = String::from("LianLi-");
-    for byte in random {
+    for byte in &digest[..12] {
         use std::fmt::Write;
         write!(name, "{byte:02x}")?;
     }
@@ -313,6 +319,23 @@ fn exchange(stream: &mut UnixStream, mut command: &[u8], deadline: Instant) -> R
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn output_names_follow_device_identity_not_mode_or_output_lifetime() {
+        let mut edid = [0; 128];
+        edid[8..16].copy_from_slice(&[0x52, 0xb2, 1, 0, 1, 2, 3, 4]);
+        let name = output_name(&edid).unwrap();
+        assert_eq!(name, "LianLi-25dd4e4002ef206dee227b35");
+        assert_eq!(name, output_name(&edid).unwrap());
+        assert_eq!(name.len(), 31);
+        assert!(name[7..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        edid[54..].fill(42);
+        assert_eq!(name, output_name(&edid).unwrap());
+        edid[12] = 2;
+        assert_ne!(name, output_name(&edid).unwrap());
+        assert!(output_name(&[0; 128]).is_err());
+        assert!(output_name(&[0; 15]).is_err());
+    }
 
     #[test]
     fn initialization_sends_version_on_the_first_connection() {
