@@ -597,7 +597,7 @@ function commitName() {
   flex-shrink: 0;
   max-height: 25vh;
   overflow-y: auto;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--border);
 }
 .pane {

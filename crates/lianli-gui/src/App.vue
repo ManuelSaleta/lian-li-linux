@@ -22,7 +22,16 @@ const isSecondaryWindow = computed(
   () => route.name === "editor" || route.name === "browser",
 );
 
+const compactAlert: GlobalThemeOverrides["Alert"] = {
+  padding: "8px",
+  iconSize: "20px",
+  iconMargin: "8px 8px 0 12px",
+  closeMargin: "8px 10px 0 0",
+  lineHeight: "1.5",
+};
+
 const darkOverrides: GlobalThemeOverrides = {
+  Alert: compactAlert,
   common: {
     bodyColor: "#0f1117",
     cardColor: "#1a1d27",
@@ -49,6 +58,7 @@ const darkOverrides: GlobalThemeOverrides = {
 };
 
 const lightOverrides: GlobalThemeOverrides = {
+  Alert: compactAlert,
   common: {
     bodyColor: "#f4f6f9",
     cardColor: "#ffffff",

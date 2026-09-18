@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-shell";
+import { AlertTriangle, CheckCircle2, Info, Loader2 } from "lucide-vue-next";
 import { useIpc } from "@/composables/useIpc";
 import { useDaemonStore } from "@/stores/daemon";
 import type { AssetAccessReport, LcdConfig, LcdTemplate } from "@/types";
@@ -14,6 +15,15 @@ const checking = ref(false);
 const supported = computed(() => daemon.connected && daemon.info?.capabilities.includes("media_access"));
 const hasSelection = computed(() => props.lcds.length > 0 || props.templates.length > 0);
 const selection = computed(() => JSON.stringify({ lcds: props.lcds, templates: props.templates }));
+const summary = computed(() => {
+  if (checking.value) return "Checking file access…";
+  if (error.value) return "File access could not be checked.";
+  if (!daemon.connected) return "Connect to the daemon to check file access.";
+  if (!supported.value) return "Update and restart the daemon to check file access.";
+  if (report.value?.failed) return `${report.value.failed} file access ${report.value.failed === 1 ? "issue" : "issues"}`;
+  if (report.value) return report.value.checked ? `${report.value.checked} media ${report.value.checked === 1 ? "dependency" : "dependencies"} readable` : "No external files to check";
+  return "File access check scheduled…";
+});
 let timer: ReturnType<typeof setTimeout> | undefined;
 let revision = 0;
 let pending = false;
@@ -57,31 +67,46 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="hasSelection" class="media-access">
-    <n-alert v-if="report?.failed" type="warning" title="The daemon cannot use some selected assets">
-      <p>Checked using the {{ daemon.info?.mode }} daemon account (UID {{ report.uid }}). Files and their parent folders must be accessible to that account.</p>
-      <ul>
-        <li v-for="(issue, index) in report.issues" :key="index">
-          {{ issue.owner }}<span v-if="issue.path"> — {{ issue.path }}</span>: {{ issue.error }}
-        </li>
-      </ul>
-      <p v-if="report.failed > report.issues.length">Showing {{ report.issues.length }} of {{ report.failed }} issues.</p>
-      <n-button size="small" @click="open('https://github.com/sgtaziz/lian-li-linux/blob/main/docs/lcd-assets.md')">File access guide</n-button>
-    </n-alert>
-    <p v-else-if="error" role="status">Could not check media access: {{ error }}</p>
-    <p v-else-if="!daemon.connected" class="muted">Connect to the daemon to check selected media access.</p>
-    <p v-else-if="!supported" class="muted">Update and restart the daemon to check selected media access.</p>
-    <div v-if="supported" class="access-actions">
-      <span class="muted" role="status">
-        {{ checking ? "Checking media access…" : report && !report.failed ? `${report.checked} media dependencies readable. Access is checked again when preparing playback.` : "" }}
-      </span>
-      <n-button size="small" :disabled="checking" @click="schedule">Recheck media access</n-button>
+  <div v-if="hasSelection" class="media-access" :class="{ 'has-issues': report?.failed || error }">
+    <div class="access-row">
+      <Loader2 v-if="checking" :size="16" class="status-icon checking" aria-hidden="true" />
+      <AlertTriangle v-else-if="report?.failed || error" :size="16" class="status-icon warning" aria-hidden="true" />
+      <CheckCircle2 v-else-if="report" :size="16" class="status-icon success" aria-hidden="true" />
+      <Info v-else :size="16" class="status-icon" aria-hidden="true" />
+      <span class="access-summary" role="status" aria-live="polite">{{ summary }}</span>
+      <n-button v-if="supported" size="tiny" quaternary :disabled="checking" @click="schedule">Recheck</n-button>
+      <n-button v-if="report?.failed" size="tiny" secondary @click="open('https://github.com/sgtaziz/lian-li-linux/blob/main/docs/lcd-assets.md')">File access guide</n-button>
     </div>
+    <details v-if="report?.failed || error" class="access-details">
+      <summary>View details</summary>
+      <p v-if="error">{{ error }}</p>
+      <template v-if="report?.failed">
+        <p>The {{ daemon.info?.mode }} daemon (UID {{ report.uid }}) needs access to these files and their parent folders.</p>
+        <ul>
+          <li v-for="(issue, index) in report.issues" :key="index">
+            <strong>{{ issue.owner }}</strong><span v-if="issue.path"> — {{ issue.path }}</span>: {{ issue.error }}
+          </li>
+        </ul>
+        <p v-if="report.failed > report.issues.length">Showing {{ report.issues.length }} of {{ report.failed }} issues.</p>
+      </template>
+    </details>
   </div>
 </template>
 
 <style scoped>
-.media-access { overflow-wrap: anywhere; }
-.media-access ul { max-height: 10rem; overflow-y: auto; }
-.access-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-2); }
+.media-access { min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-secondary); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+.has-issues { border-left: 3px solid var(--warning); }
+.access-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: 22px; }
+.access-summary { flex: 1; min-width: 160px; }
+.status-icon { flex-shrink: 0; }
+.warning { color: var(--warning); }
+.success { color: var(--success); }
+.access-details { margin: var(--space-1) 0 0 24px; }
+.access-details summary { cursor: pointer; width: fit-content; color: var(--text-primary); }
+.access-details p { margin: var(--space-2) 0 0; }
+.access-details ul { margin: var(--space-2) 0 0; padding-left: var(--space-4); max-height: 10rem; overflow-y: auto; user-select: text; }
+.access-details li + li { margin-top: var(--space-1); }
+.checking { animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .checking { animation: none; } }
 </style>
