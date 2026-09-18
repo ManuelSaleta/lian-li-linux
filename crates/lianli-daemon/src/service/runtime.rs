@@ -260,6 +260,19 @@ impl std::error::Error for LcdBusy {}
 const LCD_BUSY_WAIT: Duration = Duration::from_millis(100);
 
 impl LcdBackend {
+    pub(super) fn pause_for_wireless_image(&self) -> anyhow::Result<()> {
+        let Self::WinUsb(sender) = self else {
+            anyhow::bail!("H2 wireless image preparation requires its USB LCD worker");
+        };
+        sender.stream_control.cancel();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        sender.send_before(LcdThreadMsg::PausePlayback(send), deadline)?;
+        receive
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|_| anyhow::anyhow!("H2 playback did not stop before wireless upload"))?
+    }
+
     pub(super) fn startup_image_ready(&self) -> anyhow::Result<()> {
         match self {
             Self::Slv3(device) => device.startup_image_ready(),
@@ -551,6 +564,7 @@ impl StreamRestarter {
 }
 
 pub(super) enum LcdThreadMsg {
+    PausePlayback(std::sync::mpsc::SyncSender<anyhow::Result<()>>),
     StartupImage(
         Vec<u8>,
         Arc<AtomicBool>,
@@ -722,6 +736,9 @@ impl ThreadedWinUsbSender {
                 match msg {
                     LcdThreadMsg::StartupImage(jpeg, stop, transfer, reply) => {
                         let _ = reply.send(device.upload_startup_image(&jpeg, &stop, &transfer));
+                    }
+                    LcdThreadMsg::PausePlayback(reply) => {
+                        let _ = reply.send(device.pause_for_wireless_image());
                     }
                     LcdThreadMsg::Frame(data, delivery) => {
                         delivery.submit(|| device.send_frame(&data))

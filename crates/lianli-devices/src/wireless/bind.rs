@@ -31,6 +31,10 @@ impl WirelessController {
 
     fn begin_binding(&self, mac: &[u8; 6]) -> Result<BindingGuard> {
         let _order = self.command_order.lock();
+        anyhow::ensure!(
+            self.picture_target.lock().is_none(),
+            "Wait for the wireless image upload to finish before changing binding"
+        );
         let mut binding = self.binding_mac.lock();
         anyhow::ensure!(
             binding.is_none(),

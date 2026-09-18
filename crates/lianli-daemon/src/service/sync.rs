@@ -300,7 +300,9 @@ impl ServiceManager {
             };
 
             devices.push(DeviceInfo {
-                startup_image: None,
+                startup_image: is_aio
+                    .then(|| lianli_shared::startup_image::capabilities(family))
+                    .flatten(),
                 telemetry: None,
                 device_id: format!("wireless:{}", dev.mac_str()),
                 family,

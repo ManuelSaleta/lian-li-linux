@@ -301,6 +301,10 @@ impl WirelessController {
             "Uploading wireless RGB loop"
         );
         self.tx_recover(|handle| {
+            ensure!(
+                *self.picture_target.lock() != Some(*mac),
+                "Wait for the H2 image upload before uploading RGB"
+            );
             for index in 0..=upload.compressed.len().div_ceil(CHUNK_BYTES) {
                 ensure!(
                     started.elapsed() < Duration::from_secs(3),

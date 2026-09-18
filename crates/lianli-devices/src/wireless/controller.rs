@@ -57,6 +57,7 @@ pub struct WirelessController {
     pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], [u8; 4]>>>,
     pub(super) mb_rgb_targets: MbRgbTargetMap,
     pub(super) command_order: Arc<Mutex<()>>,
+    pub(super) picture_target: Arc<Mutex<Option<[u8; 6]>>>,
     pub(super) binding_mac: Arc<Mutex<Option<[u8; 6]>>>,
     /// Pending commands awaiting device ack, drained by the convergence loop.
     pub(super) pending_commands: Option<PendingQueue>,
@@ -87,6 +88,7 @@ impl Clone for WirelessController {
             desired_effects: Arc::clone(&self.desired_effects),
             mb_rgb_targets: Arc::clone(&self.mb_rgb_targets),
             command_order: Arc::clone(&self.command_order),
+            picture_target: Arc::clone(&self.picture_target),
             binding_mac: Arc::clone(&self.binding_mac),
             pending_commands: self.pending_commands.clone(),
             target_cmd_seqs: self.target_cmd_seqs.clone(),
@@ -119,6 +121,7 @@ impl WirelessController {
             desired_effects: Arc::new(Mutex::new(std::collections::HashMap::new())),
             mb_rgb_targets: Arc::new(Mutex::new(Default::default())),
             command_order: Arc::new(Mutex::new(())),
+            picture_target: Arc::new(Mutex::new(None)),
             binding_mac: Arc::new(Mutex::new(None)),
             pending_commands: Some(pending_commands),
             target_cmd_seqs: Some(target_cmd_seqs),
@@ -402,6 +405,7 @@ impl WirelessController {
                 device_health,
                 Arc::clone(&self.desired_effects),
                 Arc::clone(&self.binding_mac),
+                Arc::clone(&self.picture_target),
                 conv_stop,
             )?);
         }
@@ -747,6 +751,11 @@ impl WirelessController {
     /// Schedules bounded channel correction without waiting for confirmation.
     /// RF commands continue to use each device's reported channel during migration.
     pub fn switch_channel(&self, target: u8) -> Result<()> {
+        let _order = self.command_order.lock();
+        anyhow::ensure!(
+            self.picture_target.lock().is_none(),
+            "Wait for the wireless image upload before changing channels"
+        );
         if !(1..=39).contains(&target) {
             bail!("invalid channel {target}");
         }
@@ -755,13 +764,14 @@ impl WirelessController {
             return Ok(());
         }
         *self.master_channel.lock() = target;
+        drop(_order);
         info!("switching wireless channel {current} -> {target}");
         self.retarget_mischannelled_devices();
         Ok(())
     }
 
     pub(super) fn retarget_mischannelled_devices(&self) {
-        if self.binding_mac.lock().is_some() {
+        if self.binding_mac.lock().is_some() || self.picture_target.lock().is_some() {
             return;
         }
         let master_mac = *self.master_mac.lock();

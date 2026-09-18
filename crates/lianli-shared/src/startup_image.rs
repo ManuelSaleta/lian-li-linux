@@ -12,6 +12,14 @@ pub struct StartupImageCapabilities {
 
 pub fn capabilities(family: DeviceFamily) -> Option<StartupImageCapabilities> {
     use DeviceFamily::*;
+    if family == WirelessAio {
+        return Some(StartupImageCapabilities {
+            width: 480,
+            height: 480,
+            max_jpeg_bytes: 1_048_576,
+            jpeg_target_bytes: Some(20_480),
+        });
+    }
     if !matches!(family, Slv3Lcd | Tlv2Lcd | TlLcd | TlFlexLcd | SlInfFlexLcd) {
         return None;
     }
@@ -86,5 +94,15 @@ mod tests {
                 (400, 400, 101_888)
             );
         }
+    }
+
+    #[test]
+    fn h2_images_use_the_wireless_receiver_budget_only() {
+        let caps = capabilities(DeviceFamily::WirelessAio).unwrap();
+        assert_eq!((caps.width, caps.height), (480, 480));
+        assert_eq!(caps.jpeg_target_bytes, Some(20_480));
+        assert!(capabilities(DeviceFamily::HydroShift2Lcd).is_none());
+        assert!(capabilities(DeviceFamily::HydroShift2LcdDesktop).is_none());
+        assert!(capabilities(DeviceFamily::HydroShift2OledCurveLcd).is_none());
     }
 }

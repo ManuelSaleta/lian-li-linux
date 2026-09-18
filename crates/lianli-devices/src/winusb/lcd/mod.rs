@@ -101,6 +101,16 @@ impl WinUsbLcdDevice {
         self.0.stop_playback()
     }
 
+    pub fn pause_for_wireless_image(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.1, 0xa021 | 0xa034),
+            "Wireless image preparation requires an H2 Circle or Square LCD"
+        );
+        self.stop_playback()?;
+        self.shared_transport().set_needs_init(true);
+        Ok(())
+    }
+
     pub fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
         self.shared_transport().ensure_storage_ready()?;
         self.0.send_frame(frame)

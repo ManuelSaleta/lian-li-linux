@@ -19,7 +19,25 @@ flow. Linux uses an explicit upload action to avoid repeated storage writes.
 Only TLV2 Wireless has hardware-confirmed persistence so far. On the other
 retained models, check the image after a full power cycle before relying on it.
 
-Universal Screen 8.8, Lancool 207, Vision 9.2, HydroShift II Circle/Square and
+HydroShift II Circle and Square also have an **experimental wireless upload**
+on the LCD page. Bind the H2 to the wireless controller first. Keep its USB
+connection in place. This path uses the receiver's
+image-transfer commands and limits the JPEG to 20 KiB. Quality is adjusted
+automatically. Cooling control continues during upload. The daemon matches the
+USB display to the receiver using the H2-reported MAC address, pauses that
+display's media, then restores playback afterward. Missing or ambiguous MAC
+association prevents the upload without affecting unrelated displays.
+Use LCD mode rather than Desktop mode for this operation.
+
+The H2 firmware saves this image as `aio.jpg`, but automatic display after a
+power cycle is not verified. The action reports receiver acknowledgement,
+not verified storage or boot persistence. It does not replace `boot.jpg` or
+the factory logo. Check host exit and a complete screen power cycle before
+relying on the result. Cancellation or a missing acknowledgement stops the
+transfer without submitting its completion packet. An already submitted
+completion packet may still save the image.
+
+Universal Screen 8.8, Lancool 207, Vision 9.2 and
 OLED Curve do not expose startup-image upload in Linux. Their dormant vendor
 SDK helpers do not establish a working application feature. Universal Screen
 hardware testing also showed that uploads to its boot-logo directory did not
@@ -38,7 +56,7 @@ normal playback without repeating the upload. If the screen remains
 unresponsive, power-cycle it. Recovery remains available for earlier failed
 uploads, including devices whose startup-image support has been removed.
 
-JPEG payloads are limited to 101,888 bytes. Images are decoded and re-encoded
+USB startup JPEG payloads are limited to 101,888 bytes. Images are decoded and re-encoded
 at the panel's native size. Choose a simpler image if it exceeds the limit.
 SL/TL wireless LCDs use the vendor's legacy startup path when the revision probe
 has no reply.

@@ -50,7 +50,7 @@ fn load_quarantine(config: &std::path::Path) -> Result<std::collections::HashSet
 }
 
 struct Outcome {
-    target: ActiveTarget,
+    target: Option<ActiveTarget>,
     result: Result<bool>,
     stopped: bool,
     recovery_required: bool,
@@ -221,6 +221,12 @@ impl ServiceManager {
             !self.media_preparation.is_busy(),
             "Wait for LCD media preparation to finish"
         );
+        if let Some(mac) = identity
+            .strip_prefix("wireless:")
+            .and_then(super::parse_mac_str)
+        {
+            return self.start_wireless_startup_image(id, identity, mac, jpeg, cancel, permit);
+        }
         let receiver = self.flex_startup_receiver(&identity)?;
         let fan_devices = self.registry.fan_devices.clone();
         let mut targets = self
@@ -284,7 +290,7 @@ impl ServiceManager {
                 let recovery_required = transfer.close();
                 let receiver_attempted = receiver_transfer.close();
                 Outcome {
-                    target,
+                    target: Some(target),
                     result,
                     stopped,
                     recovery_required: recovery_required || receiver_attempted,
@@ -307,6 +313,119 @@ impl ServiceManager {
         Ok(())
     }
 
+    fn start_wireless_startup_image(
+        &mut self,
+        id: u64,
+        identity: String,
+        mac: [u8; 6],
+        jpeg: Vec<u8>,
+        cancel: Arc<AtomicBool>,
+        permit: Option<Arc<lianli_control::write_gate::ServiceWritePermit>>,
+    ) -> Result<()> {
+        use lianli_shared::device_id::DeviceFamily;
+        ensure!(
+            self.wireless
+                .devices()
+                .iter()
+                .any(|d| d.mac == mac && matches!(d.device_type, 10 | 11)),
+            "A bound HydroShift II Circle or Square is required"
+        );
+        let mut targets = self
+            .targets
+            .try_lock_for(Duration::from_millis(100))
+            .context("LCD targets are busy")?;
+        let mut matching = Vec::new();
+        ensure!(
+            !self
+                .registry
+                .cached_usb_devices
+                .iter()
+                .any(|d| d.vid == 0x1a86 && matches!(d.pid, 0xad20 | 0xad22)),
+            "Switch H2 from Desktop to LCD mode before uploading a startup image"
+        );
+        for (index, target) in targets.iter() {
+            if !self.registry.cached_usb_devices.iter().any(|d| {
+                d.device_id == target.device_identity && d.family == DeviceFamily::HydroShift2Lcd
+            }) {
+                continue;
+            }
+            let linked_mac = self
+                .registry
+                .fan_devices
+                .get(&target.device_identity)
+                .and_then(|device| device.wireless_link_mac());
+            matching.push((*index, linked_mac));
+        }
+        let matching = wireless_target_index(mac, matching)?;
+        let (send, receive) = std::sync::mpsc::sync_channel::<Option<ActiveTarget>>(1);
+        let wireless = self.wireless.clone();
+        let state = self.ipc.state.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("h2-wireless-image".into())
+            .spawn(move || {
+                let mut target = receive.recv().expect("H2 target handoff");
+                let mut stopped = false;
+                let result = (|| {
+                    let caps =
+                        lianli_shared::startup_image::capabilities(DeviceFamily::WirelessAio)
+                            .context("H2 wireless image capability is unavailable")?;
+                    let image = lianli_media::startup_image::prepare(&jpeg, caps)?;
+                    lianli_devices::startup_image::ensure_not_cancelled(&worker_cancel)?;
+                    if let Some(target) = target.as_mut() {
+                        target.stop();
+                        stopped = true;
+                        target.lcd.pause_for_wireless_image()?;
+                    }
+                    lianli_devices::startup_image::ensure_not_cancelled(&worker_cancel)?;
+                    let sent_at = std::time::Instant::now();
+                    let sequence = wireless.switch_to_wireless_theme(&mac)?;
+                    while !wireless.wireless_theme_acked(&mac, sequence, sent_at) {
+                        lianli_devices::startup_image::ensure_not_cancelled(&worker_cancel)?;
+                        ensure!(
+                            sent_at.elapsed() < Duration::from_secs(3),
+                            "H2 did not confirm wireless display mode"
+                        );
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                    if let Some(job) = state
+                        .lock()
+                        .startup_image
+                        .as_mut()
+                        .filter(|job| job.id == id)
+                    {
+                        job.status = StartupImageState::Transferring;
+                    }
+                    wireless.send_aio_pic(&mac, &image, &worker_cancel)?;
+                    Ok(false)
+                })();
+                Outcome {
+                    target,
+                    result,
+                    stopped,
+                    recovery_required: false,
+                }
+            })
+            .context("Starting H2 wireless image worker")?;
+        let target = matching.and_then(|index| targets.remove(&index));
+        if let Err(error) = send.send(target) {
+            if let Some(target) = error.0 {
+                targets.insert(target.index, target);
+            }
+            let _ = worker.join();
+            anyhow::bail!("H2 wireless image worker did not accept the target");
+        }
+        self.startup_image_job = Some(StartupImageJob {
+            id,
+            identity,
+            cancel,
+            worker: Some(worker),
+            _permit: permit,
+        });
+        Ok(())
+    }
+
     pub(super) fn poll_startup_image(&mut self) {
         if !self.startup_image_job.as_ref().is_some_and(|job| {
             job.worker
@@ -318,7 +437,7 @@ impl ServiceManager {
         let mut job = self.startup_image_job.take().expect("finished job");
         let result = job.worker.take().expect("owned worker").join();
         let status = match result {
-            Ok(mut outcome) => {
+            Ok(outcome) => {
                 let status = match &outcome.result {
                     Ok(response_received) => StartupImageState::Transferred {
                         response_received: *response_received,
@@ -334,20 +453,20 @@ impl ServiceManager {
                         },
                     },
                 };
-                if outcome.recovery_required && outcome.result.is_err() {
-                    self.startup_image_quarantine.insert(job.identity.clone());
-                    outcome.target.stop();
-                } else {
-                    if outcome.stopped {
-                        outcome.target.swap_media(
-                            outcome.target.asset.clone(),
-                            outcome.target.custom_h264,
-                            self.tx.clone(),
-                        );
+                if let Some(mut target) = outcome.target {
+                    if outcome.recovery_required && outcome.result.is_err() {
+                        self.startup_image_quarantine.insert(job.identity.clone());
+                        target.stop();
+                    } else {
+                        if outcome.stopped {
+                            target.swap_media(
+                                target.asset.clone(),
+                                target.custom_h264,
+                                self.tx.clone(),
+                            );
+                        }
+                        self.targets.lock().insert(target.index, target);
                     }
-                    self.targets
-                        .lock()
-                        .insert(outcome.target.index, outcome.target);
                 }
                 status
             }
@@ -376,6 +495,26 @@ impl ServiceManager {
     }
 }
 
+fn wireless_target_index(
+    mac: [u8; 6],
+    candidates: impl IntoIterator<Item = (usize, Option<[u8; 6]>)>,
+) -> Result<Option<usize>> {
+    let mut matching = None;
+    for (index, linked_mac) in candidates {
+        let linked_mac = linked_mac.context(
+            "H2 USB-to-wireless identity is not available yet. Wait for device telemetry and retry",
+        )?;
+        if linked_mac == mac {
+            ensure!(
+                matching.is_none(),
+                "Multiple USB displays report the same H2 wireless identity"
+            );
+            matching = Some(index);
+        }
+    }
+    Ok(matching)
+}
+
 fn flex_receiver_slot(
     lcd_pid: u16,
     lcd: &(u8, Vec<u8>),
@@ -398,6 +537,21 @@ fn flex_receiver_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h2_upload_selects_only_the_usb_display_with_the_receiver_mac() {
+        assert_eq!(
+            wireless_target_index([2; 6], [(0, Some([1; 6])), (3, Some([2; 6]))]).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            wireless_target_index([2; 6], [(0, Some([1; 6]))]).unwrap(),
+            None
+        );
+        assert_eq!(wireless_target_index([2; 6], []).unwrap(), None);
+        assert!(wireless_target_index([2; 6], [(0, None)]).is_err());
+        assert!(wireless_target_index([2; 6], [(0, Some([2; 6])), (3, Some([2; 6]))]).is_err());
+    }
 
     #[test]
     fn flex_startup_routing_requires_the_matching_model_and_usb_parent() {

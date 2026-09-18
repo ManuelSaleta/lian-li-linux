@@ -23,6 +23,7 @@ const submitting = ref(false);
 const picking = ref(false);
 const job = ref<Job | null>(null);
 const capabilities = computed(() => props.device.startup_image);
+const wirelessH2 = computed(() => props.device.family === "WirelessAio");
 const busy = computed(() => submitting.value || ["pending", "transferring"].includes(job.value?.status.state ?? ""));
 let timer: ReturnType<typeof setTimeout> | undefined;
 let previewTimer: ReturnType<typeof setTimeout> | undefined;
@@ -155,7 +156,8 @@ onBeforeUnmount(() => { disposed = true; selection++; clearTimeout(timer); clear
   <n-modal v-model:show="show" preset="card" title="Startup Image" style="width: min(760px, 95vw)" :mask-closable="!busy" :closable="!busy" :close-on-esc="!busy">
     <div class="startup-editor">
       <p><strong>{{ device.name }}</strong> · {{ capabilities?.width }} × {{ capabilities?.height }}</p>
-      <p class="hint">Save an image to show at startup. Playback pauses during upload.</p>
+      <p v-if="wirelessH2" class="hint">Experimental H2 wireless upload. USB playback pauses during transfer and resumes afterward. Boot persistence is not verified.</p>
+      <p v-else class="hint">Save an image to show at startup. Playback pauses during upload.</p>
       <p v-if="capabilities?.jpeg_target_bytes" class="hint">JPEG quality is adjusted automatically to fit the panel's {{ capabilities.jpeg_target_bytes.toLocaleString() }}-byte image budget.</p>
       <n-button :disabled="busy || picking" :loading="picking" @click="chooseFile">Choose image…</n-button>
       <div class="preview"><canvas ref="canvas" v-show="image" aria-label="Native-size startup image crop preview" /></div>
@@ -167,8 +169,8 @@ onBeforeUnmount(() => { disposed = true; selection++; clearTimeout(timer); clear
       </template>
       <n-alert v-if="error" type="error">{{ error }}</n-alert>
       <n-alert v-if="job?.status.state === 'failed'" type="error">{{ job.status.message }}</n-alert>
-      <n-alert v-else-if="job?.status.state === 'transferred'" type="info">Image transferred. {{ job.status.response_received ? '' : 'The screen did not confirm the upload. ' }}Power-cycle the screen to check the startup image.</n-alert>
-      <p v-else-if="job?.status.state === 'cancelled'">Cancelled before transfer.</p>
+      <n-alert v-else-if="job?.status.state === 'transferred'" type="info"><template v-if="wirelessH2">Wireless transfer acknowledged. Saving and boot display still need hardware verification.</template><template v-else>Image transferred. {{ job.status.response_received ? '' : 'The screen did not confirm the upload. ' }}Power-cycle the screen to check the startup image.</template></n-alert>
+      <p v-else-if="job?.status.state === 'cancelled'">{{ wirelessH2 ? 'Upload cancelled. An image already submitted may still be saved.' : 'Cancelled before transfer.' }}</p>
       <p v-if="busy">{{ job?.status.state === 'transferring' ? 'Uploading. Keep the screen connected.' : 'Preparing upload…' }}</p>
       <div class="actions">
         <n-button v-if="busy" @click="cancel">Request cancellation</n-button>

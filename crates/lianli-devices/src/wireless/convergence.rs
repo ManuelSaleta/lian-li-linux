@@ -72,6 +72,10 @@ impl WirelessController {
         description: impl Into<String>,
     ) -> Result<()> {
         let _order = self.command_order.lock();
+        ensure!(
+            !matches!(ack, AckSignal::CmdSeq(_)) || *self.picture_target.lock() != Some(device.mac),
+            "A wireless image upload is running for this device"
+        );
         ensure!(self.tx.is_some(), "wireless TX is unavailable");
         ensure!(
             !self.poll_stop.load(Ordering::Acquire),
@@ -132,6 +136,7 @@ impl WirelessController {
         health_map: DeviceHealthMap,
         rgb_targets: RgbTargets,
         binding_mac: BindingMac,
+        picture_target: BindingMac,
         stop: Arc<AtomicBool>,
     ) -> Result<thread::JoinHandle<()>> {
         thread::Builder::new()
@@ -141,7 +146,15 @@ impl WirelessController {
                 while !stop.load(Ordering::SeqCst) {
                     let tick_start = Instant::now();
 
-                    drain_pending(&tx, &queue, &health_map, &rgb_targets, &binding_mac, &stop);
+                    drain_pending(
+                        &tx,
+                        &queue,
+                        &health_map,
+                        &rgb_targets,
+                        &binding_mac,
+                        &picture_target,
+                        &stop,
+                    );
 
                     let elapsed = tick_start.elapsed();
                     if elapsed < TICK_INTERVAL {
@@ -167,6 +180,7 @@ fn drain_pending(
     health_map: &DeviceHealthMap,
     rgb_targets: &RgbTargets,
     binding_mac: &BindingMac,
+    picture_target: &BindingMac,
     stop: &Arc<AtomicBool>,
 ) {
     if lianli_transport::usb::shutting_down() {
@@ -226,7 +240,14 @@ fn drain_pending(
             cmd.last_sent = now;
             let mut obsolete = false;
             let mut attempted = false;
+            let mut deferred = false;
             let result = with_transport_recovery(tx, &super::TX_IDS, "TX", stop, |handle| {
+                if matches!(cmd.ack, AckSignal::CmdSeq(_))
+                    && *picture_target.lock() == Some(cmd.mac)
+                {
+                    deferred = true;
+                    return Ok(());
+                }
                 if binding_blocks_control(binding_mac, health_map, &cmd.mac)
                     || superseded_command(&queue.lock(), &cmd)
                 {
@@ -239,7 +260,9 @@ fn drain_pending(
             if obsolete {
                 continue;
             }
-            account_retry(&mut cmd.remaining_retries, attempted, &result);
+            if !deferred {
+                account_retry(&mut cmd.remaining_retries, attempted, &result);
+            }
             if !result
                 .as_ref()
                 .is_err_and(|error| error.is::<RecoveryBackoff>())

@@ -6,11 +6,13 @@ import { useDevicesStore } from "@/stores/devices";
 import LcdConfigCard from "@/components/lcd/LcdConfigCard.vue";
 import MediaAccessNotice from "@/components/lcd/MediaAccessNotice.vue";
 import ManagedMediaImport from "@/components/lcd/ManagedMediaImport.vue";
+import StartupImageDialog from "@/components/lcd/StartupImageDialog.vue";
 
 const config = useConfigStore();
 const devices = useDevicesStore();
 
 const entries = computed(() => config.config.lcds);
+const wirelessImageDevices = computed(() => devices.list.filter(device => device.family === "WirelessAio" && device.startup_image));
 const selectedTemplates = computed(() => {
   const ids = new Set(entries.value.filter((entry) => entry.type === "custom").map((entry) => entry.template_id));
   return config.templates.filter((template) => ids.has(template.id));
@@ -37,13 +39,18 @@ function addLcd() {
         <template #icon><Plus :size="15" /></template>
         Add LCD
       </n-button>
-      <span v-if="!devices.lcdDevices.length" class="muted">
+      <span v-if="!devices.lcdDevices.length && !wirelessImageDevices.length" class="muted">
         No LCD devices detected.
       </span>
     </div>
 
     <MediaAccessNotice :lcds="entries" :templates="selectedTemplates" />
     <ManagedMediaImport :lcds="entries" :templates="selectedTemplates" />
+
+    <div v-for="device in wirelessImageDevices" :key="device.device_id" class="card page-head">
+      <span>{{ device.name }} · Wireless</span>
+      <StartupImageDialog :device="device" />
+    </div>
 
     <LcdConfigCard
       v-for="(entry, i) in entries"
