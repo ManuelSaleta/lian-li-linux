@@ -12,7 +12,7 @@ export const screenPresets: ScreenPreset[] = [
   { label: "Lancool 207 (1472×720)", width: 1472, height: 720 },
   { label: 'Universal Screen 8.8" (480×1920)', width: 480, height: 1920 },
   { label: 'Vision 9.2" (464×1920)', width: 464, height: 1920 },
-  { label: "Flex LCD (480×480)", width: 480, height: 480 },
+  { label: "Flex LCD (400×400)", width: 400, height: 400 },
 ];
 
 import type { DeviceFamily } from "@/types";
@@ -27,7 +27,9 @@ export function screenSupportsH264(family: DeviceFamily): boolean {
     family === "Galahad2Lcd" ||
     family === "HydroShift2Lcd" ||
     family === "HydroShift2OledCurveLcd" ||
-    family === "UniversalScreen"
+    family === "UniversalScreen" ||
+    family === "TlFlexLcd" ||
+    family === "SlInfFlexLcd"
   );
 }
 
@@ -35,4 +37,3 @@ export function screenSupportsH264(family: DeviceFamily): boolean {
 export function aio512FrameDefault(family: DeviceFamily): boolean {
   return family !== "HydroShiftLcd";
 }
-

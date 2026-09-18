@@ -189,9 +189,9 @@ pub fn screen_presets() -> &'static [ScreenPreset] {
             height: 1920,
         },
         ScreenPreset {
-            label: "Flex LCD (480×480)",
-            width: 480,
-            height: 480,
+            label: "Flex LCD (400×400)",
+            width: 400,
+            height: 400,
         },
     ]
 }

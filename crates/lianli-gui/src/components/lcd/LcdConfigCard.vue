@@ -185,8 +185,6 @@ function commitCommand() {
 const templateOptions = computed(() =>
   config.templates.map((t) => ({ label: t.name, value: t.id })),
 );
-// H264 streaming is gated by the device family's screen capabilities
-// (only the AIO 480×480 LCDs support it) — mirrors screen_info_for(family).h264.
 const deviceSupportsH264 = computed(() =>
   screenSupportsH264(selectedDevice.value?.family ?? ("Ene6k77" as any)),
 );
