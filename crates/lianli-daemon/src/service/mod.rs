@@ -208,8 +208,7 @@ pub struct ServiceManager {
     wireless_rebind_last: HashMap<[u8; 6], Instant>,
     wireless_channel_streak: Option<(u8, u32)>,
     wireless_channel_in_flight: Arc<AtomicBool>,
-    last_poll_mono: Instant,
-    last_poll_wall: std::time::SystemTime,
+    resume_detector: suspend::ResumeDetector,
     restart_requested: bool,
     /// Background controllers (fan/AIO/RGB) and direct-color flush thread.
     controllers: Controllers,
@@ -272,8 +271,7 @@ impl ServiceManager {
             wireless_rebind_last: HashMap::new(),
             wireless_channel_streak: None,
             wireless_channel_in_flight: Arc::new(AtomicBool::new(false)),
-            last_poll_mono: Instant::now(),
-            last_poll_wall: std::time::SystemTime::now(),
+            resume_detector: suspend::ResumeDetector::new(),
             restart_requested: false,
             controllers: Controllers::new(),
             ipc: IpcSubsystem::new(ipc_state),
@@ -354,11 +352,11 @@ impl ServiceManager {
                 self.cleaner_reload_pending = false;
             }
         }
-        let now_mono = Instant::now();
-        let now_wall = std::time::SystemTime::now();
-        let _mono_elapsed = now_mono.duration_since(self.last_poll_mono);
-        self.last_poll_mono = now_mono;
-        self.last_poll_wall = now_wall;
+        if self.resume_detector.poll() {
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(DaemonEvent::SystemResumed);
+            }
+        }
 
         // Rebuild wireless-dependent controllers only after the bound-device
         // count holds stable for 3 consecutive polls.
@@ -534,8 +532,6 @@ impl ServiceManager {
         signals.attach(tx.clone());
 
         self.tx = Some(tx.clone());
-
-        suspend::spawn(tx.clone());
 
         tx.send(DaemonEvent::USBCheck).ok();
         tx.send(DaemonEvent::DevicePoll).ok();
@@ -987,8 +983,6 @@ impl ServiceManager {
                     }
                 }
                 DaemonEvent::SystemResumed => {
-                    info!("System resumed — waiting for USB re-enumeration");
-                    thread::sleep(Duration::from_secs(2));
                     if let Some(rgb) = &self.controllers.rgb {
                         rgb.lock().invalidate_hardware_state();
                     }
