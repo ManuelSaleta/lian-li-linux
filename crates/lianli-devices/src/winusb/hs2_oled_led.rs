@@ -441,6 +441,7 @@ impl crate::registry::DeviceDriver for Hs2OledLedDriver {
             std::sync::Arc::new(Hs2OledLedController::new(rusb::Device::clone(&ctx.device))?);
         let firmware = ctrl.read_firmware().ok();
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: lianli_shared::device_id::DeviceFamily::HydroShift2OledCurveLed,
             capabilities: lianli_shared::device_id::DeviceFamily::HydroShift2OledCurveLed

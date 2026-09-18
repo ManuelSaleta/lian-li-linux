@@ -983,6 +983,9 @@ impl ServiceManager {
                     }
                 }
                 DaemonEvent::SystemResumed => {
+                    for sensor in self.registry.sensor_devices.values() {
+                        sensor.invalidate();
+                    }
                     if let Some(rgb) = &self.controllers.rgb {
                         rgb.lock().invalidate_hardware_state();
                     }

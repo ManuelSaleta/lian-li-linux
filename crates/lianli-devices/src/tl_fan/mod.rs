@@ -54,6 +54,7 @@ impl DeviceDriver for TlFanDriver {
             })
             .collect();
         Ok(OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: DeviceFamily::TlFan,
             capabilities: DeviceFamily::TlFan.capabilities(),

@@ -56,6 +56,7 @@ impl OpenContext {
 /// - Galahad2 Trinity fills `fan` + `rgb` + `aio`.
 /// - Universal Screen 8.8" LED ring fills `rgb` only.
 pub struct OpenedDevice {
+    pub sensors: Option<Box<dyn crate::traits::SensorDevice>>,
     pub id: DeviceId,
     pub family: DeviceFamily,
     pub capabilities: DeviceCapabilities,
@@ -105,6 +106,7 @@ pub trait DeviceDriver: Send + Sync {
 /// in a new module under `drivers/`, implement `DeviceDriver`, and add a
 /// line here.
 pub static REGISTRY: &[&dyn DeviceDriver] = &[
+    &crate::edge_hub::EdgeHubDriver,
     &crate::ene6k77::Ene6k77Driver,
     &crate::tl_fan::TlFanDriver,
     &crate::tl_lcd::TlLcdDriver,

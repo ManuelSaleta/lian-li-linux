@@ -536,6 +536,7 @@ impl crate::registry::DeviceDriver for TlLcdDriver {
         let mut lcd = TlLcdDevice::new(backend);
         crate::traits::LcdDevice::initialize(&mut lcd)?;
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: lianli_shared::device_id::DeviceFamily::TlLcd,
             capabilities: lianli_shared::device_id::DeviceFamily::TlLcd.capabilities(),

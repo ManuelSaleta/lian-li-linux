@@ -6,6 +6,11 @@ use lianli_shared::screen::ScreenInfo;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+pub trait SensorDevice: Send + Sync {
+    fn telemetry(&self) -> lianli_shared::ipc::DeviceTelemetry;
+    fn invalidate(&self);
+}
+
 /// A device that can control fan speeds.
 ///
 /// `duty` values passed to `set_fan_speed`, `set_fan_speeds`, and `set_pump_speed`

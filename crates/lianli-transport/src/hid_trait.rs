@@ -2,6 +2,15 @@ use crate::error::TransportError;
 
 pub trait HidTransport: Send {
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError>;
+    fn write_timeout(
+        &mut self,
+        _data: &[u8],
+        _timeout: std::time::Duration,
+    ) -> Result<usize, TransportError> {
+        Err(TransportError::Other(
+            "bounded HID writes are not supported by this backend".into(),
+        ))
+    }
     fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError>;
     fn send_feature_report(&mut self, data: &[u8]) -> Result<usize, TransportError>;
     fn get_feature_report(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
@@ -13,6 +22,13 @@ pub trait HidTransport: Send {
 }
 
 impl<T: HidTransport + ?Sized> HidTransport for Box<T> {
+    fn write_timeout(
+        &mut self,
+        data: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, TransportError> {
+        (**self).write_timeout(data, timeout)
+    }
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
         (**self).write(data)
     }

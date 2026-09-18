@@ -184,6 +184,7 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
         let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
 
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family,
             capabilities: family.capabilities(),

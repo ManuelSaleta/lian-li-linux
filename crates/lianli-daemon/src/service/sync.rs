@@ -150,6 +150,7 @@ impl ServiceManager {
                 };
 
             cached.push(DeviceInfo {
+                telemetry: None,
                 device_id: device_id.clone(),
                 family: det.family,
                 name: det.name.to_string(),
@@ -280,6 +281,7 @@ impl ServiceManager {
             };
 
             devices.push(DeviceInfo {
+                telemetry: None,
                 device_id: format!("wireless:{}", dev.mac_str()),
                 family,
                 name: dev.fan_type.display_name().to_string(),
@@ -358,6 +360,7 @@ impl ServiceManager {
             };
 
             devices.push(DeviceInfo {
+                telemetry: None,
                 device_id: format!("wireless-unbound:{}", dev.mac_str()),
                 family,
                 name: dev.fan_type.display_name().to_string(),
@@ -410,6 +413,14 @@ impl ServiceManager {
         let mut fan_info: Vec<DeviceInfo> = self.registry.fan_device_info.clone();
         tag_fan_entries(&mut fan_info, &link_mac_of_base);
         devices.extend(fan_info);
+
+        for device in &mut devices {
+            if let Some(sensors) = self.registry.sensor_devices.get(&device.device_id) {
+                let telemetry = sensors.telemetry();
+                device.firmware_version.clone_from(&telemetry.firmware);
+                device.telemetry = Some(telemetry);
+            }
+        }
 
         // Read wired fan RPMs and split per port.
         for (base_id, dev) in self.registry.fan_devices.iter() {
@@ -592,6 +603,7 @@ mod tests {
 
     fn dev(device_id: &str, topology_key: Option<&str>) -> DeviceInfo {
         DeviceInfo {
+            telemetry: None,
             device_id: device_id.to_string(),
             family: DeviceFamily::WiredReceiver,
             name: "Test".to_string(),

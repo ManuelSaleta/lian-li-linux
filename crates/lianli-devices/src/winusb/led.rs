@@ -209,6 +209,7 @@ impl crate::registry::DeviceDriver for WinUsbLedDriver {
         use lianli_shared::device_id::{DeviceCapabilities, DeviceFamily, TransportKind};
         let dev = WinUsbLedDevice::new(ctx.device.clone(), 60, "Universal Screen 8.8\" LED Ring")?;
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: DeviceFamily::UniversalScreenLighting,
             capabilities: DeviceCapabilities::RGB,

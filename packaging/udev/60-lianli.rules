@@ -4,6 +4,10 @@
 
 # --- USB device node permissions (for LibUSB backend + WinUSB bulk devices) ---
 
+# Edge Hub Advanced temperature model
+SUBSYSTEM=="usb", ATTR{idVendor}=="39b0", ATTR{idProduct}=="0101", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="39b0", ATTRS{idProduct}=="0101", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
+
 # Wireless TX dongle
 SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="8040", MODE="0660", GROUP="lianli", TAG+="uaccess", TAG+="lianli"
 # Wireless RX dongle

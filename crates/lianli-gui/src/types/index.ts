@@ -37,12 +37,22 @@ export type DeviceFamily =
   | "SlInfFlexLcd"
   | "WiredReceiver"
   | "HydroShift2OledCurveLcd"
-  | "HydroShift2OledCurveLed";
+  | "HydroShift2OledCurveLed"
+  | "EdgeHub";
 
 export type RGB = [number, number, number];
 export type RGBA = [number, number, number, number];
 
 export interface DeviceInfo {
+  telemetry?: {
+    serial: string | null;
+    firmware: string | null;
+    product_type: number | null;
+    product_subtype: number | null;
+    age_ms: number | null;
+    temperatures: { name: string; celsius: number | null; abnormal: boolean }[];
+    error: string | null;
+  };
   device_id: string;
   family: DeviceFamily;
   name: string;

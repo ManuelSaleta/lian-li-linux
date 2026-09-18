@@ -441,6 +441,7 @@ impl crate::registry::DeviceDriver for StrimerPlusDriver {
         let ctrl = Arc::new(StrimerPlusController::new(backend.clone())?);
         let firmware = ctrl.firmware_str();
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: lianli_shared::device_id::DeviceFamily::StrimerPlus,
             capabilities: lianli_shared::device_id::DeviceFamily::StrimerPlus.capabilities(),

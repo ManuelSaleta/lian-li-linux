@@ -198,6 +198,7 @@ impl crate::registry::DeviceDriver for WinUsbLcdDriver {
         };
 
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family,
             capabilities: family.capabilities(),

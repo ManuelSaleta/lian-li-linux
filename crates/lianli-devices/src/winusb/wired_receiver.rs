@@ -270,6 +270,7 @@ impl crate::registry::DeviceDriver for WiredReceiverDriver {
         let firmware = ctrl.read_firmware().ok();
 
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: lianli_shared::device_id::DeviceFamily::WiredReceiver,
             capabilities: lianli_shared::device_id::DeviceFamily::WiredReceiver.capabilities(),

@@ -382,6 +382,9 @@ impl ServiceManager {
         let present_topos: HashSet<String> =
             usb_devs.iter().map(|det| det.topology_key()).collect();
         fan_devices.retain(|id, _| present_ids.contains(id));
+        self.registry
+            .sensor_devices
+            .retain(|id, _| present_ids.contains(id));
         self.registry.fan_device_info.retain(|info| {
             info.topology_key
                 .as_ref()
@@ -567,6 +570,11 @@ impl ServiceManager {
         } = device;
         let (family, vid, pid) = (*family, *vid, *pid);
         let serial = serial.as_deref();
+        if let Some(sensors) = opened.sensors.take() {
+            self.registry
+                .sensor_devices
+                .insert(base_id.clone(), sensors);
+        }
         if let Some(fan_ctrl) = opened.fan {
             info!("Opened {name} as fan device: {base_id}");
             let supports_quantity = fan_ctrl.supports_fan_quantity();
@@ -604,6 +612,7 @@ impl ServiceManager {
                     name.to_string()
                 };
                 self.registry.fan_device_info.push(DeviceInfo {
+                    telemetry: None,
                     device_id,
                     family,
                     name: dev_name,

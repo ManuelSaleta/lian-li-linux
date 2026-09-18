@@ -148,6 +148,7 @@ use lianli_devices::traits::{FanDevice, LcdDevice};
 use std::collections::{HashMap, HashSet};
 
 pub struct DeviceRegistry {
+    pub sensor_devices: HashMap<String, Box<dyn lianli_devices::traits::SensorDevice>>,
     pub(super) open_workers: super::open_workers::OpenWorkers,
     /// Per-port `DeviceInfo` for wired fan devices (populated by init).
     pub fan_device_info: Vec<DeviceInfo>,
@@ -176,6 +177,7 @@ impl DeviceRegistry {
     pub fn new() -> Self {
         Self {
             open_workers: Default::default(),
+            sensor_devices: HashMap::new(),
             fan_device_info: Vec::new(),
             fan_devices: Arc::new(HashMap::new()),
             hid_backends: HashMap::new(),
@@ -195,6 +197,7 @@ impl DeviceRegistry {
     /// Clear all device state (called on shutdown).
     pub fn clear(&mut self) {
         self.open_workers.finish();
+        self.sensor_devices.clear();
         self.fan_device_info.clear();
         self.fan_devices = Arc::new(HashMap::new());
         self.hid_backends.clear();

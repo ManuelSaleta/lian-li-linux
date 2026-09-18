@@ -348,11 +348,24 @@ impl RusbHid {
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        self.write_timeout(data, Duration::from_millis(5000))
+    }
+
+    pub fn write_timeout(
+        &mut self,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<usize, TransportError> {
+        if timeout.is_zero() {
+            return Err(TransportError::Other(
+                "HID write timeout must be positive".into(),
+            ));
+        }
         self.with_reopen(
             |s| {
                 if let Some(ep_out) = s.ep_out {
                     s.handle
-                        .write_interrupt(ep_out, data, Duration::from_millis(5000))
+                        .write_interrupt(ep_out, data, timeout)
                         .map_err(TransportError::from)
                 } else {
                     // SET_REPORT control transfer: report type = Output (0x02),
@@ -361,14 +374,7 @@ impl RusbHid {
                     let report_type: u16 = 0x02;
                     let w_value = (report_type << 8) | report_id;
                     s.handle
-                        .write_control(
-                            0x21,
-                            0x09,
-                            w_value,
-                            s.iface as u16,
-                            data,
-                            Duration::from_millis(5000),
-                        )
+                        .write_control(0x21, 0x09, w_value, s.iface as u16, data, timeout)
                         .map_err(TransportError::from)
                 }
             },
@@ -508,6 +514,9 @@ fn parse_usage_page(desc: &[u8]) -> Option<u16> {
 }
 
 impl HidTransport for RusbHid {
+    fn write_timeout(&mut self, data: &[u8], timeout: Duration) -> Result<usize, TransportError> {
+        RusbHid::write_timeout(self, data, timeout)
+    }
     fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
         RusbHid::write(self, data)
     }

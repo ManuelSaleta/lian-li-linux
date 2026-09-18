@@ -56,6 +56,7 @@ impl DeviceDriver for Ene6k77Driver {
         let model = ctrl.model().name().to_string();
 
         Ok(OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: DeviceFamily::Ene6k77,
             capabilities: DeviceFamily::Ene6k77.capabilities(),

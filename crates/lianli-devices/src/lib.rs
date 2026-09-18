@@ -1,6 +1,7 @@
 pub mod crypto;
 pub mod detect;
 pub mod display_switcher;
+pub mod edge_hub;
 pub mod ene6k77;
 pub mod galahad2_trinity;
 pub mod hydroshift_lcd;

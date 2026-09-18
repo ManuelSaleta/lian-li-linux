@@ -410,9 +410,29 @@ pub enum WirelessOperationStatus {
     Failed { message: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceTemperature {
+    pub name: String,
+    pub celsius: Option<f32>,
+    pub abnormal: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceTelemetry {
+    pub serial: Option<String>,
+    pub firmware: Option<String>,
+    pub product_type: Option<u8>,
+    pub product_subtype: Option<u8>,
+    pub age_ms: Option<u64>,
+    pub temperatures: Vec<DeviceTemperature>,
+    pub error: Option<String>,
+}
+
 /// Info about a connected device, returned by ListDevices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<DeviceTelemetry>,
     pub device_id: String,
     pub family: DeviceFamily,
     pub name: String,

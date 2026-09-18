@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 /// All supported Lian Li device families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceFamily {
+    EdgeHub,
     /// ENE 6K77 wired fans (SL/AL series) — fan speed via HID
     Ene6k77,
     /// TL Fan controller — fan speed + handshake via HID
@@ -109,6 +110,7 @@ impl DeviceCapabilities {
     pub const DESKTOP_MODE: Self = Self(1 << 6);
     /// Acts as the RF dongle (TX/RX) — special-cased by the wireless layer.
     pub const WIRELESS_DONGLE: Self = Self(1 << 7);
+    pub const TEMPERATURE: Self = Self(1 << 8);
 
     #[inline]
     pub const fn empty() -> Self {
@@ -231,6 +233,12 @@ pub struct DeviceEntry {
 
 /// All known Lian Li USB device identifiers.
 pub static KNOWN_DEVICES: &[DeviceEntry] = &[
+    DeviceEntry {
+        id: UsbId::new(0x39b0, 0x0101),
+        family: DeviceFamily::EdgeHub,
+        name: "Edge Hub Advanced",
+        hid_usage_page: None,
+    },
     // Wireless dongles
     DeviceEntry {
         id: UsbId::new(0x0416, 0x8040),
@@ -544,6 +552,7 @@ impl DeviceFamily {
     /// ```
     pub const fn capabilities(self) -> DeviceCapabilities {
         match self {
+            Self::EdgeHub => DeviceCapabilities::TEMPERATURE,
             // Wired HID fan controllers.
             Self::Ene6k77 => DeviceCapabilities::FAN.or(DeviceCapabilities::RGB),
             Self::TlFan => DeviceCapabilities::FAN.or(DeviceCapabilities::RGB),
@@ -624,7 +633,8 @@ impl DeviceFamily {
     pub const fn transport_kind(self) -> TransportKind {
         match self {
             // HID feature-report / output-report families.
-            Self::Ene6k77
+            Self::EdgeHub
+            | Self::Ene6k77
             | Self::TlFan
             | Self::TlLcd
             | Self::Galahad2Trinity

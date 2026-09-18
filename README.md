@@ -38,6 +38,8 @@ own were validated against real hardware, others rely on community testing and f
 | Galahad II LCD / Vision AIO | Yes | Yes | 480x480 | Yes | Yes |
 | Strimer Plus (wired) | - | Yes | - | - | Yes |
 
+Edge Hub Advanced (`39b0:0101`) exposes read-only identity, firmware version and three temperatures on its device card. Unavailable or stale sensors are marked explicitly. Physical sensor accuracy still needs hardware validation; no fan, RGB or firmware-update commands are sent.
+
 ### Wireless (via TX/RX dongle)
 
 | Device | Fan Control | RGB | LCD | Pump | Tested |

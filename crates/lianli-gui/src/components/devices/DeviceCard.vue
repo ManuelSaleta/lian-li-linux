@@ -218,6 +218,16 @@ async function ping() {
         <span class="muted">Coolant</span>
         <span class="mono">{{ coolantText }}</span>
       </div>
+      <template v-if="d.telemetry">
+        <div v-if="d.telemetry.serial" class="meta-row">
+          <span class="muted">Hub serial</span><span class="mono">{{ d.telemetry.serial }}</span>
+        </div>
+        <div v-for="reading in d.telemetry.temperatures" :key="reading.name" class="meta-row">
+          <span class="muted">{{ reading.name }}</span>
+          <span class="mono">{{ reading.celsius == null ? (reading.abnormal ? 'Abnormal / unavailable' : 'Unavailable') : `${reading.celsius.toFixed(2)}°C` }}</span>
+        </div>
+        <p v-if="d.telemetry.error" class="hint">{{ d.telemetry.error }}</p>
+      </template>
       <div v-if="d.firmware_version" class="meta-row">
         <span class="muted">Firmware</span>
         <span class="mono">{{ d.firmware_version }}</span>

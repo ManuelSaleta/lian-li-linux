@@ -569,6 +569,7 @@ impl crate::registry::DeviceDriver for Galahad2TrinityDriver {
         let model = ctrl.model().name().to_string();
         let firmware = ctrl.firmware_str();
         Ok(crate::registry::OpenedDevice {
+            sensors: None,
             id: ctx.device_id(),
             family: lianli_shared::device_id::DeviceFamily::Galahad2Trinity,
             capabilities: lianli_shared::device_id::DeviceFamily::Galahad2Trinity.capabilities(),

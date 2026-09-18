@@ -1,6 +1,7 @@
 import type { DeviceFamily, RgbMode } from "@/types";
 
 export const FAMILY_DISPLAY: Record<DeviceFamily, string> = {
+  EdgeHub: "Edge Hub Advanced",
   Ene6k77: "UNI FAN SL/AL",
   TlFan: "UNI FAN TL",
   TlLcd: "UNI FAN TL LCD",
@@ -64,6 +65,7 @@ export function familyIsDesktopMode(f: DeviceFamily): boolean {
 }
 
 const FAMILY_CAPS: Record<DeviceFamily, string[]> = {
+  EdgeHub: ["temperature"],
   Ene6k77: ["fan", "rgb"],
   TlFan: ["fan", "rgb"],
   StrimerPlus: ["rgb"],
