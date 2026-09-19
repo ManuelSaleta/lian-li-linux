@@ -64,6 +64,7 @@
     <modalias>usb:v1CBEpA068d*</modalias>
     <modalias>usb:v1CBEpA088d*</modalias>
     <modalias>usb:v1CBEpA092d*</modalias>
+    <modalias>usb:v39B0p0101d*</modalias>
     <modalias>usb:v43A8p0101d*</modalias>
     <modalias>usb:v43A8p0102d*</modalias>
     <modalias>usb:v43A8p0103d*</modalias>
