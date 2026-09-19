@@ -3,6 +3,11 @@
 Generated from git history by git-cliff (see .github/cliff.toml).
 Regenerate rather than editing by hand.
 
+## v1.1.1 — 2026-09-19
+
+### Fixes
+- **packaging**: Include Edge Hub in AppStream devices  (`27c9912`)
+
 ## v1.1.0 — 2026-09-19
 
 ### Features
