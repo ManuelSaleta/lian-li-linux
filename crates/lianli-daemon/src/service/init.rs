@@ -204,7 +204,7 @@ impl ServiceManager {
     fn snapshot_wired(&self) -> Result<(HashSet<String>, HashSet<String>), anyhow::Error> {
         fn is_wired_controller(family: DeviceFamily) -> bool {
             lianli_shared::device_id::uses_hid(family)
-                || matches!(family, DeviceFamily::UniversalScreenLighting)
+                || registry::driver_for_family(family).is_some()
         }
         let usb_devs = enumerate_devices()?;
         let mut ids = HashSet::new();
@@ -380,6 +380,11 @@ impl ServiceManager {
             }
         };
 
+        if self.migrate_wired_config(&usb_devs) {
+            if let Some(tx) = self.tx.clone() {
+                self.prepare_media_assets(tx);
+            }
+        }
         let present_ids: HashSet<String> = usb_devs.iter().map(Self::rusb_device_id).collect();
         self.reconcile_startup_quarantine(&present_ids);
         self.ipc
@@ -597,15 +602,13 @@ impl ServiceManager {
             let max_quantity = supports_quantity.then(|| fan_ctrl.max_fan_quantity_per_port());
 
             if supports_quantity {
-                if let Some(serial_str) = serial {
-                    if let Some(cfg) = self.config.as_ref() {
-                        if let Some(dev_cfg) = cfg.ene6k77.get(serial_str) {
-                            for (&port, &qty) in &dev_cfg.fan_quantities {
-                                if let Err(e) = fan_ctrl.set_port_fan_quantity(port, qty) {
-                                    warn!(
+                if let Some(cfg) = self.config.as_ref() {
+                    if let Some(dev_cfg) = cfg.ene6k77.get(&base_id) {
+                        for (&port, &qty) in &dev_cfg.fan_quantities {
+                            if let Err(e) = fan_ctrl.set_port_fan_quantity(port, qty) {
+                                warn!(
                                         "Failed to apply persisted fan quantity for {base_id} port {port}: {e}"
                                     );
-                                }
                             }
                         }
                     }
@@ -693,14 +696,6 @@ impl ServiceManager {
         let port = port.parse::<u8>().context("Invalid fan port")?;
         let port_device_id = format!("{base_id}:port{port}");
 
-        let serial = self
-            .registry
-            .fan_device_info
-            .iter()
-            .find(|d| d.device_id == port_device_id)
-            .and_then(|d| d.serial.clone())
-            .context("Fan controller serial is unavailable")?;
-
         let ctrl = self
             .registry
             .fan_devices
@@ -716,7 +711,7 @@ impl ServiceManager {
                 .or_else(|| self.config.clone())
                 .unwrap_or_default();
             cfg.ene6k77
-                .entry(serial)
+                .entry(base_id.to_owned())
                 .or_default()
                 .fan_quantities
                 .insert(port, quantity);
@@ -765,10 +760,9 @@ impl ServiceManager {
             let Ok(port) = port.parse::<u8>() else {
                 continue;
             };
-            let Some(quantity) = info
-                .serial
-                .as_ref()
-                .and_then(|serial| config.ene6k77.get(serial))
+            let Some(quantity) = config
+                .ene6k77
+                .get(base)
                 .and_then(|config| config.fan_quantities.get(&port))
                 .copied()
             else {
@@ -1098,6 +1092,18 @@ impl ServiceManager {
                 self.desktop_displays
                     .set_video_policy(cfg.hardware_video, cfg.default_fps);
                 self.config = Some(cfg);
+                self.ipc.state.lock().config = self.config.clone();
+                self.ipc
+                    .state
+                    .lock()
+                    .state_health
+                    .wired_identity_save_error(None);
+                match enumerate_devices() {
+                    Ok(devices) => {
+                        self.migrate_wired_config(&devices);
+                    }
+                    Err(error) => warn!("Wired identity migration deferred: {error:#}"),
+                }
                 self.ipc
                     .state
                     .lock()

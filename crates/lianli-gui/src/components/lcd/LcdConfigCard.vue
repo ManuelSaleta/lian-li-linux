@@ -8,6 +8,7 @@ import { useDevicesStore } from "@/stores/devices";
 import { useLcdStore } from "@/stores/lcd";
 import { useIpc } from "@/composables/useIpc";
 import { useDebounce } from "@/composables/useDebounce";
+import { resolveLcdDevice } from "@/utils/lcdSelection";
 import { matchesMediaFile, pickMediaFile } from "@/utils/mediaPicker";
 import SensorGaugeEditor from "@/components/lcd/SensorGaugeEditor.vue";
 import ColorPicker from "@/components/rgb/ColorPicker.vue";
@@ -33,11 +34,9 @@ const message = useMessage();
 
 const lcdDevices = computed(() => devices.lcdDevices);
 
-// Stable ordering + disambiguation: sort by serial, and when more than one
-// device shares the same name append "#N" so identical fans are distinguishable.
 const deviceOptions = computed(() => {
   const sorted = [...lcdDevices.value].sort((a, b) =>
-    (a.serial ?? a.device_id).localeCompare(b.serial ?? b.device_id),
+    a.device_id.localeCompare(b.device_id),
   );
   const nameCounts = new Map<string, number>();
   for (const d of sorted) nameCounts.set(d.name, (nameCounts.get(d.name) ?? 0) + 1);
@@ -50,52 +49,21 @@ const deviceOptions = computed(() => {
   });
 });
 
-function hidIdNorm(s: string | null | undefined): string {
-  return s?.replace(/^hid:/, "") ?? "";
-}
-
-// Resolve the LCD entry to the concrete device it targets.
 function deviceForEntry(): DeviceInfo | undefined {
-  if (props.entry.serial) {
-    const wanted = hidIdNorm(props.entry.serial);
-    return lcdDevices.value.find((d) => hidIdNorm(d.serial) === wanted);
-  }
-  const idx = props.entry.index ?? 0;
-  return lcdDevices.value[idx];
+  return resolveLcdDevice(props.entry, lcdDevices.value);
 }
 const selectedDeviceId = computed(
-  () => deviceForEntry()?.device_id ?? lcdDevices.value[0]?.device_id ?? "",
+  () => deviceForEntry()?.device_id ?? "",
 );
 const selectedDevice = computed<DeviceInfo | undefined>(() => deviceForEntry());
 
 function onSelectDevice(id: string) {
   const d = lcdDevices.value.find((x) => x.device_id === id);
   if (!d) return;
-  props.entry.serial = d.serial;
-  // For serial-less devices, record the position so the match is stable.
-  props.entry.index = d.serial ? undefined : lcdDevices.value.indexOf(d);
+  props.entry.serial = d.device_id;
+  props.entry.index = undefined;
   config.markDirty();
 }
-
-// Ensure the entry targets a real device: prefer serial, fall back to first.
-// Also rewrite legacy serials that only match after normalization to the
-// device's canonical serial, so future saves use the canonical form.
-watch(
-  () => lcdDevices.value,
-  (devs) => {
-    if (devs.length === 0) return;
-    const dev = deviceForEntry();
-    if (!dev) {
-      props.entry.serial = devs[0].serial;
-      props.entry.index = devs[0].serial ? undefined : 0;
-      config.markDirty();
-    } else if (props.entry.serial && dev.serial && props.entry.serial !== dev.serial) {
-      props.entry.serial = dev.serial;
-      config.markDirty();
-    }
-  },
-  { immediate: true },
-);
 
 const mediaTypeOptions = [
   { label: "Image", value: "image" },

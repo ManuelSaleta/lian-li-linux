@@ -65,7 +65,7 @@ fn redact(value: &str) -> String {
             words.push("[redacted]");
             break;
         }
-        if word.contains(['/', '\\']) && !public_drm_node(word) {
+        if word.contains(['/', '\\']) && !public_drm_node(word) && !public_slash_term(word) {
             words.push("[path redacted]");
             break;
         }
@@ -89,6 +89,24 @@ fn redact(value: &str) -> String {
         .filter(|c| !c.is_control())
         .take(2048)
         .collect()
+}
+
+fn public_slash_term(value: &str) -> bool {
+    let value = value.trim_matches(['\'', '"', '(', ')', '[', ']', ':', ',', '.']);
+    matches!(
+        value,
+        "SL/AL"
+            | "USB/HID"
+            | "retry/retries"
+            | "active/running"
+            | "inactive/dead"
+            | "failed/failed"
+    ) || value.split_once('/').is_some_and(|(left, right)| {
+        !left.is_empty()
+            && !right.is_empty()
+            && left.bytes().all(|byte| byte.is_ascii_digit())
+            && right.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn public_drm_node(value: &str) -> bool {
@@ -382,6 +400,32 @@ mod tests {
             .set_len(1024 * 1024 + 1)
             .unwrap();
         assert!(saved_logs(&path).is_err());
+    }
+
+    #[test]
+    fn redaction_preserves_controller_failures_and_retry_counts() {
+        for line in [
+            "Could not begin opening ENE 6K77 SL/AL Fan Controller (0cf2:a102): An earlier device open is still outstanding",
+            "USB/HID node permissions",
+            "Retrying 1 device(s) that failed to open (attempt 1/18)",
+            "All wired devices opened successfully after 1 retry/retries",
+            "lianli-daemon-system.service: load loaded, state active/running",
+            "lianli-daemon.service: load loaded, state inactive/dead",
+        ] {
+            assert_eq!(redact(line), line);
+        }
+        assert_eq!(
+            redact("SL/AL failed to read /home/Alice/private folder/config.json"),
+            "SL/AL failed to read [path redacted]"
+        );
+        for path in [
+            "SL/AL/private",
+            "private/report",
+            "1/18/private",
+            "USB/HID/private",
+        ] {
+            assert_eq!(redact(path), "[path redacted]");
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use rusb::{Device, GlobalContext};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::warn;
 
 type SharedHid = Arc<Mutex<Box<dyn HidTransport>>>;
 
@@ -44,19 +44,17 @@ fn open_hidraw_device_strict(
     usage_page: Option<u16>,
 ) -> Result<(hidapi::HidDevice, Option<std::ffi::OsString>)> {
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
-    let expected = hidraw_path_for_usb_topology(bus, port_numbers).ok_or_else(|| {
-        anyhow::anyhow!(
-            "hidraw topology {bus}-{:?} for {vid:04x}:{pid:04x} not present",
-            port_numbers
-        )
-    })?;
+    anyhow::ensure!(
+        !port_numbers.is_empty(),
+        "USB port topology unavailable for {vid:04x}:{pid:04x}"
+    );
     let info = api
         .device_list()
         .find(|info| {
             info.vendor_id() == vid
                 && info.product_id() == pid
                 && usage_page.is_none_or(|up| info.usage_page() == up)
-                && info.path() == expected.as_c_str()
+                && hidraw_matches_topology(info.path(), bus, port_numbers)
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -71,6 +69,30 @@ fn open_hidraw_device_strict(
     info.open_device(&api)
         .map(|d| (d, Some(path)))
         .map_err(|e| anyhow::anyhow!("hidraw open at requested topology {vid:04x}:{pid:04x}: {e}"))
+}
+
+fn hidraw_matches_topology(path: &std::ffi::CStr, bus: u8, ports: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let Ok(resolved) = std::fs::canonicalize(std::path::Path::new("/sys/class/hidraw").join(name))
+    else {
+        return false;
+    };
+    topology_matches_sysfs(
+        &resolved.to_string_lossy(),
+        &usb_topology_string(bus, ports),
+    )
+}
+
+fn topology_matches_sysfs(path: &str, topology: &str) -> bool {
+    path.split('/')
+        .rev()
+        .filter_map(|part| part.split_once(':'))
+        .find(|(device, _)| device.contains('-'))
+        .is_some_and(|(device, _)| device == topology)
 }
 
 fn make_rusb_reopener(
@@ -197,66 +219,7 @@ fn open_hidraw_device(
     port_numbers: &[u8],
     usage_page: Option<u16>,
 ) -> Result<(hidapi::HidDevice, Option<std::ffi::OsString>)> {
-    let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HidApi init: {e}"))?;
-
-    let candidates: Vec<_> = api
-        .device_list()
-        .filter(|info| {
-            info.vendor_id() == vid
-                && info.product_id() == pid
-                && usage_page.is_none_or(|up| info.usage_page() == up)
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        debug!(
-            "No hidraw device matching {vid:04x}:{pid:04x} usage_page={usage_page:?}, trying VID/PID only"
-        );
-        let info = api
-            .device_list()
-            .find(|info| info.vendor_id() == vid && info.product_id() == pid)
-            .ok_or_else(|| anyhow::anyhow!("hidraw device {vid:04x}:{pid:04x} not found"))?;
-        let path: std::ffi::OsString = {
-            use std::os::unix::ffi::OsStrExt;
-            std::ffi::OsStr::from_bytes(info.path().to_bytes()).to_os_string()
-        };
-        return info
-            .open_device(&api)
-            .map(|d| (d, Some(path)))
-            .map_err(|e| anyhow::anyhow!("hidraw open {vid:04x}:{pid:04x}: {e}"));
-    }
-
-    if candidates.len() > 1 && !port_numbers.is_empty() {
-        if let Some(expected) = hidraw_path_for_usb_topology(bus, port_numbers) {
-            if let Some(info) = candidates
-                .iter()
-                .find(|info| info.path() == expected.as_c_str())
-            {
-                debug!("Opening hidraw by topology match for {vid:04x}:{pid:04x}");
-                let path: std::ffi::OsString = {
-                    use std::os::unix::ffi::OsStrExt;
-                    std::ffi::OsStr::from_bytes(info.path().to_bytes()).to_os_string()
-                };
-                return info
-                    .open_device(&api)
-                    .map(|d| (d, Some(path)))
-                    .map_err(|e| anyhow::anyhow!("hidraw open by topology: {e}"));
-            }
-        }
-    }
-
-    debug!(
-        "Opening first hidraw candidate for {vid:04x}:{pid:04x} ({} match(es))",
-        candidates.len()
-    );
-    let path: std::ffi::OsString = {
-        use std::os::unix::ffi::OsStrExt;
-        std::ffi::OsStr::from_bytes(candidates[0].path().to_bytes()).to_os_string()
-    };
-    candidates[0]
-        .open_device(&api)
-        .map(|d| (d, Some(path)))
-        .map_err(|e| anyhow::anyhow!("hidraw open: {e}"))
+    open_hidraw_device_strict(vid, pid, bus, port_numbers, usage_page)
 }
 
 pub fn open_shared_hid(
@@ -479,4 +442,23 @@ pub fn open_usb_bulk_backend(det: &DetectedDevice) -> Result<RusbBulk> {
         transport.detach_and_configure(det.name)?;
         Ok(transport)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::topology_matches_sysfs;
+
+    #[test]
+    fn hidraw_topology_selects_the_leaf_usb_device_and_any_of_its_interfaces() {
+        let path =
+            "/sys/devices/usb1/1-2/1-2:1.0/1-2.3/1-2.3:1.1/0003:0CF2:A102.0001/hidraw/hidraw4";
+        assert!(topology_matches_sysfs(path, "1-2.3"));
+        assert!(!topology_matches_sysfs(path, "1-2"));
+        assert!(!topology_matches_sysfs(path, "1-2.30"));
+        assert!(!topology_matches_sysfs(path, "2-2.3"));
+        assert!(!topology_matches_sysfs(
+            "/sys/devices/virtual/hidraw4",
+            "1-2.3"
+        ));
+    }
 }

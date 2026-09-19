@@ -14,7 +14,12 @@ pub fn validate_quantities(
         let max = devices
             .iter()
             .find(|device| {
-                device.serial.as_ref() == Some(serial) && device.max_fan_quantity.is_some()
+                (device.serial.as_ref() == Some(serial)
+                    || device
+                        .device_id
+                        .rsplit_once(":port")
+                        .is_some_and(|(base, _)| base == serial))
+                    && device.max_fan_quantity.is_some()
             })
             .and_then(|device| device.max_fan_quantity)
             .unwrap_or(6);

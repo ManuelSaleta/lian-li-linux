@@ -37,13 +37,14 @@ pub struct OpenContext {
 impl OpenContext {
     /// Stable runtime identifier for this device.
     pub fn device_id(&self) -> DeviceId {
-        match &self.serial {
-            Some(s) if !s.is_empty() => DeviceId::wired(s),
-            _ => DeviceId::wired(format!(
-                "{:04x}:{:04x}:{}-{}",
-                self.vid, self.pid, self.bus, self.address
-            )),
-        }
+        let topology = crate::detect::usb_topology(
+            self.vid,
+            self.pid,
+            self.bus,
+            self.address,
+            &self.device.port_numbers().unwrap_or_default(),
+        );
+        DeviceId::wired(crate::detect::wired_identity(&topology))
     }
 }
 

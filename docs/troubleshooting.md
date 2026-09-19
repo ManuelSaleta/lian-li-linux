@@ -31,6 +31,23 @@ denies access. Include that output, the installed Hermes udev rules and diagnost
 export in your report. Avoid blanket DRM permissions or changing private-session
 nodes. See [desktop backend details](desktop-backends.md#hermes-kms-interface-baseline).
 
+## Wired device identities after upgrading
+
+Wired controllers and displays use their USB vendor ID, product ID, bus and port
+path as their identity. USB serial strings remain metadata: some devices share
+the same serial, including devices from different families. Wireless devices
+continue to use their MAC addresses.
+
+Existing fan, pump, RGB, LCD and ENE fan-quantity settings migrate when their old
+identity has one unambiguous connected owner. Offline settings remain saved.
+If multiple devices could own old settings, Installation Health reports the
+ambiguity; configure each device using its USB port identity. Settings already
+saved under a physical identity take precedence over legacy settings.
+
+Keep wired devices connected to the same USB ports to retain those identities.
+Changing ports or hubs can require selecting the device again. An unavailable
+display is not automatically replaced with another connected display.
+
 ## GUI is offline
 
 Fresh packages install both units but enable neither. Select one mode using

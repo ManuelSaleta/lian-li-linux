@@ -34,6 +34,7 @@ mod streaming;
 mod subsystems;
 mod suspend;
 mod sync;
+mod wired_identity;
 
 use aio_lcd_firmware::AioLcdFirmwareTracker;
 use lifecycle_monitor::OperationMonitor;

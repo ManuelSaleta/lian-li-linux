@@ -24,6 +24,12 @@ impl ServiceManager {
                     .iter()
                     .map(|device| device.device_id())
                     .collect();
+                let previous: HashSet<_> = self.registry.usb_locations.keys().cloned().collect();
+                if present != previous && self.migrate_wired_config(&usb_devices) {
+                    if let Some(tx) = self.tx.clone() {
+                        self.prepare_media_assets(tx);
+                    }
+                }
                 self.reconcile_startup_quarantine(&present);
                 self.refresh_tl_lcd_port_index_cache(&usb_devices);
                 self.build_usb_device_cache(usb_devices);
@@ -173,7 +179,7 @@ impl ServiceManager {
                 device_id: device_id.clone(),
                 family: det.family,
                 name: det.name.to_string(),
-                serial: Some(device_id),
+                serial: det.serial.clone(),
                 vid: det.vid,
                 pid: det.pid,
                 has_lcd: det.family.has_lcd(),

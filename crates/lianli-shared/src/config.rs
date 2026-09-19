@@ -266,7 +266,7 @@ pub struct AppConfig {
     /// Per-AIO configuration keyed by device_id (e.g. "wireless:AA:BB:CC:DD:EE:FF").
     #[serde(default)]
     pub aio: HashMap<String, AioConfig>,
-    /// Per-ENE 6K77 device configuration keyed by device serial.
+    /// ENE controller IDs; legacy serial keys migrate when ownership is unambiguous.
     #[serde(default)]
     pub ene6k77: HashMap<String, Ene6k77DeviceConfig>,
     #[serde(default)]

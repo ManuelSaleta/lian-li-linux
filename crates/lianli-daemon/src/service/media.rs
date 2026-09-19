@@ -349,29 +349,16 @@ impl ServiceManager {
             let mut claimed: HashSet<usize> = HashSet::new();
             for (cfg_idx, device_cfg) in cfg.lcds.iter().enumerate() {
                 let matched = if let Some(serial) = &device_cfg.serial {
-                    // Exact match first
-                    let exact = candidates.iter().enumerate().find(|(idx, c)| {
-                        !claimed.contains(idx) && lcd_id_matches(serial, &c.device_id)
-                    });
-                    exact.or_else(|| {
-                        // Alias fallback for cold-boot serial changes: only when
-                        // exactly one LCD config and one LCD candidate exist.
-                        if cfg.lcds.len() == 1
-                            && candidates.len() == 1
-                            && serial.starts_with("hid:")
-                        {
-                            if let Some((idx, c)) = candidates.iter().enumerate()
-                                .find(|(idx, c)| !claimed.contains(idx) && is_wired_aio_lcd(c.family))
-                            {
-                                warn!(
-                                    "[devices] configured AIO LCD id '{}' unavailable; using compatible alias '{}'",
-                                    serial, c.device_id
-                                );
-                                return Some((idx, c));
-                            }
-                        }
-                        None
-                    }).map(|(idx, c)| { claimed.insert(idx); c })
+                    candidates
+                        .iter()
+                        .enumerate()
+                        .find(|(idx, candidate)| {
+                            !claimed.contains(idx) && lcd_id_matches(serial, &candidate.device_id)
+                        })
+                        .map(|(idx, candidate)| {
+                            claimed.insert(idx);
+                            candidate
+                        })
                 } else if let Some(index) = device_cfg.index {
                     candidates
                         .get(index)
@@ -772,7 +759,6 @@ pub(super) fn lcd_id_matches(serial: &str, device_id: &str) -> bool {
     hid_id_norm(serial) == hid_id_norm(device_id)
 }
 
-/// Whether a device family is a wired AIO LCD that may benefit from alias matching.
 fn is_wired_aio_lcd(family: DeviceFamily) -> bool {
     matches!(
         family,

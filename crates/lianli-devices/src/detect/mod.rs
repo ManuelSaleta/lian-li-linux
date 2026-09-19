@@ -34,40 +34,46 @@ pub struct DetectedDevice {
 }
 
 impl DetectedDevice {
-    /// Stable device ID: serial if unique, otherwise USB port path (bus-port topology).
     pub fn device_id(&self) -> String {
-        match &self.serial {
-            Some(s) if !is_non_unique_serial(s.as_str()) => {
-                format!("hid:{}", s)
-            }
-            _ => {
-                let port_path = self
-                    .device
-                    .port_numbers()
-                    .ok()
-                    .filter(|p| !p.is_empty())
-                    .map(|ports| {
-                        let parts: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
-                        format!("{}-{}", self.bus, parts.join("."))
-                    })
-                    .unwrap_or_else(|| format!("{}-{}", self.bus, self.address));
-                format!("hid:{:04x}:{:04x}:{}", self.vid, self.pid, port_path)
-            }
-        }
+        wired_identity(&self.topology_key())
+    }
+
+    pub fn legacy_device_id(&self) -> String {
+        legacy_identity(self.serial.as_deref(), &self.topology_key())
     }
 
     pub fn topology_key(&self) -> String {
-        let port = self
-            .device
-            .port_numbers()
-            .ok()
-            .filter(|p| !p.is_empty())
-            .map(|ports| {
-                let parts: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
-                parts.join(".")
-            })
-            .unwrap_or_else(|| self.address.to_string());
-        format!("{:04x}:{:04x}:{}-{}", self.vid, self.pid, self.bus, port)
+        usb_topology(
+            self.vid,
+            self.pid,
+            self.bus,
+            self.address,
+            &self.device.port_numbers().unwrap_or_default(),
+        )
+    }
+}
+
+pub(crate) fn usb_topology(vid: u16, pid: u16, bus: u8, address: u8, ports: &[u8]) -> String {
+    let port = if ports.is_empty() {
+        address.to_string()
+    } else {
+        ports
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    format!("{vid:04x}:{pid:04x}:{bus}-{port}")
+}
+
+pub(crate) fn wired_identity(topology: &str) -> String {
+    format!("hid:{topology}")
+}
+
+fn legacy_identity(serial: Option<&str>, topology: &str) -> String {
+    match serial {
+        Some(serial) if !is_non_unique_serial(serial) => format!("hid:{serial}"),
+        _ => format!("hid:{topology}"),
     }
 }
 
@@ -77,4 +83,39 @@ const NON_UNIQUE_SERIALS: &[&str] = &["Nuvoton"];
 
 fn is_non_unique_serial(s: &str) -> bool {
     NON_UNIQUE_SERIALS.contains(&s) || s.starts_with("TL_LCDV")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wired_hubs_have_independent_stable_physical_ids() {
+        let first = usb_topology(0x0cf2, 0xa102, 1, 5, &[2, 3]);
+        let second = usb_topology(0x0cf2, 0xa102, 1, 6, &[2, 4]);
+        let id = wired_identity(&first);
+        assert_eq!(id, "hid:0cf2:a102:1-2.3");
+        assert_ne!(id, wired_identity(&second));
+        assert_eq!(first, usb_topology(0x0cf2, 0xa102, 1, 12, &[2, 3]));
+        assert_ne!(
+            id,
+            wired_identity(&usb_topology(0x0416, 0x7371, 1, 5, &[2, 3]))
+        );
+    }
+
+    #[test]
+    fn legacy_ids_remain_available_for_migration() {
+        assert_eq!(
+            legacy_identity(Some("shared"), "0cf2:a102:1-2"),
+            "hid:shared"
+        );
+        assert_eq!(
+            legacy_identity(Some("Nuvoton"), "0cf2:a102:1-2"),
+            "hid:0cf2:a102:1-2"
+        );
+        assert_eq!(
+            legacy_identity(Some("TL_LCDV1"), "0416:abcd:1-2"),
+            "hid:0416:abcd:1-2"
+        );
+    }
 }

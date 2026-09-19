@@ -9,7 +9,7 @@ import { useLcdStore } from "@/stores/lcd";
 import { useAioStore } from "@/stores/aio";
 import { useConfigStore } from "@/stores/config";
 import { useIpc } from "@/composables/useIpc";
-import { fanQuantityPort, stageFanQuantity } from "@/utils/fanQuantity";
+import { fanQuantityKey, fanQuantityPort, stageFanQuantity } from "@/utils/fanQuantity";
 import {
   FAMILY_DISPLAY,
   familySupportsDisplaySwitch,
@@ -58,7 +58,7 @@ const supportsFanQuantity = computed(
 );
 
 const quantityPort = computed(() => fanQuantityPort(d.value.device_id));
-const fanQty = computed(() => config.config.ene6k77[d.value.serial ?? ""]?.fan_quantities[quantityPort.value ?? ""] ?? d.value.fan_quantity ?? 0);
+const fanQty = computed(() => config.config.ene6k77[fanQuantityKey(d.value.device_id)]?.fan_quantities[quantityPort.value ?? ""] ?? d.value.fan_quantity ?? 0);
 
 function onFanQty(v: number | null) {
   if (v === null) return;

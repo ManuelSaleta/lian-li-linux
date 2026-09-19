@@ -7,6 +7,8 @@ pub struct StateHealth {
     config: Option<InstallationFinding>,
     templates: Option<InstallationFinding>,
     wireless: Option<InstallationFinding>,
+    wired_identity: Option<InstallationFinding>,
+    wired_identity_save: Option<InstallationFinding>,
     device_open_errors: std::collections::BTreeMap<String, String>,
     device_open_overflow: bool,
     lcd_errors: std::collections::BTreeMap<String, String>,
@@ -14,6 +16,24 @@ pub struct StateHealth {
 }
 
 impl StateHealth {
+    pub fn wired_identity_save_error(&mut self, error: Option<&str>) {
+        self.wired_identity_save = error.map(|error| {
+            let mut finding = failed("configuration.wired_identity_save", "Wired identity migration could not be saved", error);
+            finding.evidence.push_str(" Migrated settings are active in memory. Save settings again when storage is writable.");
+            finding
+        });
+    }
+
+    pub fn wired_identity_warnings(&mut self, warnings: &[String]) {
+        self.wired_identity = (!warnings.is_empty()).then(|| {
+            loaded(
+                "configuration.wired_identity",
+                "Wired device settings need attention",
+                warnings,
+            )
+        });
+    }
+
     pub fn lcd_initialization(&mut self, id: &str, error: Option<&str>) {
         let Some(error) = error else {
             self.lcd_errors.remove(id);
@@ -109,6 +129,8 @@ impl StateHealth {
             .iter()
             .chain(self.templates.iter())
             .chain(self.wireless.iter())
+            .chain(self.wired_identity.iter())
+            .chain(self.wired_identity_save.iter())
             .cloned()
             .collect();
         findings.extend(self.device_open_errors.iter().map(|(id, error)| InstallationFinding {

@@ -21,8 +21,8 @@ const selectedTemplates = computed(() => {
 function addLcd() {
   const first = devices.lcdDevices[0];
   config.addLcd({
-    serial: first?.serial ?? null,
-    index: first?.serial ? undefined : 0,
+    serial: first?.device_id ?? null,
+    index: first ? undefined : 0,
     type: "image",
     path: null,
     fps: null,
