@@ -3,6 +3,30 @@
 Generated from git history by git-cliff (see .github/cliff.toml).
 Regenerate rather than editing by hand.
 
+## v1.1.0 — 2026-09-19
+
+### Features
+- **edge-hub**: Expose read-only identity and temperature telemetry  (`683253f`)
+- **lcd**: Add supported startup images and recovery (fixes [#125](https://github.com/sgtaziz/lian-li-linux/issues/125))
+- **h2**: Add experimental wireless startup uploads  (`c8d39bc`)
+
+### Fixes
+- **ene6k77**: Correct fan quantities and group lighting (fixes [#210](https://github.com/sgtaziz/lian-li-linux/issues/210))
+- **wired**: Preserve fan duties and validate receiver acknowledgements  (`c50ccd7`)
+- **hydroshift**: Bound HID response scans and initialization waits  (`6df7684`)
+- **aio**: Separate control sources and publish pump telemetry  (`d6b1544`)
+- **daemon**: Detect resume with suspend-inclusive clock sampling  (`288a55e`)
+- **cooling**: Prioritize full-speed fallback and bound failure logs  (`81dfc66`)
+- **lcd**: Validate buffer feedback against actual reply lengths  (`6a0927f`)
+- **h2**: Retain deferred RGB updates and prioritize cooling recovery  (`ae87fb8`)
+- **lcd**: Align Flex presets and H264 controls with screen capabilities  (`1ffa516`)
+- **lcd**: Keep Hyprland output names stable per display  (`b12a268`)
+- **daemon**: Identify wired devices by physical USB path  (`21a0677`)
+- **rgb**: Configure Galahad II fan LED counts (fixes [#213](https://github.com/sgtaziz/lian-li-linux/issues/213))
+
+### Style
+- **gui**: Compact file-access notices and alert spacing  (`1519b90`)
+
 ## v1.0.1 — 2026-09-17
 
 ### Fixes
