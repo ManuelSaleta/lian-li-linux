@@ -669,6 +669,8 @@ pub struct RgbZoneConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbDeviceConfig {
     pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_led_count: Option<u16>,
     /// Use motherboard ARGB header instead of software-controlled effects.
     #[serde(default)]
     pub mb_rgb_sync: bool,
@@ -764,9 +766,59 @@ pub struct RgbZoneInfo {
     pub led_count: u16,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RgbLedCountControl {
+    pub zone: u8,
+    pub min: u16,
+    pub max: u16,
+    pub default: u16,
+}
+
+impl RgbLedCountControl {
+    pub fn resolve(self, count: Option<u16>) -> Result<u16, String> {
+        let count = count.unwrap_or(self.default);
+        if !(self.min..=self.max).contains(&count) {
+            return Err(format!(
+                "LED count must be between {} and {}",
+                self.min, self.max
+            ));
+        }
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod led_count_tests {
+    use super::*;
+
+    #[test]
+    fn old_rgb_config_keeps_default_count_and_new_count_roundtrips() {
+        let mut saved: RgbDeviceConfig =
+            serde_json::from_str(r#"{"device_id":"offline","mb_rgb_sync":false,"zones":[]}"#)
+                .unwrap();
+        let control = RgbLedCountControl {
+            zone: 1,
+            min: 8,
+            max: 50,
+            default: 24,
+        };
+        assert_eq!(control.resolve(saved.fan_led_count).unwrap(), 24);
+        assert!(!serde_json::to_string(&saved)
+            .unwrap()
+            .contains("fan_led_count"));
+        saved.fan_led_count = Some(50);
+        let restored: RgbDeviceConfig =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(restored.fan_led_count, Some(50));
+        assert_eq!(restored, saved);
+    }
+}
+
 /// RGB capabilities reported per device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RgbDeviceCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_led_count_control: Option<RgbLedCountControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_reason: Option<String>,
     #[serde(default)]

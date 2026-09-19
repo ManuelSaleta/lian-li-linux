@@ -343,6 +343,7 @@ export interface RgbEffectMemory {
 }
 
 export interface RgbDeviceConfig {
+  fan_led_count?: number | null;
   device_id: string;
   mb_rgb_sync: boolean;
   active_preset?: string | null;
@@ -386,6 +387,7 @@ export interface RgbEffectParameters {
 }
 
 export interface RgbDeviceCapabilities {
+  fan_led_count_control?: { zone: number; min: number; max: number; default: number } | null;
   deferred_reason?: string;
   hardware_group_effects?: boolean;
   group_effect_modes?: string[];

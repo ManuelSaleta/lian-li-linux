@@ -19,6 +19,7 @@ const props = defineProps<{
   directOnly?: boolean;
   groupEffects?: boolean;
   perFanOnly?: boolean;
+  lightingLocked?: boolean;
 }>();
 
 const rgb = useRgbStore();
@@ -34,7 +35,15 @@ const hasSoftwareRenderer = computed(() => (props.cap.software_modes?.length ?? 
 const isSoftware = computed(() => props.cap.software_modes?.includes(effect.value.mode) ?? false);
 const isAnimated = computed(() => !["Off", "Static", "Direct"].includes(effect.value.mode));
 const canEditLeds = computed(() => props.cap.supports_direct && hasSoftwareRenderer.value);
-const ledCount = computed(() => props.cap.zones[props.zoneIndex]?.led_count ?? 0);
+const countControl = computed(() => props.cap.fan_led_count_control?.zone === props.zoneIndex ? props.cap.fan_led_count_control : null);
+const ledCount = computed(() => countControl.value
+  ? config.rgbDeviceConfig(props.deviceId).fan_led_count ?? countControl.value.default
+  : props.cap.zones[props.zoneIndex]?.led_count ?? 0);
+
+function onLedCount(value: number) {
+  config.rgbDeviceConfig(props.deviceId).fan_led_count = value;
+  config.markDirty();
+}
 const ledColors = ref<RGB[]>([]);
 const selectedLeds = ref<number[]>([]);
 
@@ -240,6 +249,8 @@ const zoneLabel = computed(
     </div>
 
     <div v-if="expanded" class="zone-body">
+      <LabeledSlider v-if="countControl" label="LED count" :model-value="ledCount" :min="countControl.min" :max="countControl.max" :step="1" @update:model-value="onLedCount" />
+      <div class="effect-controls" :class="{ 'sync-locked': lightingLocked }" :inert="lightingLocked || undefined">
       <div class="row">
         <label class="muted">Mode</label>
         <n-select
@@ -339,11 +350,14 @@ const zoneLabel = computed(
         <n-checkbox :checked="zone.swap_lr" @update:checked="onSwapLr">Swap L/R</n-checkbox>
         <n-checkbox :checked="zone.swap_tb" @update:checked="onSwapTb">Swap T/B</n-checkbox>
       </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.effect-controls { display: flex; flex-direction: column; gap: var(--space-3); }
+.sync-locked { opacity: 0.5; }
 .zone {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

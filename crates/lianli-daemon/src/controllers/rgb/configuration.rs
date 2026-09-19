@@ -2,8 +2,28 @@ use super::*;
 use anyhow::Context;
 
 impl RgbController {
+    fn validate_fan_led_counts(&self, config: &RgbAppConfig) -> anyhow::Result<()> {
+        for saved in &config.devices {
+            if let Some(device) = self.wired.get(&saved.device_id) {
+                if let Some(control) = device.fan_led_count_control() {
+                    control
+                        .resolve(saved.fan_led_count)
+                        .map_err(anyhow::Error::msg)?;
+                } else {
+                    anyhow::ensure!(
+                        saved.fan_led_count.is_none(),
+                        "Adjustable fan LED count is unsupported for {}",
+                        saved.device_id
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_config(&self, config: &RgbAppConfig) -> anyhow::Result<()> {
         lianli_shared::rgb::validate_effect_memory(config).map_err(anyhow::Error::msg)?;
+        self.validate_fan_led_counts(config)?;
         if !config.enabled || config.openrgb_server {
             return Ok(());
         }
@@ -50,6 +70,33 @@ impl RgbController {
     }
 
     pub fn apply_config(&mut self, config: &RgbAppConfig, presets: &[RgbPreset]) {
+        if let Err(error) = self.validate_fan_led_counts(config) {
+            warn!("Invalid fan LED counts: {error}");
+            return;
+        }
+        for (id, device) in &self.wired {
+            if device.fan_led_count_control().is_none() {
+                continue;
+            }
+            let count = config
+                .devices
+                .iter()
+                .find(|saved| &saved.device_id == id)
+                .and_then(|saved| saved.fan_led_count);
+            match device.configure_fan_led_count(count) {
+                Ok(true) => {
+                    self.configured.remove(id);
+                    self.mb_sync_state.remove(id);
+                    self.applied.remove(id);
+                    self.sync_signature = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("Invalid fan LED count for {id}: {error}");
+                    return;
+                }
+            }
+        }
         let previous = self.config.replace(config.clone());
         self.presets = presets.to_vec();
         self.openrgb_server_enabled = config.openrgb_server;
@@ -104,6 +151,7 @@ impl RgbController {
                 });
                 let signature = serde_json::to_string(&(
                     mb_rgb_sync,
+                    device.fan_led_count,
                     &device.zones,
                     &device.regions,
                     preset.map(|preset| (&preset.zones, &preset.regions)),
@@ -293,6 +341,7 @@ mod tests {
     fn saved_device(id: &str) -> RgbDeviceConfig {
         RgbDeviceConfig {
             device_id: id.into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             regions: None,
@@ -545,6 +594,7 @@ mod tests {
         );
         let config = RgbDeviceConfig {
             device_id: "tl".into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             regions: None,

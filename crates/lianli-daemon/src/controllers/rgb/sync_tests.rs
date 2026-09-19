@@ -7,6 +7,111 @@ use std::{sync::mpsc, time::Duration};
 
 struct Screen(mpsc::Sender<Vec<[u8; 3]>>);
 
+#[derive(Default)]
+struct CountedFan {
+    count: std::sync::atomic::AtomicU16,
+    applied: parking_lot::Mutex<Vec<(u16, [u8; 3])>>,
+}
+
+impl RgbDevice for CountedFan {
+    fn device_name(&self) -> String {
+        "Galahad".into()
+    }
+    fn supported_modes(&self) -> Vec<RgbMode> {
+        vec![RgbMode::Static]
+    }
+    fn zone_info(&self) -> Vec<RgbZoneInfo> {
+        vec![RgbZoneInfo {
+            name: "Fans".into(),
+            led_count: self.count.load(std::sync::atomic::Ordering::Relaxed),
+        }]
+    }
+    fn fan_led_count_control(&self) -> Option<lianli_shared::rgb::RgbLedCountControl> {
+        Some(lianli_shared::rgb::RgbLedCountControl {
+            zone: 0,
+            min: 8,
+            max: 50,
+            default: 24,
+        })
+    }
+    fn configure_fan_led_count(&self, count: Option<u16>) -> anyhow::Result<bool> {
+        let count = self
+            .fan_led_count_control()
+            .unwrap()
+            .resolve(count)
+            .map_err(anyhow::Error::msg)?;
+        Ok(self.count.swap(count, std::sync::atomic::Ordering::Relaxed) != count)
+    }
+    fn set_zone_effect(&self, _: u8, effect: &RgbEffect) -> anyhow::Result<()> {
+        self.applied.lock().push((
+            self.count.load(std::sync::atomic::Ordering::Relaxed),
+            effect.colors[0],
+        ));
+        Ok(())
+    }
+    fn supports_mb_rgb_sync(&self) -> bool {
+        true
+    }
+    fn set_mb_rgb_sync(&self, _: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fan_led_count_only_save_reapplies_quick_sync_without_changing_membership_or_effect() {
+    let (mut controller, mut config, _) = setup();
+    let device = Arc::new(CountedFan::default());
+    controller.replace_wired(HashMap::from([(
+        "screen".into(),
+        device.clone() as Arc<dyn RgbDevice>,
+    )]));
+    config.merge_lighting.as_mut().unwrap().kind = lianli_shared::rgb::RgbSyncKind::Matched;
+    controller.validate_config(&config).unwrap();
+    controller.apply_config(&config, &[]);
+    assert_eq!(device.applied.lock().last(), Some(&(24, [0, 255, 0])));
+    device.applied.lock().clear();
+    controller.apply_config(&config, &[]);
+    assert!(device.applied.lock().is_empty());
+    config.devices[0].fan_led_count = Some(50);
+    controller.apply_config(&config, &[]);
+    assert_eq!(device.applied.lock().as_slice(), &[(50, [0, 255, 0])]);
+    assert!(controller.sync_active.contains("screen"));
+    let thermal = crate::thermal_alert::new_shared();
+    controller.set_thermal_override(thermal.clone());
+    *thermal.lock() = Some([255, 128, 0]);
+    assert!(controller.check_thermal_override());
+    assert_eq!(device.applied.lock().last(), Some(&(50, [255, 128, 0])));
+    config.devices[0].fan_led_count = Some(8);
+    controller.apply_config(&config, &[]);
+    *thermal.lock() = None;
+    assert!(!controller.check_thermal_override());
+    assert_eq!(device.applied.lock().last(), Some(&(8, [0, 255, 0])));
+    config.devices[0].fan_led_count = Some(50);
+    controller.apply_config(&config, &[]);
+    config.merge_lighting.as_mut().unwrap().enabled = false;
+    controller.apply_config(&config, &[]);
+    assert_eq!(device.applied.lock().last(), Some(&(50, [255, 0, 0])));
+    config.devices[0].mb_rgb_sync = true;
+    controller.apply_config(&config, &[]);
+    config.devices[0].mb_rgb_sync = false;
+    controller.apply_config(&config, &[]);
+    assert_eq!(device.applied.lock().last(), Some(&(50, [255, 0, 0])));
+    controller.invalidate_hardware_state();
+    controller.apply_config(&config, &[]);
+    assert_eq!(device.applied.lock().last(), Some(&(50, [255, 0, 0])));
+    let reconnected = Arc::new(CountedFan::default());
+    controller.replace_wired(HashMap::from([(
+        "screen".into(),
+        reconnected.clone() as Arc<dyn RgbDevice>,
+    )]));
+    controller.apply_config(&config, &[]);
+    assert_eq!(reconnected.applied.lock().last(), Some(&(50, [255, 0, 0])));
+    config.devices[0].fan_led_count = Some(51);
+    assert!(controller.validate_config(&config).is_err());
+    controller.replace_wired(HashMap::new());
+    assert!(controller.validate_config(&config).is_ok());
+}
+
 impl RgbDevice for Screen {
     fn device_name(&self) -> String {
         "screen".into()
@@ -48,6 +153,7 @@ fn setup() -> (RgbController, RgbAppConfig, mpsc::Receiver<Vec<[u8; 3]>>) {
         enabled: true,
         devices: vec![RgbDeviceConfig {
             device_id: "screen".into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             regions: None,

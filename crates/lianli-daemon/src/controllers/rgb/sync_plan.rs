@@ -77,7 +77,12 @@ impl RgbController {
                     .copied()
                     .unwrap_or_default();
                 let profile = self.render_profile(&id);
-                (id, reverse, profile)
+                let fan_led_count = config
+                    .devices
+                    .iter()
+                    .find(|device| device.device_id == id)
+                    .and_then(|device| device.fan_led_count);
+                (id, reverse, profile, fan_led_count)
             })
             .collect();
         Ok(Some(serde_json::to_string(&(

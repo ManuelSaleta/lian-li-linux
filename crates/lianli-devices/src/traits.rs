@@ -331,6 +331,13 @@ impl<T: AioDevice> AioDevice for std::sync::Arc<T> {
 /// - **Direct mode**: Set per-LED colors directly. Used by OpenRGB `UpdateLEDs`.
 ///   For wired devices, maps to Static mode. For wireless, streams RGB frames via RF.
 pub trait RgbDevice: Send + Sync {
+    fn fan_led_count_control(&self) -> Option<lianli_shared::rgb::RgbLedCountControl> {
+        None
+    }
+
+    fn configure_fan_led_count(&self, _count: Option<u16>) -> Result<bool> {
+        anyhow::bail!("Adjustable fan LED count is unsupported")
+    }
     fn deferred_reason(&self) -> Option<String> {
         None
     }
@@ -575,6 +582,13 @@ pub trait RgbDevice: Send + Sync {
 /// Blanket forwarding impl so any `Arc<T>` can be used as an `RgbDevice`
 /// without per-driver boilerplate.
 impl<T: RgbDevice + ?Sized> RgbDevice for Arc<T> {
+    fn fan_led_count_control(&self) -> Option<lianli_shared::rgb::RgbLedCountControl> {
+        (**self).fan_led_count_control()
+    }
+
+    fn configure_fan_led_count(&self, count: Option<u16>) -> Result<bool> {
+        (**self).configure_fan_led_count(count)
+    }
     fn deferred_reason(&self) -> Option<String> {
         (**self).deferred_reason()
     }

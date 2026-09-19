@@ -19,6 +19,7 @@ fn unchanged_rgb_can_be_saved_when_wireless_is_unavailable() {
     let rgb = RgbAppConfig {
         devices: vec![RgbDeviceConfig {
             device_id: "wireless:test".into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             regions: None,

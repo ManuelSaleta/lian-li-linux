@@ -19,6 +19,7 @@ impl RgbController {
                 }
             }
             caps.push(RgbDeviceCapabilities {
+                fan_led_count_control: device.fan_led_count_control(),
                 hardware_group_effects: !hardware_regions.is_empty(),
                 group_effect_modes: device.group_effect_modes(),
                 zone_effect_modes: device.zone_effect_modes(),
@@ -86,6 +87,7 @@ impl RgbController {
             let mut supported_modes = software_modes.clone();
             supported_modes.push(RgbMode::Direct);
             caps.push(RgbDeviceCapabilities {
+                fan_led_count_control: None,
                 hardware_group_effects: false,
                 group_effect_modes: Vec::new(),
                 zone_effect_modes: Vec::new(),

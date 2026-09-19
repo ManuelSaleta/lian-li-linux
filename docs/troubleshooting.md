@@ -4,6 +4,18 @@ Open **Installation Health**, then **Recheck** after repairs. The page shows whe
 checks last ran and distinguishes failures from checks it cannot verify. **Later** dismisses
 the startup popup for this GUI session. No repair is performed automatically.
 
+## Partially lit Galahad II fans
+
+For Galahad II LCD and Vision (`0416:7391` and `0416:7395`), open **RGB → Fans →
+LED count**, match the connected fan/ARGB chain and save. The supported range is
+8–50, with a default of 24. The slider remains editable while Quick Sync controls
+the effects. Counts stay saved across restarts and lighting preset changes.
+
+The pump-head zone reports 12 logical LEDs for both models. This is separate from
+the adjustable fan count and follows the vendor's lighting API, not a measurement
+of physical LEDs. If the chain is still partly lit, include the exact fan models,
+wiring and selected count in the issue report.
+
 ## Hermes permissions
 
 Update the host's Lian Li Linux package to install the current `60-lianli.rules`.

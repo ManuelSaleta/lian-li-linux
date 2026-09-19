@@ -163,6 +163,7 @@ fn apply_config_and_leds(
         } else {
             rgb_cfg.devices.push(RgbDeviceConfig {
                 device_id: preset.device_id.clone(),
+                fan_led_count: None,
                 mb_rgb_sync: false,
                 active_preset: None,
                 zones: Vec::new(),

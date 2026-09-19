@@ -260,6 +260,7 @@ mod tests {
     fn config(mode: RgbMode) -> RgbDeviceConfig {
         RgbDeviceConfig {
             device_id: "tl".into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             regions: None,

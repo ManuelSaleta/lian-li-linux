@@ -241,6 +241,7 @@ mod tests {
             rgb: Some(RgbAppConfig {
                 devices: vec![RgbDeviceConfig {
                     device_id: "hid:shared:group2".into(),
+                    fan_led_count: None,
                     mb_rgb_sync: true,
                     active_preset: None,
                     zones: vec![],

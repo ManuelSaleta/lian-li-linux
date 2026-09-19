@@ -151,8 +151,14 @@ const activePreset = computed({
   },
 });
 
+const totalLedCount = computed(() => {
+  const control = props.cap.fan_led_count_control;
+  if (!control) return props.cap.total_led_count;
+  const reported = props.cap.zones[control.zone]?.led_count ?? control.default;
+  return props.cap.total_led_count - reported + (devConfig.value.fan_led_count ?? control.default);
+});
 const summary = computed(() =>
-  `${props.cap.zones.length} zone(s) \u00B7 ${props.cap.total_led_count} LEDs`,
+  `${props.cap.zones.length} zone(s) \u00B7 ${totalLedCount.value} LEDs`,
 );
 </script>
 
@@ -170,9 +176,9 @@ const summary = computed(() =>
     </div>
 
     <div v-if="expanded" class="body">
-      <p v-if="syncActive" class="sync-notice">Quick Sync controls this device. Disable it in Quick Sync to edit device lighting.</p>
-      <div class="device-controls" :class="{ 'sync-locked': syncActive }" :inert="syncActive || undefined">
-      <div v-if="cap.supports_mb_rgb_sync" class="row">
+      <p v-if="syncActive" class="sync-notice">Quick Sync controls lighting effects.<template v-if="cap.fan_led_count_control"> LED count is still editable.</template></p>
+      <div class="device-controls">
+      <div v-if="cap.supports_mb_rgb_sync" class="row" :class="{ 'sync-locked': syncActive }" :inert="syncActive || undefined">
         <n-checkbox v-model:checked="mbSync">Motherboard ARGB Sync</n-checkbox>
       </div>
 
@@ -180,12 +186,12 @@ const summary = computed(() =>
       <template v-if="!mbSync">
         <p v-if="cap.hardware_group_effects" class="muted">Mode, speed, brightness and direction apply to the whole group or ring. Static and Breathing support a separate color for each fan.</p>
         <p v-if="cap.hardware_group_effects && !devConfig.regions" class="muted">Fan settings stay saved. Conflicting effects use the last fan's group settings. Compatible Static and Breathing colors combine. Use group effects below to set each group and ring.</p>
-        <div v-if="regional || portGroups" class="control-tabs">
+        <div v-if="regional || portGroups" class="control-tabs" :inert="syncActive || undefined">
           <n-button size="small" :type="controlTab === 'regions' ? 'primary' : 'default'" @click="controlTab = 'regions'">Group effects</n-button>
           <n-button v-if="cap.supports_direct || portGroups" size="small" :type="controlTab === 'direct' ? 'primary' : 'default'" @click="controlTab = 'direct'">Direct / zones</n-button>
         </div>
-        <RgbRegionEditor v-if="regional && controlTab === 'regions'" :device-id="cap.device_id" :cap="cap" />
-        <RgbZoneEditor v-else-if="portGroups && controlTab === 'regions' && visibleZones[0]" :device-id="cap.device_id" :cap="cap" :zone-index="0" :zone="visibleZones[0]" group-effects />
+        <RgbRegionEditor v-if="regional && controlTab === 'regions'" :device-id="cap.device_id" :cap="cap" :inert="syncActive || undefined" :class="{ 'sync-locked': syncActive }" />
+        <RgbZoneEditor v-else-if="portGroups && controlTab === 'regions' && visibleZones[0]" :device-id="cap.device_id" :cap="cap" :zone-index="0" :zone="visibleZones[0]" :lighting-locked="syncActive" group-effects />
         <div v-if="(!regional && !portGroups) || controlTab === 'direct'" class="zones">
           <RgbZoneEditor
             v-for="(z, i) in visibleZones"
@@ -196,15 +202,16 @@ const summary = computed(() =>
             :zone="z"
             :direct-only="regional && controlTab === 'direct'"
             :per-fan-only="portGroups && controlTab === 'direct'"
+            :lighting-locked="syncActive"
           />
         </div>
 
-        <div v-if="!regional && !portGroups" class="actions">
+        <div v-if="!regional && !portGroups" class="actions" :class="{ 'sync-locked': syncActive }" :inert="syncActive || undefined">
           <n-button size="small" @click="applyToAllZones">Apply to All Zones</n-button>
         </div>
 
         <!-- Preset bar -->
-        <div class="preset-bar">
+        <div class="preset-bar" :class="{ 'sync-locked': syncActive }" :inert="syncActive || undefined">
           <n-select
             :value="activePreset"
             size="small"

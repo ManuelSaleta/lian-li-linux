@@ -6,11 +6,21 @@ use crate::registry::SharedHid;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
+use std::sync::atomic::{AtomicU16, Ordering};
 use tracing::{debug, info};
+
+const GALAHAD_FAN_LED_CONTROL: lianli_shared::rgb::RgbLedCountControl =
+    lianli_shared::rgb::RgbLedCountControl {
+        zone: 1,
+        min: 8,
+        max: 50,
+        default: 24,
+    };
 
 pub struct AioLcdRgbController {
     device: SharedHid,
     variant: AioLcdVariant,
+    fan_led_count: AtomicU16,
 }
 
 impl AioLcdRgbController {
@@ -18,7 +28,11 @@ impl AioLcdRgbController {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
         info!("Opened {} RGB controller", variant.name());
-        Ok(Self { device, variant })
+        Ok(Self {
+            device,
+            variant,
+            fan_led_count: AtomicU16::new(FAN_LED_COUNT),
+        })
     }
 
     fn set_pump_light(&self, effect: &RgbEffect, source_mcu: bool) -> Result<()> {
@@ -53,6 +67,21 @@ impl AioLcdRgbController {
         source_mcu: bool,
         sync_to_pump: bool,
     ) -> Result<()> {
+        let payload = Self::fan_light_payload(
+            effect,
+            source_mcu,
+            sync_to_pump,
+            self.fan_led_count.load(Ordering::Relaxed),
+        );
+        self.send_rgb_command(CMD_SET_FAN_LIGHT, &payload)
+    }
+
+    fn fan_light_payload(
+        effect: &RgbEffect,
+        source_mcu: bool,
+        sync_to_pump: bool,
+        led_count: u16,
+    ) -> [u8; 20] {
         let mode_byte = effect.mode.to_hydroshift_lcd_mode_byte().unwrap_or(3);
         let mut payload = [0u8; 20];
         payload[0] = mode_byte;
@@ -68,10 +97,8 @@ impl AioLcdRgbController {
         payload[16] = (effect.disabled || effect.mode == RgbMode::Off) as u8;
         payload[17] = if source_mcu { 0 } else { 1 };
         payload[18] = sync_to_pump as u8;
-        payload[19] = FAN_LED_COUNT as u8;
-        self.send_rgb_command(CMD_SET_FAN_LIGHT, &payload)?;
-        debug!("Set fan light: mode={mode_byte} sync_to_pump={sync_to_pump}");
-        Ok(())
+        payload[19] = led_count as u8;
+        payload
     }
 
     fn send_rgb_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
@@ -95,6 +122,22 @@ impl AioLcdRgbController {
 }
 
 impl RgbDevice for AioLcdRgbController {
+    fn fan_led_count_control(&self) -> Option<lianli_shared::rgb::RgbLedCountControl> {
+        matches!(
+            self.variant,
+            AioLcdVariant::Galahad2Lcd | AioLcdVariant::Galahad2Vision
+        )
+        .then_some(GALAHAD_FAN_LED_CONTROL)
+    }
+
+    fn configure_fan_led_count(&self, count: Option<u16>) -> Result<bool> {
+        let control = self
+            .fan_led_count_control()
+            .context("Adjustable fan LED count is unsupported")?;
+        let count = control.resolve(count).map_err(anyhow::Error::msg)?;
+        Ok(self.fan_led_count.swap(count, Ordering::Relaxed) != count)
+    }
+
     fn device_name(&self) -> String {
         format!("{} AIO", self.variant.name())
     }
@@ -134,23 +177,7 @@ impl RgbDevice for AioLcdRgbController {
     }
 
     fn zone_info(&self) -> Vec<RgbZoneInfo> {
-        if self.variant.has_pump_rgb() {
-            vec![
-                RgbZoneInfo {
-                    name: "Pump Head".to_string(),
-                    led_count: 24,
-                },
-                RgbZoneInfo {
-                    name: "Fans".to_string(),
-                    led_count: FAN_LED_COUNT,
-                },
-            ]
-        } else {
-            vec![RgbZoneInfo {
-                name: "Fans".to_string(),
-                led_count: FAN_LED_COUNT,
-            }]
-        }
+        zones(self.variant, self.fan_led_count.load(Ordering::Relaxed))
     }
 
     fn set_zone_effect(&self, zone: u8, effect: &RgbEffect) -> Result<()> {
@@ -171,8 +198,8 @@ impl RgbDevice for AioLcdRgbController {
     fn supported_scopes(&self) -> Vec<Vec<RgbScope>> {
         if self.variant.has_pump_rgb() {
             vec![
-                vec![RgbScope::All, RgbScope::Inner, RgbScope::Outer], // Pump Head
-                vec![],                                                // Fans
+                vec![RgbScope::All, RgbScope::Inner, RgbScope::Outer],
+                vec![],
             ]
         } else {
             vec![]
@@ -192,5 +219,72 @@ impl RgbDevice for AioLcdRgbController {
         self.set_fan_light(&dummy, source_mcu, false)?;
         debug!("Set MB RGB sync: enabled={enabled}");
         Ok(())
+    }
+}
+
+fn zones(variant: AioLcdVariant, fan_led_count: u16) -> Vec<RgbZoneInfo> {
+    if variant.has_pump_rgb() {
+        vec![
+            RgbZoneInfo {
+                name: "Pump Head".to_string(),
+                led_count: 12,
+            },
+            RgbZoneInfo {
+                name: "Fans".to_string(),
+                led_count: fan_led_count,
+            },
+        ]
+    } else {
+        vec![RgbZoneInfo {
+            name: "Fans".to_string(),
+            led_count: FAN_LED_COUNT,
+        }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn galahad_fan_led_count_payload_and_bounds() {
+        assert_eq!(GALAHAD_FAN_LED_CONTROL.resolve(None).unwrap(), 24);
+        for count in [8, 24, 50] {
+            let count = GALAHAD_FAN_LED_CONTROL.resolve(Some(count)).unwrap();
+            for source_mcu in [false, true] {
+                let payload = AioLcdRgbController::fan_light_payload(
+                    &RgbEffect::default(),
+                    source_mcu,
+                    false,
+                    count,
+                );
+                assert_eq!(payload.len(), 20);
+                assert_eq!(payload[17], u8::from(!source_mcu));
+                assert_eq!(payload[18], 0);
+                assert_eq!(payload[19], count as u8);
+            }
+        }
+        for count in [0, 7, 51, 256, u16::MAX] {
+            assert!(GALAHAD_FAN_LED_CONTROL.resolve(Some(count)).is_err());
+        }
+    }
+
+    #[test]
+    fn galahad_pump_led_count_matches_both_vendor_dispatch_ids() {
+        for pid in [0x7391, 0x7395] {
+            let variant = AioLcdVariant::from_pid(pid).unwrap();
+            let layout = zones(variant, 50);
+            assert!(variant.has_pump_rgb());
+            assert_eq!(layout.len(), 2);
+            assert_eq!(layout[0].led_count, 12);
+            assert_eq!(layout[1].led_count, 50);
+        }
+        for pid in [0x7398, 0x7399, 0x739a] {
+            let variant = AioLcdVariant::from_pid(pid).unwrap();
+            assert!(!variant.has_pump_rgb());
+            let layout = zones(variant, 50);
+            assert_eq!(layout.len(), 1);
+            assert_eq!(layout[0].led_count, 24);
+        }
     }
 }

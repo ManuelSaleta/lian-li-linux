@@ -501,6 +501,7 @@ mod tests {
     fn config() -> RgbDeviceConfig {
         RgbDeviceConfig {
             device_id: "controller:group0".into(),
+            fan_led_count: None,
             mb_rgb_sync: false,
             active_preset: None,
             zones: (0..4)
