@@ -33,8 +33,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::warn;
+use tracing::{debug, warn};
 use widgets::{draw_widget, WidgetState};
+
+const SENSOR_RESOLVE_RETRY: Duration = Duration::from_secs(2);
 
 fn default_sample_interval(kind: &WidgetKind, explicit_ms: Option<u64>) -> Duration {
     let default_ms = match kind {
@@ -51,6 +53,7 @@ fn default_sample_interval(kind: &WidgetKind, explicit_ms: Option<u64>) -> Durat
 
 pub struct CustomAsset {
     template: LcdTemplate,
+    sensors: Vec<SensorInfo>,
     widget_states: Mutex<Vec<WidgetState>>,
     template_image: RgbaImage,
     scratch: Mutex<RgbaImage>,
@@ -203,8 +206,9 @@ impl CustomAsset {
             if let Some(source) = widget_sensor_source(&widget.kind) {
                 state.resolved_sensor = resolve_sensor_source(source, all_sensors);
                 if state.resolved_sensor.is_none() {
+                    state.next_resolve_at = Some(Instant::now() + SENSOR_RESOLVE_RETRY);
                     warn!(
-                        "template '{}' widget '{}' sensor unavailable — rendering as zero",
+                        "template '{}' widget '{}' sensor unavailable — rendering as zero until it appears",
                         template.id, widget.id
                     );
                 }
@@ -276,6 +280,7 @@ impl CustomAsset {
         Ok(Arc::new(Self {
             _retained_budget: retained_budget,
             template: template.clone(),
+            sensors: all_sensors.to_vec(),
             widget_states: Mutex::new(widget_states),
             template_image: composite,
             scratch: Mutex::new(scratch),
@@ -398,6 +403,22 @@ impl CustomAsset {
                 .map(|t| now.saturating_duration_since(t) >= state.sample_interval)
                 .unwrap_or(true);
 
+            if state.resolved_sensor.is_none() && state.next_resolve_at.is_none_or(|at| now >= at) {
+                if let Some(source) = widget_sensor_source(&widget.kind) {
+                    state.resolved_sensor = resolve_sensor_source(source, &self.sensors);
+                    if state.resolved_sensor.is_some() {
+                        state.next_resolve_at = None;
+                        debug!(
+                            "template '{}' widget '{}' sensor became available",
+                            self.template.id, widget.id
+                        );
+                        any_dynamic_changed = true;
+                    } else {
+                        state.next_resolve_at = Some(now + SENSOR_RESOLVE_RETRY);
+                    }
+                }
+            }
+
             if let Some(sensor) = &state.resolved_sensor {
                 if due {
                     let raw = match read_sensor_value(sensor) {
@@ -512,22 +533,12 @@ impl CustomAsset {
 }
 
 #[cfg(test)]
-mod text_work_tests {
+mod tests {
     use super::*;
 
-    #[test]
-    fn excessive_text_never_reaches_the_frame_consumer_and_can_recover() {
-        let widgets: Vec<_> = (0..20)
-            .map(|index| {
-                serde_json::json!({
-                    "id": format!("label-{index}"), "x": 4, "y": 4, "width": 8, "height": 8,
-                    "kind": {"type": "label", "text": "M".repeat(4096), "font_size": 1,
-                        "color": [255,255,255,255]}
-                })
-            })
-            .collect();
+    fn test_asset(widgets: Vec<serde_json::Value>) -> CustomAsset {
         let template: LcdTemplate = serde_json::from_value(serde_json::json!({
-            "id": "text-work", "name": "Text work", "base_width": 8, "base_height": 8,
+            "id": "test", "name": "Test", "base_width": 8, "base_height": 8,
             "background": {"type": "color", "rgb": [0,0,0]}, "widgets": widgets
         }))
         .unwrap();
@@ -536,13 +547,14 @@ mod text_work_tests {
                 .join("../../templates/assets/neon-us88/JetBrainsMonoNL-Medium.ttf"),
         )
         .unwrap();
-        let mut asset = CustomAsset {
+        CustomAsset {
             widget_states: Mutex::new(
                 (0..template.widgets.len())
                     .map(|_| WidgetState::blank())
                     .collect(),
             ),
             template,
+            sensors: Vec::new(),
             template_image: RgbaImage::new(8, 8),
             scratch: Mutex::new(RgbaImage::new(8, 8)),
             screen: ScreenInfo::WIRELESS_LCD,
@@ -560,7 +572,55 @@ mod text_work_tests {
             frame_index: AtomicUsize::new(0),
             start_instant: Instant::now(),
             _retained_budget: crate::resource_budget::RetainedBudget::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn sensor_retry_redraws_then_suppresses_unchanged_frames() {
+        let asset = test_asset(vec![serde_json::json!({
+            "id": "sensor", "x": 4, "y": 4, "width": 8, "height": 8,
+            "kind": {
+                "type": "horizontal_bar", "source": {"type": "constant", "value": 50},
+                "value_min": 0, "value_max": 100, "background_color": [0, 0, 0, 255]
+            }
+        })]);
+        asset.widget_states.lock()[0].next_resolve_at =
+            Some(Instant::now() + Duration::from_secs(3600));
+        let initial = asset
+            .render_frame_rgba_with(true, |bytes| bytes.to_vec())
+            .unwrap()
+            .unwrap();
+        assert!(asset
+            .render_frame_rgba_with(false, |_| panic!("retry ran before its deadline"))
+            .unwrap()
+            .is_none());
+
+        asset.widget_states.lock()[0].next_resolve_at = Some(Instant::now());
+        let resolved = asset
+            .render_frame_rgba_with(false, |bytes| bytes.to_vec())
+            .unwrap()
+            .expect("new sensor value redraws without forcing a frame");
+        assert_ne!(initial, resolved);
+        assert_eq!(asset.widget_states.lock()[0].cached_value, 50.0);
+        asset.widget_states.lock()[0].last_sample_at = None;
+        assert!(asset
+            .render_frame_rgba_with(false, |_| panic!("unchanged value redrew the frame"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn excessive_text_never_reaches_the_frame_consumer_and_can_recover() {
+        let widgets: Vec<_> = (0..20)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("label-{index}"), "x": 4, "y": 4, "width": 8, "height": 8,
+                    "kind": {"type": "label", "text": "M".repeat(4096), "font_size": 1,
+                        "color": [255,255,255,255]}
+                })
+            })
+            .collect();
+        let mut asset = test_asset(widgets);
         let error = asset
             .render_frame_rgba_with(true, |_| panic!("partial frame was published"))
             .unwrap_err();
