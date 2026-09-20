@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Lian Li service recovery
+Name=Lian Li Linux service recovery
 Comment=Resume a previously authorized service switch after login
 Exec=/usr/bin/lianli-control trigger-recovery
 TryExec=/usr/bin/lianli-control

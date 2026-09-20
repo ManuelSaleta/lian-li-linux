@@ -532,7 +532,7 @@ impl ServiceManager {
         let mut monitor = OperationMonitor::new()?;
         let startup = monitor.enter("startup");
         info!("=====================================================================");
-        info!("LIAN LI DAEMON");
+        info!("LIAN LI LINUX DAEMON");
         info!("=====================================================================");
 
         {

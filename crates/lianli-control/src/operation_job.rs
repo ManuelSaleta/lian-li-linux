@@ -242,7 +242,7 @@ fn launch_arguments(
         "--collect",
         "--no-ask-password",
         "--unit=lianli-control-operation.service",
-        "--description=Lian Li service operation",
+        "--description=Lian Li Linux service operation",
         "--property=Type=exec",
         "--property=Restart=no",
         "--property=KillMode=mixed",

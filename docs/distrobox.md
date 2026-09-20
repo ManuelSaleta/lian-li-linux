@@ -140,7 +140,7 @@ The generated unit follows this recipe:
 
 ```ini
 [Unit]
-Description=Lian Li Daemon (Distrobox)
+Description=Lian Li Linux Daemon (Distrobox)
 After=graphical-session.target
 
 [Service]

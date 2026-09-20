@@ -1,5 +1,5 @@
 [Unit]
-Description=Lian Li desktop session capture
+Description=Lian Li Linux desktop session capture
 ConditionUser=!root
 
 [Service]

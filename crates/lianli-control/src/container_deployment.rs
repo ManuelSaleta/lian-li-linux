@@ -100,7 +100,7 @@ impl Deployment {
 
     pub fn verify_unit(&self, scope: ServiceScope, contents: &str) -> Result<()> {
         ensure!(
-            contents == self.unit(scope)?,
+            crate::distrobox_unit::matches_installed(contents, &self.unit(scope)?),
             "The installed Distrobox wrapper differs from its deployment record"
         );
         Ok(())
@@ -526,6 +526,14 @@ mod tests {
         let record = deployment();
         let unit = record.unit(ServiceScope::System).unwrap();
         record.verify_unit(ServiceScope::System, &unit).unwrap();
+        let legacy = unit.replace("Description=Lian Li Linux ", "Description=Lian Li ");
+        record.verify_unit(ServiceScope::System, &legacy).unwrap();
+        assert!(record
+            .verify_unit(
+                ServiceScope::System,
+                &legacy.replace("fixture-box", "other-box")
+            )
+            .is_err());
         assert!(record.verify_unit(ServiceScope::User, &unit).is_err());
         assert!(record
             .verify_unit(

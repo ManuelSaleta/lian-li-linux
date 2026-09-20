@@ -5,7 +5,7 @@ use lianli_shared::installation::InstallationContext;
 mod worker_limits;
 
 #[derive(Parser)]
-#[command(version, about = "Lian Li installation and service management")]
+#[command(version, about = "Lian Li Linux installation and service management")]
 struct Cli {
     #[arg(long, hide = true, requires = "transfer_channel")]
     worker_destination: Option<String>,

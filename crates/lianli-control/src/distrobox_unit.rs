@@ -3,6 +3,12 @@ use std::path::Path;
 
 pub(super) const WRAPPER_WAIT_SCRIPT: &str = r#"test -z "$1" || exec /usr/bin/timeout 5s /usr/bin/tail --pid="$1" --sleep-interval=0.1 -f /dev/null"#;
 
+pub(crate) fn matches_installed(contents: &str, expected: &str) -> bool {
+    contents == expected
+        || contents
+            == expected.replacen("\nDescription=Lian Li Linux ", "\nDescription=Lian Li ", 1)
+}
+
 fn wrapper_wait() -> Result<String> {
     Ok(format!(
         "/usr/bin/sh -c {} -- \"${{MAINPID}}\"",
@@ -80,7 +86,7 @@ pub fn generate(name: &str, host_enter: &Path, guest_binaries: &Path) -> Result<
             .to_str()
             .context("Guest binary path must be UTF-8")?,
     )?;
-    Ok(format!("[Unit]\nDescription=Lian Li Daemon (Distrobox)\nAfter=graphical-session.target\n\n[Service]\nExecStart={prefix} {daemon} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service --invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy=default.target\n"))
+    Ok(format!("[Unit]\nDescription=Lian Li Linux Daemon (Distrobox)\nAfter=graphical-session.target\n\n[Service]\nExecStart={prefix} {daemon} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service --invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy=default.target\n"))
 }
 
 pub fn generate_session(name: &str, host_enter: &Path, guest_binaries: &Path) -> Result<String> {
@@ -92,7 +98,7 @@ pub fn generate_session(name: &str, host_enter: &Path, guest_binaries: &Path) ->
             .to_str()
             .context("Guest binary path must be UTF-8")?,
     )?;
-    Ok(format!("[Unit]\nDescription=Lian Li desktop capture (Distrobox)\n\n[Service]\nExecStart={prefix} {session} --login-start --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {session} --stop-service ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=always\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=30s\n\n[Install]\nWantedBy=default.target\n"))
+    Ok(format!("[Unit]\nDescription=Lian Li Linux desktop capture (Distrobox)\n\n[Service]\nExecStart={prefix} {session} --login-start --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {session} --stop-service ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=always\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=30s\n\n[Install]\nWantedBy=default.target\n"))
 }
 
 pub fn generate_managed(
@@ -130,7 +136,7 @@ pub fn generate_managed(
             "--system ", "--scope system ", "multi-user.target",
         ),
     };
-    Ok(format!("[Unit]\nDescription=Lian Li Daemon (managed Distrobox)\n{dependencies}\n[Service]\n{account}ExecStart={prefix} /usr/bin/env {working} {daemon} {mode}--config {config} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service {stop_scope}--invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy={target}\n"))
+    Ok(format!("[Unit]\nDescription=Lian Li Linux Daemon (managed Distrobox)\n{dependencies}\n[Service]\n{account}ExecStart={prefix} /usr/bin/env {working} {daemon} {mode}--config {config} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service {stop_scope}--invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy={target}\n"))
 }
 
 pub fn generate_system(
@@ -167,7 +173,7 @@ pub fn generate_system(
             .to_str()
             .context("Guest binary path must be UTF-8")?,
     )?;
-    Ok(format!("[Unit]\nDescription=Lian Li Daemon (Distrobox system mode)\nRequires=user@{owner_uid}.service\nAfter=user@{owner_uid}.service\n\n[Service]\nUser={owner_uid}\nEnvironment=XDG_RUNTIME_DIR=/run/user/{owner_uid}\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{owner_uid}/bus\nRuntimeDirectory=lianli\nRuntimeDirectoryMode=0755\nExecStart={prefix} {daemon} --system --config {config} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service --scope system --invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy=multi-user.target\n"))
+    Ok(format!("[Unit]\nDescription=Lian Li Linux Daemon (Distrobox system mode)\nRequires=user@{owner_uid}.service\nAfter=user@{owner_uid}.service\n\n[Service]\nUser={owner_uid}\nEnvironment=XDG_RUNTIME_DIR=/run/user/{owner_uid}\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{owner_uid}/bus\nRuntimeDirectory=lianli\nRuntimeDirectoryMode=0755\nExecStart={prefix} {daemon} --system --config {config} --service-invocation ${{INVOCATION_ID}}\nExecStop={prefix} {control} stop-service --scope system --invocation-id ${{INVOCATION_ID}}\nExecStop={wait}\nRestart=on-failure\nRestartSec=5s\nKillMode=control-group\nSendSIGKILL=no\nTimeoutStopSec=120s\n\n[Install]\nWantedBy=multi-user.target\n"))
 }
 
 pub fn session_guidance(name: &str) -> Result<String> {

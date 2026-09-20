@@ -93,7 +93,7 @@ install -Dpm644 assets/icons/icon.svg       %{buildroot}%{_datadir}/icons/hicolo
 %pre
 getent group lianli >/dev/null || groupadd -r lianli
 getent passwd lianli >/dev/null || \
-    useradd -r -g lianli -d / -s /sbin/nologin -c "Lian Li daemon" lianli
+    useradd -r -g lianli -d / -s /sbin/nologin -c "Lian Li Linux daemon" lianli
 
 %post
 udevadm control --reload-rules >/dev/null 2>&1 || :

@@ -1,5 +1,5 @@
 [Unit]
-Description=Recover an interrupted Lian Li service switch
+Description=Recover an interrupted Lian Li Linux service switch
 After=systemd-tmpfiles-setup.service systemd-user-sessions.service
 ConditionPathExists=/var/lib/lianli-control/switch.json
 StartLimitIntervalSec=60s

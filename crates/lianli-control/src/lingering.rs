@@ -6,7 +6,7 @@ use lianli_shared::installation::{
 use lianli_shared::services::{ServiceProbe, ServiceReport};
 
 pub fn guidance(uid: u32) -> String {
-    format!("On the host, run sudo loginctl enable-linger {uid}, then Recheck. Lingering allows this account's user services to run before login and after logout. Lian Li does not change it automatically.")
+    format!("On the host, run sudo loginctl enable-linger {uid}, then Recheck. Lingering allows this account's user services to run before login and after logout. Lian Li Linux does not change it automatically.")
 }
 
 fn parse(value: &str) -> Result<bool> {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Lian Li Device Daemon
+Description=Lian Li Linux Device Daemon
 After=graphical-session.target
 PartOf=graphical-session.target
 

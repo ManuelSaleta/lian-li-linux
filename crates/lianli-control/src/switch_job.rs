@@ -312,7 +312,7 @@ fn launch_arguments(
         "--collect",
         "--no-ask-password",
         "--unit=lianli-control-switch.service",
-        "--description=Lian Li service mode switch",
+        "--description=Lian Li Linux service mode switch",
         "--property=Type=exec",
         "--property=Restart=no",
         "--property=KillMode=mixed",

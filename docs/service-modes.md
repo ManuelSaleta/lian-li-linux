@@ -135,7 +135,7 @@ service actions and daemon settings writes across accounts.
 The GUI needs the matching `lianli-control` beside its executable. Source builds must
 build both binaries; packages install both in `/usr/bin`. The host needs `systemd-run`
 and a reachable user manager. In Distrobox, the host launches `distrobox-enter` and
-the helper executes inside the same box as the GUI. No host Lian Li binary is needed.
+the helper executes inside the same box as the GUI. No host Lian Li Linux binary is needed.
 System-service authorization still uses the desktop Polkit agent.
 
 The worker keeps one bounded private progress record under
@@ -205,7 +205,7 @@ so a hidden host record cannot silently become an unselected container. Run
 the daemon never downloads it. This adds two bounded host metadata queries when a
 record is present, per launch check; ordinary polling does not repeat them. Missing
 or mismatched host visibility is actionable startup failure. The host needs no
-Lian Li binary just to enforce an already-existing selection inside Distrobox.
+Lian Li Linux binary just to enforce an already-existing selection inside Distrobox.
 
 Settings and Installation Health show the authoritative selection independently of
 unit enablement. Start/Restart reject a conflicting or unverified selection, while

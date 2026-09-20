@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Lian Li desktop session capture
-Comment=Connect the active desktop to the selected Lian Li hardware daemon
+Name=Lian Li Linux desktop session capture
+Comment=Connect the active desktop to the selected Lian Li Linux hardware daemon
 Exec=systemctl --user start --no-block lianli-session.service
 TryExec=systemctl
 Terminal=false

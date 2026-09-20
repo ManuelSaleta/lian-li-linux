@@ -1,5 +1,5 @@
 [Unit]
-Description=Lian Li Device Daemon (system service)
+Description=Lian Li Linux Device Daemon (system service)
 
 [Service]
 Type=simple

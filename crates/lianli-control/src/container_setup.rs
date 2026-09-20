@@ -14,6 +14,22 @@ use std::time::Duration;
 
 const LIMIT: usize = 64 * 1024;
 
+fn matches_support_file(contents: &str, expected: &str) -> bool {
+    crate::distrobox_unit::matches_installed(contents, expected)
+        || contents
+            == expected.replacen(
+                "\nName=Lian Li Linux service recovery\n",
+                "\nName=Lian Li service recovery\n",
+                1,
+            )
+        || contents
+            == expected.replacen(
+                "\nDescription=Recover an interrupted Lian Li Linux service switch\n",
+                "\nDescription=Recover an interrupted Lian Li service switch\n",
+                1,
+            )
+}
+
 fn write_file(path: &Path, contents: &str, previous: &[String], owner: u32) -> Result<()> {
     let boundary = if owner == 0 {
         PathBuf::from("/etc")
@@ -64,7 +80,10 @@ fn write_file_in(
     }
     if let Some(existing) = existing {
         ensure!(
-            previous.contains(&existing),
+            matches_support_file(&existing, contents)
+                || previous
+                    .iter()
+                    .any(|expected| matches_support_file(&existing, expected)),
             "A custom support file needs review before replacement: {}",
             path.display()
         );
@@ -415,6 +434,30 @@ pub fn install_user(deployment: &Deployment, previous: Option<&Deployment>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_updates_legacy_labels_without_accepting_changed_commands() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = unsafe { libc::geteuid() };
+        for (index, current) in [
+            include_str!("../../../packaging/systemd/lianli-control-recovery.service"),
+            include_str!("../../../packaging/desktop/com.sgtaziz.lianlilinux.recovery.desktop"),
+            include_str!("../../../packaging/systemd/lianli-daemon.service"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = root.path().join(format!("support-{index}"));
+            let legacy = current.replace("Lian Li Linux", "Lian Li");
+            write_file_in(&path, &legacy, &[], owner, root.path()).unwrap();
+            write_file_in(&path, current, &[], owner, root.path()).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), current);
+            assert!(!matches_support_file(
+                &format!("{legacy}\nExecStart=/bin/false\n"),
+                current
+            ));
+        }
+    }
 
     #[test]
     fn setup_recovers_only_an_uninstalled_system_selection() {
