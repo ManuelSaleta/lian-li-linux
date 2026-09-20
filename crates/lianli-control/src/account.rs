@@ -293,12 +293,29 @@ mod tests {
 
     #[test]
     fn user_service_actions_use_only_the_callers_manager_and_fixed_unit() {
-        let account = Account::user(if unsafe { libc::geteuid() } == 0 {
+        let root = unsafe { libc::geteuid() } == 0;
+        let uid = if root {
             65534
         } else {
             unsafe { libc::geteuid() }
-        })
-        .unwrap();
+        };
+        let gid = if root {
+            65534
+        } else {
+            unsafe { libc::getegid() }
+        };
+        let account = Account {
+            uid,
+            gid,
+            groups: if root {
+                vec![gid]
+            } else {
+                current_groups(gid).unwrap()
+            },
+            container: None,
+            name: "fixture".into(),
+            home: "/fixture".into(),
+        };
         for action in [
             lianli_shared::services::ServiceAction::Start,
             lianli_shared::services::ServiceAction::Stop,
