@@ -4,7 +4,7 @@ use crate::reservation::{HardwareReservation, ServiceOperationLock};
 use crate::service_operation::Backend;
 use anyhow::{ensure, Context, Result};
 use lianli_shared::installation::InstallationContext;
-use lianli_shared::services::ServiceScope;
+use lianli_shared::services::{ServiceScope, ServiceSelection};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -173,6 +173,31 @@ fn initialize_locks() -> Result<()> {
     Ok(())
 }
 
+fn setup_selection(
+    selection: Option<ServiceSelection>,
+    owner_uid: u32,
+    startup: crate::service_startup::Policy,
+    system_missing: bool,
+    managed: bool,
+) -> Result<Option<ServiceSelection>> {
+    use crate::switch_journal::Startup;
+    if selection.is_none_or(|selection| selection.uid == owner_uid) {
+        return Ok(selection);
+    }
+    ensure!(
+        selection.is_some_and(|selection| selection.scope == ServiceScope::System)
+            && system_missing
+            && !managed
+            && startup.user == Startup::Disabled
+            && startup.system == Startup::Disabled,
+        "The host selects another service account. Stop the previous daemon cleanly and use the host control helper to select user mode for UID {owner_uid} before retrying setup"
+    );
+    Ok(Some(ServiceSelection {
+        scope: ServiceScope::User,
+        uid: owner_uid,
+    }))
+}
+
 pub fn install(deployment: &Deployment) -> Result<()> {
     ensure!(
         InstallationContext::detect() == InstallationContext::Native,
@@ -194,10 +219,9 @@ pub fn install(deployment: &Deployment) -> Result<()> {
     );
     let mut backend = crate::authorized_service::Authorized::new(&account, &operation)?;
     let report = backend.inspect()?;
-    crate::service_startup::Policy::for_setup(&report)?.validate()?;
+    let startup = crate::service_startup::Policy::for_setup(&report)?;
+    startup.validate()?;
     let selection = crate::service_selection::inspect(&InstallationContext::Native)?;
-    ensure!(selection.is_none_or(|selection| selection.uid == account.uid),
-        "The host selects another service account. Switch to this user's mode before setting up the box");
     for scope in [ServiceScope::User, ServiceScope::System] {
         ensure!(
             crate::native_switch::idle(crate::native_switch::unit(&report, scope)?),
@@ -223,6 +247,17 @@ pub fn install(deployment: &Deployment) -> Result<()> {
     let previous = crate::container_deployment::load()?;
     if let Some(previous) = &previous {
         previous.verify_owner(&account)?;
+    }
+    let selected = setup_selection(
+        selection,
+        account.uid,
+        startup,
+        system.load_state == "not-found",
+        previous.is_some(),
+    )?;
+    if selected != selection {
+        // Publish before installing wrappers so interrupted setup can be retried safely.
+        crate::service_selection::replace(selected, &operation, &hardware)?;
     }
     let mut old_system = Vec::new();
     if let Some(previous) = &previous {
@@ -380,6 +415,60 @@ pub fn install_user(deployment: &Deployment, previous: Option<&Deployment>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_recovers_only_an_uninstalled_system_selection() {
+        use crate::service_startup::Policy;
+        use crate::switch_journal::Startup;
+        let disabled = Policy {
+            user: Startup::Disabled,
+            system: Startup::Disabled,
+        };
+        let old = Some(ServiceSelection {
+            scope: ServiceScope::System,
+            uid: 930,
+        });
+        let user = Some(ServiceSelection {
+            scope: ServiceScope::User,
+            uid: 1000,
+        });
+        assert_eq!(
+            setup_selection(old, 1000, disabled, true, false).unwrap(),
+            user
+        );
+        for scope in [ServiceScope::User, ServiceScope::System] {
+            let owned = Some(ServiceSelection { scope, uid: 1000 });
+            assert_eq!(
+                setup_selection(owned, 1000, disabled, false, true).unwrap(),
+                owned
+            );
+        }
+        assert_eq!(
+            setup_selection(None, 1000, disabled, true, false).unwrap(),
+            None
+        );
+        assert!(setup_selection(old, 1000, disabled, false, false).is_err());
+        assert!(setup_selection(old, 1000, disabled, true, true).is_err());
+        let foreign_user = Some(ServiceSelection {
+            scope: ServiceScope::User,
+            uid: 1001,
+        });
+        assert!(setup_selection(foreign_user, 1000, disabled, true, false).is_err());
+        for enabled in [Startup::Enabled, Startup::Runtime] {
+            for startup in [
+                Policy {
+                    user: enabled,
+                    ..disabled
+                },
+                Policy {
+                    system: enabled,
+                    ..disabled
+                },
+            ] {
+                assert!(setup_selection(old, 1000, startup, true, false).is_err());
+            }
+        }
+    }
 
     #[test]
     fn setup_is_idempotent_and_preserves_recognized_replacements() {
