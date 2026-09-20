@@ -20,6 +20,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(hide = true)]
+    RepairContainerAccess {
+        #[arg(long)]
+        expected_box: String,
+    },
+    #[command(hide = true)]
     ReadContainerDeployment {
         #[arg(long)]
         expected_box: String,
@@ -424,6 +429,9 @@ fn main() -> anyhow::Result<()> {
             lianli_control::container_change::verify_host_request(&expected_box)?;
             let id = lianli_control::switch_job::start(change.request()?)?;
             println!("{}", serde_json::to_string(&id)?);
+        }
+        Command::RepairContainerAccess { expected_box } => {
+            lianli_control::container_deployment::repair_access(&expected_box)?;
         }
         Command::SwitchStatus { expected_box } => {
             lianli_control::container_change::verify_host_request(&expected_box)?;

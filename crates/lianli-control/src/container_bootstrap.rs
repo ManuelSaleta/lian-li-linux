@@ -11,11 +11,33 @@ use std::time::Duration;
 const SCRIPT: &str = include_str!("../../../packaging/distrobox/bootstrap-host.sh");
 const LIMIT: u64 = 128 * 1024 * 1024;
 
+pub(crate) fn deployment_for_action() -> Result<Option<Deployment>> {
+    let InstallationContext::Distrobox { name } = InstallationContext::detect() else {
+        anyhow::bail!("Set up host support from the selected Distrobox");
+    };
+    match crate::container_change::deployment() {
+        Ok(deployment) => Ok(deployment),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            let binaries = std::env::current_exe()?
+                .parent()
+                .context("Application directory is unavailable")?
+                .to_path_buf();
+            authorize(&binaries, "repair", &name)?;
+            crate::container_change::deployment()
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn proposal(user_config: Option<PathBuf>) -> Result<Deployment> {
     let InstallationContext::Distrobox { name } = InstallationContext::detect() else {
         anyhow::bail!("Set up host support from the selected Distrobox");
     };
-    if let Some(deployment) = crate::container_change::deployment()? {
+    if let Some(deployment) = deployment_for_action()? {
         return Ok(deployment);
     }
     let account = crate::account::Account::user(unsafe { libc::geteuid() })?;
@@ -109,6 +131,20 @@ pub fn install(deployment: &Deployment) -> Result<()> {
         uid != 0 && deployment.owner_uid == uid && deployment.route.launch.name == name,
         "Host setup must use this box and its original account"
     );
+    authorize(
+        &deployment.route.launch.binaries,
+        "install",
+        &serde_json::to_string(deployment)?,
+    )
+}
+
+fn authorize(binaries: &std::path::Path, action: &str, text: &str) -> Result<()> {
+    let InstallationContext::Distrobox { name } = InstallationContext::detect() else {
+        anyhow::bail!("Bootstrap host support from the selected Distrobox");
+    };
+    let uid = unsafe { libc::geteuid() };
+    ensure!(uid != 0, "Host setup requires the original box owner");
+    ensure!(text.len() <= 32 * 1024, "Host setup request exceeds 32 KiB");
     let route = crate::services::Route::detect(&InstallationContext::Distrobox { name })?;
     let runtime = PathBuf::from(format!("/run/host/run/user/{uid}"));
     let metadata = fs::symlink_metadata(&runtime)?;
@@ -140,7 +176,7 @@ pub fn install(deployment: &Deployment) -> Result<()> {
         "The host and box do not share the same private staging directory"
     );
     let digest = stage(
-        &deployment.route.launch.binaries.join("lianli-control"),
+        &binaries.join("lianli-control"),
         &directory.path().join("lianli-control"),
     )?;
     let host_binary = host_directory.join("lianli-control");
@@ -150,8 +186,6 @@ pub fn install(deployment: &Deployment) -> Result<()> {
     let version = route.bounded_output(host_binary, &["--version"], Duration::from_secs(10))?;
     ensure!(version.status.success() && version.stdout.trim() == format!("lianli-control {}", env!("CARGO_PKG_VERSION")),
         "The host cannot run the bundled control helper. Install a host-compatible helper before setting up services. {}", version.stderr.trim());
-    let text = serde_json::to_string(deployment)?;
-    ensure!(text.len() <= 32 * 1024, "Deployment record exceeds 32 KiB");
     let output = route
         .bounded_output(
             "/usr/bin/pkexec",
@@ -164,7 +198,8 @@ pub fn install(deployment: &Deployment) -> Result<()> {
                 &uid.to_string(),
                 &digest,
                 host_binary,
-                &text,
+                text,
+                action,
             ],
             Duration::from_secs(300),
         )

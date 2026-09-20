@@ -46,6 +46,7 @@ fn arguments(name: &str, request: ServiceChangeRequest) -> Vec<String> {
 }
 
 pub fn start(request: ServiceChangeRequest) -> Result<String> {
+    crate::container_bootstrap::deployment_for_action()?;
     let args = arguments(&box_name()?, request);
     let output = call(&args, Duration::from_secs(220))
         .context("Host switch submission was not confirmed. Recheck progress before retrying")?;

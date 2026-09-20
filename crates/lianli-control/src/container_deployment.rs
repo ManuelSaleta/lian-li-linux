@@ -237,10 +237,37 @@ fn host_context() -> Result<()> {
 
 pub fn load() -> Result<Option<Deployment>> {
     host_context()?;
-    let Some(store) = Store::open(Path::new(DIRECTORY), 0, false)? else {
+    load_at(Path::new(DIRECTORY), 0, unsafe { libc::geteuid() } == 0)
+}
+
+fn load_at(path: &Path, owner: u32, repair: bool) -> Result<Option<Deployment>> {
+    let Some(store) = Store::open(path, owner, false)? else {
         return Ok(None);
     };
-    store.read()
+    let deployment = store.read()?;
+    if repair {
+        store
+            .directory
+            .set_permissions(fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(deployment)
+}
+
+pub fn repair_access(name: &str) -> Result<()> {
+    host_context()?;
+    let account = Account::authorized_caller()?;
+    let store = Store::open(Path::new(DIRECTORY), 0, false)?
+        .context("The host deployment directory is missing")?;
+    let deployment = store.read()?.context("The host deployment is missing")?;
+    deployment.verify_owner(&account)?;
+    ensure!(
+        deployment.route.launch.name == name,
+        "The host deployment belongs to another Distrobox"
+    );
+    store
+        .directory
+        .set_permissions(fs::Permissions::from_mode(0o755))?;
+    Ok(())
 }
 
 pub fn install(
@@ -305,6 +332,9 @@ impl Store {
             metadata.uid() == owner && metadata.mode() & 0o022 == 0,
             "Deployment directory has unsafe ownership or permissions"
         );
+        if create {
+            directory.set_permissions(fs::Permissions::from_mode(0o755))?;
+        }
         Ok(Some(Self { directory, owner }))
     }
 
@@ -394,6 +424,65 @@ mod tests {
                 system_working_directory: "/home/fixture".into(),
             },
         }
+    }
+
+    #[test]
+    fn privileged_reads_repair_private_directories_only_after_validating_the_record() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("deployment");
+        let owner = unsafe { libc::geteuid() };
+        let store = Store::open(&path, owner, true).unwrap().unwrap();
+        store.write(&deployment()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(load_at(&path, owner, false).unwrap(), Some(deployment()));
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(load_at(&path, owner, true).unwrap(), Some(deployment()));
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(path.join(NAME), "invalid").unwrap();
+        assert!(load_at(&path, owner, true).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+        assert!(load_at(&path, owner.wrapping_add(1), true).is_err());
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(load_at(&link, owner, true).is_err());
+    }
+
+    #[test]
+    fn setup_makes_deployment_readable_despite_a_private_umask() {
+        const CHILD: &str = "LIANLI_TEST_DEPLOYMENT_UMASK";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "container_deployment::tests::setup_makes_deployment_readable_despite_a_private_umask"])
+                .env(CHILD, "1");
+            unsafe {
+                child.pre_exec(|| {
+                    libc::umask(0o077);
+                    Ok(())
+                });
+            }
+            assert!(child.status().unwrap().success());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("deployment");
+        let owner = unsafe { libc::geteuid() };
+        for existing in [false, true] {
+            if existing {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                Store::open(&path, owner, false).unwrap();
+                assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+            }
+            let store = Store::open(&path, owner, true).unwrap().unwrap();
+            store.write(&deployment()).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+            assert_eq!(fs::metadata(path.join(NAME)).unwrap().mode() & 0o777, 0o644);
+            assert_eq!(store.read().unwrap(), Some(deployment()));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(Store::open(&path, owner, true).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o777);
     }
 
     #[test]

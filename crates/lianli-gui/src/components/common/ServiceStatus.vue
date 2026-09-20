@@ -219,18 +219,20 @@ const lockMatch = computed(() => {
     <p v-if="initialSetup">User mode starts at login. System mode starts at boot. Choose one to enable.</p>
     <p v-if="!report" class="muted">{{ installation.checking ? "Checking services…" : "Service status unavailable." }}</p>
     <p v-if="report?.operation_lock?.state === 'unavailable'">Controls unavailable: {{ report.operation_lock.reason }}</p>
-    <div v-if="canSwitch && controlsReady" class="switch-row">
-      <n-select v-model:value="destination" :options="modeOptions" placeholder="Select mode" :disabled="busy || installation.checking" class="mode-select" />
-      <n-select v-if="!initialSetup && destination && destination !== currentMode" v-model:value="settingsChoice"
-        :options="[{ label: 'Copy current settings & media', value: 'carry' }, { label: 'Use destination settings', value: 'destination' }]"
-        :disabled="busy || installation.checking" class="settings-select" />
-      <n-button :disabled="busy || installation.checking || !destination || destination === currentMode"
-        @click="destination && change({ kind: 'switch', scope: destination, carry_settings: !initialSetup && settingsChoice === 'carry' })">{{ initialSetup ? 'Enable and start' : 'Switch service' }}</n-button>
+    <div v-if="(canSwitch && controlsReady) || report?.context.kind === 'distrobox'" class="switch-row">
+      <template v-if="canSwitch && controlsReady">
+        <n-select v-model:value="destination" :options="modeOptions" placeholder="Select mode" :disabled="busy || installation.checking" class="mode-select" />
+        <n-select v-if="!initialSetup && destination && destination !== currentMode" v-model:value="settingsChoice"
+          :options="[{ label: 'Copy current settings & media', value: 'carry' }, { label: 'Use destination settings', value: 'destination' }]"
+          :disabled="busy || installation.checking" class="settings-select" />
+        <n-button :disabled="busy || installation.checking || !destination || destination === currentMode"
+          @click="destination && change({ kind: 'switch', scope: destination, carry_settings: !initialSetup && settingsChoice === 'carry' })">{{ initialSetup ? 'Enable and start' : 'Switch service' }}</n-button>
+      </template>
+      <n-button v-if="report?.context.kind === 'distrobox'" :disabled="busy || installation.checking || daemon.connected || config.dirty" @click="prepareSetup">{{ canSwitch ? 'Repair host support' : 'Set up host support' }}</n-button>
     </div>
-    <p v-else-if="report?.context.kind === 'distrobox'" class="muted">Set up both host service wrappers to switch modes in this box.</p>
+    <p v-if="!(canSwitch && controlsReady) && report?.context.kind === 'distrobox'" class="muted">Set up both host service wrappers to switch modes in this box.</p>
     <n-alert v-if="destination === 'system' && lingeringIssue" type="warning" title="Manual setup required">{{ lingeringIssue.remediation }}</n-alert>
     <n-space v-if="report?.context.kind === 'distrobox'" vertical>
-      <n-button size="small" :disabled="busy || installation.checking || daemon.connected || config.dirty" @click="prepareSetup">{{ canSwitch ? 'Repair host support' : 'Set up host support' }}</n-button>
       <span v-if="daemon.connected" class="muted">Stop the current daemon before setup.</span>
       <span v-else-if="config.dirty" class="muted">Save or discard pending edits before setup.</span>
     </n-space>

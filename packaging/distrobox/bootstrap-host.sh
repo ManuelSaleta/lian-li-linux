@@ -5,11 +5,19 @@ umask 077
 
 fail() { echo "$1" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || fail 'Host setup requires administrator authorization'
-[ "$#" = 4 ] || fail 'Invalid host setup arguments'
+[ "$#" = 5 ] || fail 'Invalid host setup arguments'
 caller_uid=$1
 expected_digest=$2
 source_binary=$3
 deployment=$4
+action=$5
+case "$action" in install|repair) ;; *) fail 'Invalid host setup action';; esac
+run_helper() {
+    case "$action" in
+        install) exec "$1" install-container-services --deployment "$deployment" ;;
+        repair) exec "$1" repair-container-access --expected-box "$deployment" ;;
+    esac
+}
 case "$caller_uid" in ''|0|*[!0-9]*) fail 'Invalid host setup account';; esac
 [ "${PKEXEC_UID:-}" = "$caller_uid" ] || fail 'Host setup authorization belongs to another account'
 caller_gid=$(id -g -- "$caller_uid")
@@ -50,7 +58,7 @@ if [ -e /usr/bin/lianli-control ] || [ -L /usr/bin/lianli-control ]; then
     check_tree /usr/bin/lianli-control
     check_tree "$(realpath -e /usr/bin/lianli-control)"
     [ -f /usr/bin/lianli-control ] && [ -x /usr/bin/lianli-control ] || fail 'The packaged host helper is not executable'
-    exec /usr/bin/lianli-control install-container-services --deployment "$deployment"
+    run_helper /usr/bin/lianli-control
 fi
 
 destination=/usr/local/libexec/lianli/lianli-control
@@ -72,4 +80,4 @@ mv -T -- "$stage_path/lianli-control" "$destination"
 sync -f /usr/local/libexec/lianli
 rm -rf -- "$stage_path"
 trap - EXIT HUP INT TERM
-exec "$destination" install-container-services --deployment "$deployment"
+run_helper "$destination"
