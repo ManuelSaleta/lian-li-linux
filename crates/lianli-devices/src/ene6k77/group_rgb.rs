@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::thread;
 
 fn resolve_effects(config: &RgbDeviceConfig, model: Ene6k77Model, fan_count: u8) -> Vec<RgbEffect> {
+    let mut config = config.clone();
+    config.expand_legacy_group_zone(model.max_fans_per_group());
     let scopes = if model.uses_double_port() {
         vec![RgbScope::Inner, RgbScope::Outer]
     } else {
@@ -517,6 +519,33 @@ mod tests {
                 .collect(),
             regions: None,
             effect_memory: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_single_zone_lights_every_connected_fan() {
+        for model in [Ene6k77Model::SlInfinity, Ene6k77Model::SlV2Fan] {
+            for mode in [RgbMode::Static, RgbMode::Breathing] {
+                let mut config = config();
+                config.zones.truncate(1);
+                config.zones[0].effect.mode = mode;
+                for count in [1, 3, model.max_fans_per_group()] {
+                    let effects = resolve_effects(&config, model, count);
+                    assert!(!effects.is_empty());
+                    for effect in effects {
+                        assert_eq!(effect.mode, mode);
+                        assert_eq!(
+                            &effect.colors[..usize::from(count)],
+                            vec![[1, 20, 30]; usize::from(count)]
+                        );
+                        assert!(effect.colors[usize::from(count)..]
+                            .iter()
+                            .all(|color| *color == [0; 3]));
+                    }
+                }
+                assert!(resolve_effects(&config, model, 0).is_empty());
+                assert_eq!(config.zones.len(), 1);
+            }
         }
     }
 

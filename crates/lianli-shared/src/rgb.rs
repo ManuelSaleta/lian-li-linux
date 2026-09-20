@@ -684,6 +684,28 @@ pub struct RgbDeviceConfig {
     pub effect_memory: Vec<RgbEffectMemory>,
 }
 
+impl RgbDeviceConfig {
+    /// Only for legacy controllers where zone zero applied to the entire fan group.
+    pub fn expand_legacy_group_zone(&mut self, fan_slots: u8) -> bool {
+        if self.regions.is_some() || fan_slots <= 1 {
+            return false;
+        }
+        let [zone] = self.zones.as_slice() else {
+            return false;
+        };
+        if zone.zone_index != 0 {
+            return false;
+        }
+        let zone = zone.clone();
+        self.zones
+            .extend((1..fan_slots).map(|zone_index| RgbZoneConfig {
+                zone_index,
+                ..zone.clone()
+            }));
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbEffectMemory {
     #[serde(default, skip_serializing_if = "Option::is_none")]

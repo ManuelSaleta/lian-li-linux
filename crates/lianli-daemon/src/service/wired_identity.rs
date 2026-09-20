@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 struct Identity {
     family: DeviceFamily,
+    pid: u16,
     old: String,
     current: String,
     serial: Option<String>,
@@ -16,6 +17,7 @@ impl From<&DetectedDevice> for Identity {
     fn from(device: &DetectedDevice) -> Self {
         Self {
             family: device.family,
+            pid: device.pid,
             old: device.legacy_device_id(),
             current: device.device_id(),
             serial: device.serial.clone(),
@@ -143,6 +145,20 @@ fn migrate(config: &mut AppConfig, devices: &[Identity]) -> (bool, Vec<String>) 
                 device.device_id = new.clone();
                 changed = true;
             }
+            if let Some(model) = devices.iter().find_map(|identity| {
+                if identity.family != DeviceFamily::Ene6k77 {
+                    return None;
+                }
+                let group = device
+                    .device_id
+                    .strip_prefix(&format!("{}:group", identity.current))?;
+                if !matches!(group, "0" | "1" | "2" | "3") {
+                    return None;
+                }
+                lianli_devices::ene6k77::Ene6k77Model::from_pid(identity.pid)
+            }) {
+                changed |= device.expand_legacy_group_zone(model.max_fans_per_group());
+            }
         }
         if let Some(merge) = &mut rgb.merge_lighting {
             for list in [&mut merge.device_order, &mut merge.disabled_devices] {
@@ -198,6 +214,7 @@ impl ServiceManager {
         let mut config = original.clone();
         let (changed, warnings) = migrate(&mut config, &identities);
         if changed {
+            tracing::info!("Migrating wired device identities and legacy RGB group settings");
             match persistence::write_config(&self.config_path, &config) {
                 Ok(()) => {
                     state.state_health.wired_identity_save_error(None);
@@ -223,6 +240,7 @@ mod tests {
     fn identity(port: u8) -> Identity {
         Identity {
             family: DeviceFamily::Ene6k77,
+            pid: 0xa102,
             old: "hid:shared".into(),
             current: format!("hid:0cf2:a102:1-{port}"),
             serial: Some("shared".into()),
@@ -264,6 +282,67 @@ mod tests {
             .fan_quantities
             .insert(2, 4);
         config
+    }
+
+    #[test]
+    fn legacy_rgb_groups_expand_before_or_after_identity_migration() {
+        for already_migrated in [false, true] {
+            for pid in 0xa100..=0xa106 {
+                let mut hub = identity(2);
+                hub.pid = pid;
+                hub.current = format!("hid:0cf2:{pid:04x}:1-2");
+                let mut config = config();
+                let rgb = config.rgb.as_mut().unwrap();
+                let device = &mut rgb.devices[0];
+                if already_migrated {
+                    device.device_id = format!("{}:group2", hub.current);
+                }
+                device.zones = serde_json::from_value(serde_json::json!([{
+                    "zone_index": 0,
+                    "effect": {"mode": "Static", "colors": [[12,34,56]], "brightness": 2},
+                    "swap_lr": true
+                }]))
+                .unwrap();
+                let original = device.zones[0].clone();
+                assert!(migrate(&mut config, &[hub]).0);
+                let zones = &config.rgb.as_ref().unwrap().devices[0].zones;
+                let slots = lianli_devices::ene6k77::Ene6k77Model::from_pid(pid)
+                    .unwrap()
+                    .max_fans_per_group();
+                assert_eq!(zones.len(), usize::from(slots));
+                for (index, zone) in zones.iter().enumerate() {
+                    assert_eq!(zone.zone_index as usize, index);
+                    assert_eq!(zone.effect, original.effect);
+                    assert_eq!(zone.swap_lr, original.swap_lr);
+                }
+                let mut reloaded: AppConfig =
+                    serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+                let mut hub = identity(2);
+                hub.pid = pid;
+                hub.current = format!("hid:0cf2:{pid:04x}:1-2");
+                assert_eq!(migrate(&mut reloaded, &[hub]), (false, vec![]));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_non_ene_rgb_and_offline_groups_are_not_expanded() {
+        let mut config = config();
+        config.rgb.as_mut().unwrap().devices[0].zones =
+            serde_json::from_value(serde_json::json!([{
+            "zone_index": 0, "effect": {"mode": "Static"}
+            }]))
+            .unwrap();
+        let before = serde_json::to_value(&config).unwrap();
+        assert!(!migrate(&mut config, &[]).0);
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        let mut aio = identity(2);
+        aio.family = DeviceFamily::Galahad2Lcd;
+        aio.pid = 0x7395;
+        aio.current = "hid:0416:7395:1-2".into();
+        config.rgb.as_mut().unwrap().devices[0].device_id = aio.old.clone();
+        assert!(migrate(&mut config, &[aio]).0);
+        assert_eq!(config.rgb.unwrap().devices[0].zones.len(), 1);
     }
 
     #[test]
