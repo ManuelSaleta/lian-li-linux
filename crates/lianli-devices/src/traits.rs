@@ -270,6 +270,10 @@ pub trait LcdDevice: Send + Sync {
     fn set_brightness(&self, brightness: u8) -> Result<()>;
     fn set_rotation(&self, degrees: u16) -> Result<()>;
     fn initialize(&mut self) -> Result<()>;
+    /// Long initialization can run without retaining the caller's LCD mutex.
+    fn initialization_task(&self) -> Option<Box<dyn FnOnce() -> Result<()> + Send>> {
+        None
+    }
     /// The stop flag is polled between USB exchanges so a recovery attempt
     /// in flight aborts promptly when the owning target is torn down.
     /// Without it a single attempt can hold the device for over twenty

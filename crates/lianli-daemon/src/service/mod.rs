@@ -322,18 +322,23 @@ impl ServiceManager {
         let ready = self.aio_lcd_firmware.drain_due();
 
         for (device_id, enable_512) in ready {
-            let lcd: Option<runtime::SharedHidLcd> = {
+            let (lcd, initializing) = {
                 let targets = self.targets.lock();
-                targets
-                    .values()
-                    .find(|t| t.device_identity == device_id)
+                let target = targets.values().find(|t| t.device_identity == device_id);
+                let lcd = target
+                    .filter(|t| t.is_initialized())
                     .and_then(|t| match &t.lcd {
                         LcdBackend::HidLcd(hid) => Some(Arc::clone(hid)),
                         _ => None,
-                    })
+                    });
+                (lcd, target.is_some_and(|t| t.is_initializing()))
             };
 
             let Some(lcd) = lcd else {
+                if initializing {
+                    self.aio_lcd_firmware
+                        .schedule(&device_id, Duration::from_secs(10), enable_512);
+                }
                 continue;
             };
             // Defer the read while an H.264 stream runs, reads interrupt playback
@@ -655,7 +660,7 @@ impl ServiceManager {
                             }
                         }
                     }
-                    targets.is_empty()
+                    targets.values().all(|target| !target.is_initialized())
                 };
                 drop(prepared);
                 if !stop.load(Ordering::Acquire) {
@@ -955,7 +960,7 @@ impl ServiceManager {
                                     if lcd.matches_attachment(&attachment)
                             )
                     }) {
-                        target.mark_init_complete();
+                        target.finish_initialization(error.as_deref());
                         target.maybe_start_recovery(tx, Duration::from_millis(200));
                         target.flush_pending_brightness(
                             Some(&self.wireless),
@@ -967,6 +972,7 @@ impl ServiceManager {
                             .lock()
                             .state_health
                             .lcd_initialization(&device_id, error.as_deref());
+                        stream_worker.wake();
                     }
                 }
                 DaemonEvent::RebootWirelessLcd { mac } => {

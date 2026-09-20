@@ -376,6 +376,9 @@ fn fan_control_thread(inputs: FanControlInputs) {
                     }
                 } else if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
                     if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
+                        if !dev.is_ready_for_control() {
+                            continue;
+                        }
                         if dev
                             .wireless_link_mac()
                             .is_some_and(|m| bound_wireless_macs.contains(&m))
@@ -394,6 +397,9 @@ fn fan_control_thread(inputs: FanControlInputs) {
                         failures.record(device_id, "set fan speed", Err("device not found"));
                     }
                 } else if let Some(dev) = wired.get(device_id) {
+                    if !dev.is_ready_for_control() {
+                        continue;
+                    }
                     if dev
                         .wireless_link_mac()
                         .is_some_and(|m| bound_wireless_macs.contains(&m))

@@ -214,7 +214,8 @@ pub struct HydroShiftLcdController {
     brightness: AtomicU8,
     rotation: AtomicU8,
     video_fps: AtomicU8,
-    initialized: AtomicBool,
+    initialization_started: AtomicBool,
+    initialization: super::initialization::Initialization,
     control_ready: AtomicBool,
     use_c_command: AtomicBool,
     firmware_string: OnceLock<String>,
@@ -237,7 +238,8 @@ impl HydroShiftLcdController {
             brightness: AtomicU8::new(50),
             rotation: AtomicU8::new(ScreenRotation::Rotate0 as u8),
             video_fps: AtomicU8::new(ScreenInfo::AIO_LCD_480.max_fps as u8),
-            initialized: AtomicBool::new(false),
+            initialization_started: AtomicBool::new(false),
+            initialization: Default::default(),
             control_ready: AtomicBool::new(false),
             use_c_command: AtomicBool::new(false),
             firmware_string: OnceLock::new(),
@@ -250,9 +252,18 @@ impl HydroShiftLcdController {
     }
 
     pub(crate) fn init(&self) -> Result<()> {
-        if self.initialized.swap(true, Ordering::SeqCst) {
-            return Ok(());
-        }
+        self.initialization
+            .run(lianli_transport::usb::shutting_down, || {
+                self.initialize_device()
+            })
+    }
+
+    pub(super) fn initialization_ready(&self) -> Result<bool> {
+        self.initialization.ready()
+    }
+
+    fn initialize_device(&self) -> Result<()> {
+        self.initialization_started.store(true, Ordering::SeqCst);
         let name = self.variant.name();
         info!("Initializing {name} — waiting 10s for device to settle");
         wait_for_initialization(Duration::from_secs(10))?;
@@ -346,7 +357,7 @@ impl HydroShiftLcdController {
     }
 
     pub fn handshake(&self) -> Result<AioHandshake> {
-        let timeout = if self.initialized.load(Ordering::Relaxed) {
+        let timeout = if self.initialization_started.load(Ordering::Relaxed) {
             READ_TIMEOUT_MS
         } else {
             INIT_READ_TIMEOUT_MS
@@ -1018,6 +1029,14 @@ impl LcdDevice for Arc<HydroShiftLcdController> {
     fn initialize(&mut self) -> Result<()> {
         self.init()?;
         self.apply_lcd_settings()
+    }
+
+    fn initialization_task(&self) -> Option<Box<dyn FnOnce() -> Result<()> + Send>> {
+        let controller = Arc::clone(self);
+        Some(Box::new(move || {
+            controller.init()?;
+            controller.apply_lcd_settings()
+        }))
     }
 
     fn check_and_recover_lcd(

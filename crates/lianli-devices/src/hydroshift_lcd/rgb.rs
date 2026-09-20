@@ -1,12 +1,14 @@
 use super::protocol::{
     A_HEADER_LEN, A_PACKET_SIZE, CMD_SET_FAN_LIGHT, CMD_SET_PUMP_LIGHT, FAN_LED_COUNT, REPORT_ID_A,
 };
-use super::AioLcdVariant;
+use super::{AioLcdVariant, HydroShiftLcdController};
 use crate::registry::SharedHid;
 use crate::traits::RgbDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::rgb::{RgbEffect, RgbMode, RgbScope, RgbZoneInfo};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info};
 
 const GALAHAD_FAN_LED_CONTROL: lianli_shared::rgb::RgbLedCountControl =
@@ -21,10 +23,16 @@ pub struct AioLcdRgbController {
     device: SharedHid,
     variant: AioLcdVariant,
     fan_led_count: AtomicU16,
+    controller: Arc<HydroShiftLcdController>,
+    pending: Mutex<Vec<(u8, Vec<u8>)>>,
 }
 
 impl AioLcdRgbController {
-    pub fn new(device: SharedHid, pid: u16) -> Result<Self> {
+    pub(crate) fn new(
+        device: SharedHid,
+        pid: u16,
+        controller: Arc<HydroShiftLcdController>,
+    ) -> Result<Self> {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
         info!("Opened {} RGB controller", variant.name());
@@ -32,6 +40,8 @@ impl AioLcdRgbController {
             device,
             variant,
             fan_led_count: AtomicU16::new(FAN_LED_COUNT),
+            controller,
+            pending: Mutex::new(Vec::new()),
         })
     }
 
@@ -102,6 +112,32 @@ impl AioLcdRgbController {
     }
 
     fn send_rgb_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
+        let mut pending = self.pending.lock();
+        if !self.controller.initialization_ready()? {
+            defer_rgb_command(&mut pending, cmd, data);
+            return Ok(());
+        }
+        self.flush_commands(&mut pending)?;
+        self.write_rgb_command(cmd, data)
+    }
+
+    pub(super) fn flush_pending(&self) -> Result<()> {
+        let mut pending = self.pending.lock();
+        if self.controller.initialization_ready()? {
+            self.flush_commands(&mut pending)?;
+        }
+        Ok(())
+    }
+
+    fn flush_commands(&self, pending: &mut Vec<(u8, Vec<u8>)>) -> Result<()> {
+        while let Some((cmd, data)) = pending.first() {
+            self.write_rgb_command(*cmd, data)?;
+            pending.remove(0);
+        }
+        Ok(())
+    }
+
+    fn write_rgb_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         let max_payload = A_PACKET_SIZE - A_HEADER_LEN;
         if data.len() > max_payload {
             bail!(
@@ -119,6 +155,13 @@ impl AioLcdRgbController {
         dev.write(&pkt).context("AIO LCD RGB: write")?;
         Ok(())
     }
+}
+
+fn defer_rgb_command(pending: &mut Vec<(u8, Vec<u8>)>, cmd: u8, data: &[u8]) {
+    pending.retain(|(old_cmd, old_data)| {
+        *old_cmd != cmd || (cmd == CMD_SET_PUMP_LIGHT && data[0] != 2 && old_data[0] != data[0])
+    });
+    pending.push((cmd, data.to_vec()));
 }
 
 impl RgbDevice for AioLcdRgbController {
@@ -245,6 +288,25 @@ fn zones(variant: AioLcdVariant, fan_led_count: u16) -> Vec<RgbZoneInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_rgb_keeps_latest_settings_and_scope_order_bounded() {
+        let mut pending = Vec::new();
+        for value in 0..100 {
+            defer_rgb_command(&mut pending, CMD_SET_FAN_LIGHT, &[value]);
+            for scope in [2, 0, 1] {
+                defer_rgb_command(&mut pending, CMD_SET_PUMP_LIGHT, &[scope, value]);
+            }
+            assert_eq!(pending.len(), 4);
+        }
+        assert_eq!(pending[0], (CMD_SET_FAN_LIGHT, vec![99]));
+        assert_eq!(pending[1], (CMD_SET_PUMP_LIGHT, vec![2, 99]));
+        assert_eq!(pending[2], (CMD_SET_PUMP_LIGHT, vec![0, 99]));
+        assert_eq!(pending[3], (CMD_SET_PUMP_LIGHT, vec![1, 99]));
+        defer_rgb_command(&mut pending, CMD_SET_PUMP_LIGHT, &[2, 100]);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[1], (CMD_SET_PUMP_LIGHT, vec![2, 100]));
+    }
 
     #[test]
     fn galahad_fan_led_count_payload_and_bounds() {

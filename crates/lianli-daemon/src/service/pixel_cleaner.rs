@@ -146,6 +146,14 @@ impl ServiceManager {
             .targets
             .try_lock_for(Duration::from_millis(100))
             .ok_or("LCD targets are busy. Retry shortly.")?;
+        if targets.iter().any(|(index, target)| {
+            !target.is_initialized()
+                && target_id.as_ref().is_none_or(|id| {
+                    target_matches(id, *index, &target.device_identity, self.config.as_ref())
+                })
+        }) {
+            return Err("LCD initialization has not completed. Check Installation Health before starting pixel cleaning.".into());
+        }
         let planned: Vec<_> = targets
             .iter()
             .filter(|(index, target)| {

@@ -555,24 +555,40 @@ impl ServiceManager {
                             candidate.device_id,
                             device_cfg.orientation
                         );
+                        let mut init_pending = false;
+                        let mut init_error = None;
                         if let LcdBackend::HidLcd(ref hid) = lcd {
                             // hydroshift init sleeps 10s, keep it off the main loop
                             if is_wired_aio_lcd(candidate.family) {
+                                init_pending = true;
                                 let hid_init = std::sync::Arc::clone(hid);
                                 let enable_512 = device_cfg.aio_512_frame_for(candidate.family);
                                 let device_id = candidate.device_id.clone();
                                 let init_tx = self.tx.clone();
                                 let spawn_err_id = device_id.clone();
+                                let initialization_task = hid.lock().initialization_task();
                                 if let Err(e) = std::thread::Builder::new()
                                     .name(format!("lcd-init-{device_id}"))
                                     .spawn(move || {
-                                        let mut guard = hid_init.lock();
-                                        let error = guard.initialize().err().map(|e| {
+                                        let result =
+                                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                                || match initialization_task {
+                                                    Some(initialize) => initialize(),
+                                                    None => hid_init.lock().initialize(),
+                                                },
+                                            ))
+                                            .unwrap_or_else(|_| {
+                                                Err(anyhow::anyhow!(
+                                                    "LCD initialization worker panicked"
+                                                ))
+                                            });
+                                        let error = result.err().map(|e| {
                                             warn!("AIO LCD init failed for {device_id}: {e:#}");
                                             format!("{e:#}").chars().take(2048).collect()
                                         });
-                                        guard.set_use_c_command(enable_512);
-                                        drop(guard);
+                                        if error.is_none() {
+                                            hid_init.lock().set_use_c_command(enable_512);
+                                        }
                                         if let Some(tx) = init_tx {
                                             tx.send(DaemonEvent::LcdInitComplete {
                                                 device_id,
@@ -590,6 +606,8 @@ impl ServiceManager {
                                         &spawn_err_id,
                                         Some(&format!("Could not start LCD initialization: {e}")),
                                     );
+                                    init_error =
+                                        Some(format!("Could not start LCD initialization: {e}"));
                                 }
                                 self.aio_lcd_firmware
                                     .record(&candidate.device_id, None, false);
@@ -611,12 +629,13 @@ impl ServiceManager {
                                         &candidate.device_id,
                                         Some(&format!("{e:#}")),
                                     );
+                                    init_error = Some(format!("{e:#}"));
                                 }
                             }
                         }
                         let screen =
                             screen_info_for(candidate.family).unwrap_or(ScreenInfo::WIRELESS_LCD);
-                        let target = ActiveTarget::new(
+                        let mut target = ActiveTarget::new(
                             cfg_idx,
                             candidate.device_id.clone(),
                             lcd,
@@ -625,14 +644,17 @@ impl ServiceManager {
                             applied_cfg.custom_h264(),
                             self.tx.clone(),
                         );
+                        if init_pending {
+                            target.wait_for_initialization();
+                        }
+                        if let Some(error) = init_error {
+                            target.finish_initialization(Some(&error));
+                        }
+                        target.maybe_start_recovery(self.tx.clone(), std::time::Duration::ZERO);
                         new_targets.insert(cfg_idx, target);
                         {
                             let brightness = device_cfg.brightness();
                             if let Some(t) = new_targets.get_mut(&cfg_idx) {
-                                // Bounded so the main loop cannot stall behind
-                                // the init worker holding the LCD mutex. When
-                                // the LCD is busy the value is deferred and
-                                // applied once init completes.
                                 t.apply_brightness(
                                     Some(&self.wireless),
                                     &mut self.packet_builder,

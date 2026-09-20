@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use tracing::warn;
 mod controller;
+mod initialization;
 mod protocol;
 mod responses;
 mod rgb;
@@ -171,17 +172,25 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
 
         let lcd_ctrl = HydroShiftLcdController::new(std::sync::Arc::clone(&backend), pid)?;
         let lcd_arc = std::sync::Arc::new(lcd_ctrl);
+        let rgb_ctrl = Arc::new(AioLcdRgbController::new(
+            backend.clone(),
+            pid,
+            lcd_arc.clone(),
+        )?);
         let init_arc = std::sync::Arc::clone(&lcd_arc);
+        let init_rgb = rgb_ctrl.clone();
+        // The worker retains the controller until its bounded, shutdown-aware initialization ends.
         std::thread::Builder::new()
             .name(format!("aio-lcd-init-{pid:04x}"))
             .spawn(move || {
                 if let Err(e) = init_arc.init() {
                     warn!("Deferred AIO LCD init failed: {e:#}");
+                } else if let Err(e) = init_rgb.flush_pending() {
+                    warn!("Deferred AIO RGB settings failed: {e:#}");
                 }
             })
-            .ok();
+            .map_err(|error| anyhow::anyhow!("Could not start AIO initialization: {error}"))?;
         let firmware = lcd_arc.firmware_version_str().map(|s| s.to_string());
-        let rgb_ctrl = AioLcdRgbController::new(backend.clone(), pid)?;
 
         Ok(crate::registry::OpenedDevice {
             sensors: None,
@@ -193,10 +202,7 @@ impl crate::registry::DeviceDriver for HydroShiftLcdDriver {
             firmware,
             fan: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
             lcd: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
-            rgb: vec![(
-                String::new(),
-                Arc::new(rgb_ctrl) as Arc<dyn crate::traits::RgbDevice>,
-            )],
+            rgb: vec![(String::new(), rgb_ctrl as Arc<dyn crate::traits::RgbDevice>)],
             aio: Some(Box::new(std::sync::Arc::clone(&lcd_arc))),
             shared_hid: Some(backend),
             shared_usb: None,

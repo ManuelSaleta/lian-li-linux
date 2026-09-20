@@ -111,6 +111,30 @@ impl Drop for HidStreamLease {
 // boundary would otherwise grow `accum` without limit
 const MAX_AU_BYTES: usize = 4 * 1024 * 1024;
 
+fn hid_stream_frame_interval(
+    lcd: &SharedHidLcd,
+    fps: f32,
+    stopped: &dyn Fn() -> bool,
+    timeout: Duration,
+) -> Option<Duration> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if stopped() {
+            return None;
+        }
+        if let Some(mut guard) = lcd.try_lock_for(Duration::from_millis(50)) {
+            if stopped() {
+                return None;
+            }
+            return Some(Duration::from_secs_f32(1.0 / guard.set_stream_fps(fps)));
+        }
+        if std::time::Instant::now() >= deadline {
+            warn!("HID h264 stream not started: LCD remained busy for {timeout:?}");
+            return None;
+        }
+    }
+}
+
 /// Sends one access unit with three attempts, false when aborted or failed
 fn send_h264_au_with_retry(lcd: &SharedHidLcd, au: &[u8], aborted: &dyn Fn() -> bool) -> bool {
     let mut last_err = None;
@@ -172,19 +196,11 @@ fn spawn_hid_h264_stream(
     let handle = thread::spawn(move || {
         let _lease = lease;
         let halted = || worker_stop.load(Ordering::Relaxed) || worker_halt.load(Ordering::Relaxed);
-        let fps = loop {
-            if halted() {
-                return;
-            }
-            let Some(mut guard) = lcd.try_lock_for(Duration::from_millis(50)) else {
-                continue;
-            };
-            if halted() {
-                return;
-            }
-            break guard.set_stream_fps(fps);
+        let Some(frame_interval) =
+            hid_stream_frame_interval(&lcd, fps, &halted, Duration::from_secs(3))
+        else {
+            return;
         };
-        let frame_interval = Duration::from_secs_f32(1.0 / fps);
         let mut read_buf = vec![0u8; 64 * 1024];
         let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         let mut next_deadline = Instant::now() + frame_interval;
@@ -1012,10 +1028,7 @@ pub(crate) struct ActiveTarget {
     pub(super) consecutive_errors: u32,
     recovery_stop: Arc<AtomicBool>,
     recovery_thread: Option<JoinHandle<()>>,
-    /// Set once the init worker reports LcdInitComplete for this device.
-    /// Before it, a false answer from supports_c_command only means the
-    /// firmware is not known yet and must be retried later.
-    init_complete: bool,
+    initialization: LcdInitialization,
     /// Set when the device definitively does not support recovery, so the
     /// periodic retry stops probing it.
     recovery_unsupported: bool,
@@ -1023,6 +1036,12 @@ pub(crate) struct ActiveTarget {
     /// the LCD. Applied when init completes.
     pending_brightness: Option<u8>,
     brightness_retries: u8,
+}
+
+enum LcdInitialization {
+    Pending,
+    Ready,
+    Failed(String),
 }
 
 fn spawn_recovery_thread(
@@ -1084,29 +1103,6 @@ impl ActiveTarget {
         let key = asset.config_key.clone();
         let media: Box<dyn FrameSource> = Box::new(NoopFrameSource);
         let recovery_stop = Arc::new(AtomicBool::new(false));
-        let recovery_thread = match &lcd {
-            LcdBackend::HidLcd(d) => {
-                // bounded: the init worker holds this mutex across the 10s
-                // settle on some paths
-                // Not gated on recovery_idle, renderer targets already hold
-                // a lease here. The thread idles itself while streams run
-                let supports = d
-                    .try_lock_for(Duration::from_millis(200))
-                    .is_some_and(|guard| guard.supports_c_command());
-                if supports {
-                    Some(spawn_recovery_thread(
-                        Arc::clone(d),
-                        Arc::clone(&recovery_stop),
-                        index,
-                        device_identity.clone(),
-                        tx.clone(),
-                    ))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
         Self {
             index,
             key,
@@ -1129,21 +1125,20 @@ impl ActiveTarget {
             frame_counter: 0,
             consecutive_errors: 0,
             recovery_stop,
-            recovery_thread,
-            init_complete: false,
+            recovery_thread: None,
+            initialization: LcdInitialization::Ready,
             recovery_unsupported: false,
             pending_brightness: None,
             brightness_retries: 0,
         }
     }
 
-    /// Start the recovery thread if it is missing and the device now
-    /// reports c-command support. Called from new, where firmware may
-    /// already be known, after LcdInitComplete, and from the periodic
-    /// device poll with a zero wait so a busy LCD is retried later
-    /// instead of disabling recovery for the whole session.
     pub(super) fn maybe_start_recovery(&mut self, tx: Option<Sender<DaemonEvent>>, wait: Duration) {
-        if self.removal.is_some() || self.recovery_thread.is_some() || self.recovery_unsupported {
+        if !self.is_initialized()
+            || self.removal.is_some()
+            || self.recovery_thread.is_some()
+            || self.recovery_unsupported
+        {
             return;
         }
         let LcdBackend::HidLcd(d) = &self.lcd else {
@@ -1169,9 +1164,7 @@ impl ActiveTarget {
         let firmware_known = guard.firmware_version_str().is_some();
         drop(guard);
         if !supports {
-            // Before init completes this only means the firmware is not
-            // known yet. After it, the answer is definitive.
-            if self.init_complete && firmware_known {
+            if firmware_known {
                 self.recovery_unsupported = true;
                 debug!(
                     "[devices] LCD[{}] firmware does not support recovery, stopping retries",
@@ -1193,10 +1186,29 @@ impl ActiveTarget {
         ));
     }
 
-    /// The init worker finished, so answers from the device are now
-    /// definitive and deferred work can be applied.
-    pub(super) fn mark_init_complete(&mut self) {
-        self.init_complete = true;
+    pub(super) fn wait_for_initialization(&mut self) {
+        self.initialization = LcdInitialization::Pending;
+    }
+
+    pub(super) fn is_initialized(&self) -> bool {
+        matches!(self.initialization, LcdInitialization::Ready)
+    }
+
+    pub(super) fn is_initializing(&self) -> bool {
+        matches!(self.initialization, LcdInitialization::Pending)
+    }
+
+    pub(super) fn finish_initialization(&mut self, error: Option<&str>) {
+        self.initialization = match error {
+            Some(error) => LcdInitialization::Failed(error.chars().take(2048).collect()),
+            None => LcdInitialization::Ready,
+        };
+        if let LcdInitialization::Failed(error) = &self.initialization {
+            self.media_stage = lianli_shared::ipc::MediaRuntimeStage::Failed;
+            self.media_fallback = Some(format!(
+                "LCD initialization failed: {error}. Restart the daemon to retry initialization."
+            ));
+        }
     }
 
     pub(super) fn cleaner_payload_limit(&self) -> usize {
@@ -1235,6 +1247,9 @@ impl ActiveTarget {
         wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
     ) {
+        if !self.is_initialized() {
+            return;
+        }
         let Some(brightness) = self.pending_brightness else {
             return;
         };
@@ -1302,7 +1317,8 @@ impl ActiveTarget {
     }
 
     pub(super) fn source_request(&self) -> Option<SourceRequest> {
-        (self.media_pending
+        (self.is_initialized()
+            && self.media_pending
             && self.removal.is_none()
             && self.retired_media.is_none()
             && self.pending_brightness.is_none()
@@ -1325,7 +1341,8 @@ impl ActiveTarget {
     }
 
     pub(super) fn accepts_source(&self, result: &SourceResult) -> bool {
-        self.index == result.index
+        self.is_initialized()
+            && self.index == result.index
             && self.media_pending
             && self.removal.is_none()
             && self.retired_media.is_none()
@@ -1334,6 +1351,9 @@ impl ActiveTarget {
     }
 
     pub(super) fn install_source(&mut self, result: SourceResult) {
+        if !self.accepts_source(&result) {
+            return;
+        }
         let mut fallback = None;
         let media = result.result.try_accept(|prepared| {
             let prepared = match prepared {
@@ -1409,7 +1429,8 @@ impl ActiveTarget {
         wireless: Option<&WirelessController>,
         builder: &mut PacketBuilder,
     ) -> Result<bool, SendError> {
-        if self.removal.is_some()
+        if !self.is_initialized()
+            || self.removal.is_some()
             || self.media_stage == lianli_shared::ipc::MediaRuntimeStage::Failed
         {
             return Ok(false);
@@ -1508,7 +1529,10 @@ impl ActiveTarget {
 
     pub(super) fn media_status(&self) -> lianli_shared::ipc::MediaRuntimeStatus {
         lianli_shared::ipc::MediaRuntimeStatus {
-            stage: if self.source_failed || self.removal.is_some() {
+            stage: if matches!(self.initialization, LcdInitialization::Failed(_))
+                || self.source_failed
+                || self.removal.is_some()
+            {
                 lianli_shared::ipc::MediaRuntimeStage::Failed
             } else {
                 self.media_stage
@@ -1530,7 +1554,7 @@ impl ActiveTarget {
     }
 
     pub(super) fn retry_failed_source(&mut self) {
-        if self.removal.is_some() {
+        if !self.is_initialized() || self.removal.is_some() {
             return;
         }
         if self.source_failed || self.media_stage == lianli_shared::ipc::MediaRuntimeStage::Failed {
@@ -2180,18 +2204,14 @@ fn stream_h264_file_to_hid(
     use std::io::{Read, Seek, SeekFrom};
     use std::time::Instant;
 
-    let frame_interval = {
-        let Some(mut guard) = lcd.try_lock_for(Duration::from_millis(100)) else {
-            return false;
-        };
-        if stop.load(Ordering::Relaxed) {
-            return false;
-        }
-        Duration::from_secs_f32(1.0 / guard.set_stream_fps(fps))
+    let stopped = || stop.load(Ordering::Relaxed);
+    let Some(frame_interval) =
+        hid_stream_frame_interval(&lcd, fps, &stopped, Duration::from_secs(3))
+    else {
+        return false;
     };
     let mut read_buf = vec![0u8; 64 * 1024];
     let mut next_deadline = Instant::now() + frame_interval;
-    let stopped = || stop.load(Ordering::Relaxed);
     // a single-AU file never yields a split boundary, its only frame rides
     // the EOF flush, allow it exactly one looping pass
     let mut first_pass = true;
@@ -2624,6 +2644,18 @@ mod tests {
             true,
             None,
         );
+        target.wait_for_initialization();
+        assert!(target.source_request().is_none());
+        let premature = SourceResult {
+            index: 0,
+            selection: Arc::downgrade(&target.source_selection),
+            result: Err("must not install while initializing".into()).into(),
+        };
+        assert!(!target.accepts_source(&premature));
+        target.install_source(premature);
+        assert!(!target.source_failed);
+        target.finish_initialization(None);
+        assert!(target.source_request().is_some());
         assert!(rx.try_recv().is_err());
         target.apply_brightness(None, &mut PacketBuilder::new(), 100);
         assert!(matches!(
@@ -3051,6 +3083,153 @@ mod tests {
 
     fn lcd(fail_on: usize) -> (SharedHidLcd, Arc<AtomicUsize>) {
         lcd_with_failures(fail_on, 1)
+    }
+
+    #[test]
+    fn pending_aio_defers_media_and_brightness_without_blocking_ready_targets() {
+        let brightness = Arc::new(AtomicUsize::new(75));
+        let device = Arc::new(HidLcd::new(Box::new(TestLcd {
+            brightness: brightness.clone(),
+            sends: Arc::new(AtomicUsize::new(0)),
+            fail_on: 0,
+            fail_count: 0,
+        })));
+        let asset = Arc::new(MediaAsset {
+            kind: MediaAssetKind::Static {
+                frame: lianli_media::Retained::frame(vec![1]).unwrap(),
+            },
+            config_key: "init-test".into(),
+            stream_fps: 20.0,
+            hardware_video: false,
+        });
+        let mut pending = ActiveTarget::new(
+            0,
+            "pending".into(),
+            LcdBackend::HidLcd(device.clone()),
+            asset.clone(),
+            ScreenInfo::AIO_LCD_480,
+            false,
+            None,
+        );
+        let mut ready = ActiveTarget::new(
+            1,
+            "ready".into(),
+            LcdBackend::HidLcd(lcd(0).0),
+            asset,
+            ScreenInfo::AIO_LCD_480,
+            false,
+            None,
+        );
+        pending.wait_for_initialization();
+        let guard = device.lock();
+        let mut builder = PacketBuilder::new();
+        pending.apply_brightness(None, &mut builder, 42);
+        pending.maybe_start_recovery(None, Duration::ZERO);
+        assert!(matches!(pending.send_frame(None, &mut builder), Ok(false)));
+        assert!(pending.media_pending);
+        assert!(pending.recovery_thread.is_none());
+        assert_eq!(pending.pending_brightness, Some(42));
+        assert_eq!(brightness.load(Ordering::Relaxed), 75);
+        assert!(matches!(ready.send_frame(None, &mut builder), Ok(true)));
+        assert_eq!(ready.frame_counter, 1);
+        drop(guard);
+        pending.finish_initialization(None);
+        assert!(matches!(pending.send_frame(None, &mut builder), Ok(false)));
+        pending.flush_pending_brightness(None, &mut builder);
+        assert_eq!(brightness.load(Ordering::Relaxed), 42);
+        assert!(matches!(pending.send_frame(None, &mut builder), Ok(true)));
+        assert_eq!(pending.frame_counter, 1);
+    }
+
+    #[test]
+    fn failed_initialization_cannot_be_bypassed_by_media_retry_or_replacement() {
+        let asset = Arc::new(MediaAsset {
+            kind: MediaAssetKind::Static {
+                frame: lianli_media::Retained::frame(vec![1]).unwrap(),
+            },
+            config_key: "init-failed".into(),
+            stream_fps: 20.0,
+            hardware_video: false,
+        });
+        let mut target = ActiveTarget::new(
+            0,
+            "failed".into(),
+            LcdBackend::HidLcd(lcd(0).0),
+            asset.clone(),
+            ScreenInfo::AIO_LCD_480,
+            false,
+            None,
+        );
+        target.wait_for_initialization();
+        target.finish_initialization(Some("device disconnected"));
+        target.retry_failed_source();
+        target.swap_media(asset, true, None);
+        assert_eq!(
+            target.media_status().stage,
+            lianli_shared::ipc::MediaRuntimeStage::Failed
+        );
+        assert!(matches!(
+            target.send_frame(None, &mut PacketBuilder::new()),
+            Ok(false)
+        ));
+        assert!(target
+            .media_status()
+            .fallback_reason
+            .unwrap()
+            .contains("device disconnected"));
+    }
+
+    #[test]
+    fn h264_startup_lock_wait_can_expire_or_cancel_without_transferring() {
+        let (lcd, sends) = lcd(0);
+        let guard = lcd.lock();
+        assert!(
+            hid_stream_frame_interval(&lcd, 20.0, &|| false, Duration::from_millis(75)).is_none()
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker_lcd = lcd.clone();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            hid_stream_frame_interval(
+                &worker_lcd,
+                20.0,
+                &|| {
+                    entered.send(()).unwrap();
+                    worker_stop.load(Ordering::Relaxed)
+                },
+                Duration::from_secs(3),
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        assert!(worker.join().unwrap().is_none());
+        drop(guard);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn file_playback_survives_startup_lock_contention() {
+        let path = std::env::temp_dir().join(format!(
+            "lianli-startup-contention-{}.h264",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0, 0, 0, 1, 5, 128]).unwrap();
+        let (lcd, sends) = lcd(0);
+        let guard = lcd.lock();
+        let mut source = H264FileSource::new(path.clone(), false, 20.0);
+        source.start(&LcdBackend::HidLcd(lcd.clone())).unwrap();
+        thread::sleep(Duration::from_millis(250));
+        assert!(!source.has_exited());
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        drop(guard);
+        wait_for_file_worker(&source);
+        assert!(!source.has_exited());
+        assert_eq!(source.transferred(), Some(true));
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert!(lcd.recovery_idle().is_some());
+        drop(source);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
