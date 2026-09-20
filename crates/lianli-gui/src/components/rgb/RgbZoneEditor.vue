@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useDialog } from "naive-ui";
-import { Plus, Trash2 } from "lucide-vue-next";
+import { Plus, RotateCcw, Trash2 } from "lucide-vue-next";
 import type { RgbDeviceCapabilities, RgbZoneConfig, RgbEffect, RGB } from "@/types";
 import { useRgbStore } from "@/stores/rgb";
 import { useConfigStore } from "@/stores/config";
@@ -249,7 +249,15 @@ const zoneLabel = computed(
     </div>
 
     <div v-if="expanded" class="zone-body">
-      <LabeledSlider v-if="countControl" label="LED count" :model-value="ledCount" :min="countControl.min" :max="countControl.max" :step="1" @update:model-value="onLedCount" />
+      <details v-if="countControl" class="led-count-settings">
+        <summary>Configure LED count</summary>
+        <div class="led-count-row">
+          <LabeledSlider class="led-count-slider" label="LED count" :model-value="ledCount" :min="countControl.min" :max="countControl.max" :step="1" @update:model-value="onLedCount" />
+          <n-button v-if="ledCount !== countControl.default" size="tiny" quaternary :title="`Reset to ${countControl.default}`" :aria-label="`Reset LED count to ${countControl.default}`" @click="onLedCount(countControl.default)">
+            <template #icon><RotateCcw :size="14" /></template>
+          </n-button>
+        </div>
+      </details>
       <div class="effect-controls" :class="{ 'sync-locked': lightingLocked }" :inert="lightingLocked || undefined">
       <div class="row">
         <label class="muted">Mode</label>
@@ -358,6 +366,20 @@ const zoneLabel = computed(
 <style scoped>
 .effect-controls { display: flex; flex-direction: column; gap: var(--space-3); }
 .sync-locked { opacity: 0.5; }
+.led-count-settings > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.led-count-settings[open] > summary {
+  margin-bottom: var(--space-2);
+}
+.led-count-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.led-count-slider { flex: 1; min-width: 0; }
 .zone {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
