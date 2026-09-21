@@ -3,6 +3,22 @@
 Generated from git history by git-cliff (see .github/cliff.toml).
 Regenerate rather than editing by hand.
 
+## v1.1.2 — 2026-09-21
+
+### Fixes
+- **lcd**: Resolve template sensors that appear after startup  ([#215](https://github.com/sgtaziz/lian-li-linux/pull/215))
+- **lcd**: Wait for AIO initialization before playback (fixes [#216](https://github.com/sgtaziz/lian-li-linux/issues/216))
+- **distrobox**: Recover selection after native uninstall  (`e58ead3`)
+- **branding**: Use Lian Li Linux for application labels  (`76dbdf3`)
+- **distrobox**: Repair deployment access during authorized actions  (`cc1cc35`)
+- **distrobox**: Make unused system lingering check informational  (`5f67d7a`)
+- **rgb**: Migrate legacy ENE group lighting across fan zones  (`555fcf1`)
+- **gui**: Collapse LED count settings and add reset control  (`000b5e6`)
+- **services**: Respect shutdown policy overrides (fixes [#206](https://github.com/sgtaziz/lian-li-linux/issues/206))
+
+### Tests
+- **control**: Use process credentials in service command fixture  (`4399e7a`)
+
 ## v1.1.1 — 2026-09-19
 
 ### Fixes
