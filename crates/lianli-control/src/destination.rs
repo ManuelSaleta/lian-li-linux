@@ -352,6 +352,21 @@ fn verify_override(text: &str) -> Result<()> {
             continue;
         }
         let (key, value) = line.split_once('=').context("Invalid override directive")?;
+        if service
+            && matches!(
+                key.trim(),
+                "KillMode"
+                    | "SendSIGKILL"
+                    | "KillSignal"
+                    | "RestartKillSignal"
+                    | "FinalKillSignal"
+                    | "TimeoutStopFailureMode"
+                    | "TimeoutStopSec"
+                    | "TimeoutAbortSec"
+            )
+        {
+            continue;
+        }
         ensure!(
             service && key.trim() == "Environment",
             "Override directive {} affects the verified service recipe",
@@ -969,6 +984,8 @@ mod tests {
         for text in [
             "[Service]\nEnvironment=LIANLI_ENABLE_HW_VIDEO=1\n",
             "[Service]\nEnvironment=\"RUST_LOG=info\"\nEnvironment=WAYLAND_DISPLAY=wayland-1\n",
+            "[Service]\nTimeoutStopFailureMode=abort\n",
+            "[Service]\nKillMode=control-group\nSendSIGKILL=yes\nKillSignal=SIGINT\nRestartKillSignal=SIGTERM\nFinalKillSignal=SIGABRT\nTimeoutStopSec=45s\nTimeoutAbortSec=10s\n",
         ] {
             verify_override(text).unwrap();
         }

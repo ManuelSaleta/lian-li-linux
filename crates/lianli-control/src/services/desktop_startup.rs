@@ -52,13 +52,9 @@ fn finding(name: &str, inspected: Result<(UnitState, Option<String>)>) -> Instal
                     "Desktop login service is missing or unavailable",
                     detail,
                 )
-            } else if recipe.as_deref() != Some(name)
-                || unit.graceful_shutdown != Some(true)
-                || unit.kill_mode.as_deref() != Some("control-group")
-                || unit.send_sigkill != Some(false)
-            {
+            } else if recipe.as_deref() != Some(name) {
                 (CheckState::Failed, "Desktop login service needs the current recipe",
-                    format!("{detail} Start and stop commands must use the current capture recipe for box '{name}' and its bounded shutdown policy."))
+                    format!("{detail} Start and guarded stop commands must identify the same capture service invocation in box '{name}'."))
             } else if unit.unit_file_state != "enabled" {
                 (
                     CheckState::Failed,
@@ -112,20 +108,28 @@ mod tests {
     }
 
     #[test]
+    fn configured_capture_respects_distribution_shutdown_overrides() {
+        let mut unit = configured();
+        unit.graceful_shutdown = Some(false);
+        unit.kill_mode = Some("mixed".into());
+        unit.send_sigkill = Some(true);
+        let result = finding("box", Ok((unit, Some("box".into()))));
+        assert_eq!(result.state, CheckState::Passed);
+    }
+
+    #[test]
     fn missing_disabled_failed_and_wrong_box_services_need_attention() {
         for (field, value) in [
             ("load", "masked"),
             ("startup", "disabled"),
             ("startup", "enabled-runtime"),
             ("runtime", "failed"),
-            ("kill", "mixed"),
         ] {
             let mut unit = configured();
             match field {
                 "load" => unit.load_state = value.into(),
                 "startup" => unit.unit_file_state = value.into(),
                 "runtime" => unit.active_state = value.into(),
-                "kill" => unit.kill_mode = Some(value.into()),
                 _ => unreachable!(),
             }
             assert_eq!(

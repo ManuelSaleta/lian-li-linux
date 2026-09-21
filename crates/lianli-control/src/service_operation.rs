@@ -127,13 +127,6 @@ fn preflight(report: &ServiceReport, request: ServiceActionRequest, user_uid: u3
         target.load_state == "loaded",
         "The selected service is not loaded. Install and reload its unit first"
     );
-    let kill_mode = if target.distrobox_name.is_some() {
-        "control-group"
-    } else {
-        "mixed"
-    };
-    ensure!(target.kill_mode.as_deref() == Some(kill_mode) && target.send_sigkill == Some(false) && target.graceful_shutdown == Some(true),
-        "Install and reload the current service recipe with KillMode={kill_mode}, SendSIGKILL=no and its verified SIGTERM shutdown policy before using service controls");
     let ownership = owner(report)?;
     match request.action {
         ServiceAction::Start => {
@@ -419,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn distrobox_controls_require_helper_cleanup_without_forced_kills() {
+    fn service_controls_respect_the_hosts_shutdown_policy() {
         for distrobox in [false, true] {
             for mode in ["mixed", "control-group", "process", "none"] {
                 for send_sigkill in [false, true] {
@@ -430,11 +423,9 @@ mod tests {
                     value.distrobox_name = distrobox.then(|| "test-box".into());
                     value.kill_mode = Some(mode.into());
                     value.send_sigkill = Some(send_sigkill);
-                    let expected =
-                        !send_sigkill && mode == if distrobox { "control-group" } else { "mixed" };
-                    assert_eq!(
+                    value.graceful_shutdown = Some(false);
+                    assert!(
                         preflight(&snapshot, request(ServiceAction::Start), 1000).is_ok(),
-                        expected,
                         "box={distrobox}, mode={mode}, forced={send_sigkill}"
                     );
                 }
@@ -615,11 +606,5 @@ mod tests {
         };
         assert!(run(&mut conflict, request(ServiceAction::Start), |_| Ok(())).is_err());
         assert_eq!(conflict.calls, 0);
-        let mut unsafe_unit = fixture(true, false);
-        if let ServiceProbe::Known { value } = &mut unsafe_unit.before.user {
-            value.send_sigkill = Some(true);
-        }
-        assert!(run(&mut unsafe_unit, request(ServiceAction::Stop), |_| Ok(())).is_err());
-        assert_eq!(unsafe_unit.calls, 0);
     }
 }

@@ -172,6 +172,7 @@ impl Deployment {
             "Installed container wrapper exceeds 32 KiB"
         );
         self.verify_unit(scope, &contents)?;
+        crate::distrobox_service::verify_managed(scope, &self.route)?;
         Ok(())
     }
 
@@ -184,9 +185,8 @@ impl Deployment {
             properties.get("LoadState") == Some(&"loaded")
                 && properties.get("NeedDaemonReload") == Some(&"no")
                 && properties.get("Transient") == Some(&"no")
-                && properties.get("DropInPaths") == Some(&"")
                 && properties.get("FragmentPath").map(Path::new) == Some(path),
-            "Install the managed wrapper without overrides and reload the service manager"
+            "Install the managed wrapper and reload the service manager"
         );
         let owner = if scope == ServiceScope::System {
             self.owner_uid.to_string()
@@ -573,21 +573,27 @@ mod tests {
     }
 
     #[test]
-    fn loaded_wrapper_checks_reject_overrides_stale_units_and_other_owners() {
+    fn loaded_wrapper_checks_allow_dropins_but_reject_stale_units_and_other_owners() {
         let record = deployment();
         let path = Path::new("/etc/systemd/system/lianli-daemon-system.service");
         let properties = format!("LoadState=loaded\nNeedDaemonReload=no\nTransient=no\nDropInPaths=\nFragmentPath={}\nUser=1000\n", path.display());
         record
             .verify_properties(ServiceScope::System, path, &properties)
             .unwrap();
+        record
+            .verify_properties(
+                ServiceScope::System,
+                path,
+                &properties.replace(
+                    "DropInPaths=",
+                    "DropInPaths=/run/systemd/system/override.conf",
+                ),
+            )
+            .unwrap();
         for (old, new) in [
             ("LoadState=loaded", "LoadState=not-found"),
             ("NeedDaemonReload=no", "NeedDaemonReload=yes"),
             ("Transient=no", "Transient=yes"),
-            (
-                "DropInPaths=",
-                "DropInPaths=/run/systemd/system/override.conf",
-            ),
             ("FragmentPath=/etc", "FragmentPath=/run"),
             ("User=1000", "User=0"),
         ] {

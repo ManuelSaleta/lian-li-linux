@@ -17,7 +17,7 @@ type Command = (
     i32,
 );
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Commands {
     #[serde(rename = "type")]
     signature: String,
@@ -32,6 +32,51 @@ pub(super) fn inspect(route: &Route, scope: ServiceScope) -> Result<Option<Strin
 pub(super) fn inspect_session(route: &Route) -> Result<Option<String>> {
     let (start, stop) = read_commands(route, ServiceScope::User, "lianli-session.service")?;
     match_commands(start, stop, true)
+}
+
+pub(super) fn verify_managed(
+    scope: ServiceScope,
+    destination: &crate::container_destination::Route,
+) -> Result<()> {
+    let (start, stop) = read_commands(&Route::Native, scope, scope.unit())?;
+    verify_managed_commands(scope, destination, start, stop)
+}
+
+fn verify_managed_commands(
+    scope: ServiceScope,
+    destination: &crate::container_destination::Route,
+    start: Commands,
+    stop: Commands,
+) -> Result<()> {
+    let launch = &destination.launch;
+    let (config, working) = destination.paths(scope);
+    let arguments = start.data.first().map(|command| &command.1);
+    let argument = |index| {
+        arguments
+            .and_then(|args| args.get(index))
+            .map(String::as_str)
+    };
+    let config_index = if scope == ServiceScope::System {
+        11
+    } else {
+        10
+    };
+    ensure!(
+        argument(2).map(Path::new) == Some(launch.host_enter.as_path())
+            && argument(7) == Some(format!("--chdir={}", working.display()).as_str())
+            && argument(8).map(Path::new) == Some(launch.binaries.join("lianli-daemon").as_path())
+            && argument(config_index).map(Path::new) == Some(config)
+            && stop
+                .data
+                .first()
+                .and_then(|command| command.1.get(6))
+                .map(Path::new)
+                == Some(launch.binaries.join("lianli-control").as_path()),
+        "The loaded service commands differ from the managed deployment paths"
+    );
+    ensure!(match_scoped_recipe(scope, start, stop)?.as_deref() == Some(launch.name.as_str()),
+        "The loaded service commands do not identify the managed box and guarded service invocation");
+    Ok(())
 }
 
 fn read_commands(route: &Route, scope: ServiceScope, unit: &str) -> Result<(Commands, Commands)> {
@@ -391,6 +436,38 @@ mod tests {
                 stopping.data[0]
                     .1
                     .splice(8..8, ["--scope", "system"].map(str::to_owned));
+            }
+            let destination = crate::container_destination::Route {
+                launch: crate::container_destination::Launch {
+                    name: "box".into(),
+                    host_enter: "/usr/bin/distrobox-enter".into(),
+                    binaries: "/usr/bin".into(),
+                },
+                user_config: "/state/config.json".into(),
+                system_config: "/state/config.json".into(),
+                user_working_directory: "/home/box owner".into(),
+                system_working_directory: "/home/box owner".into(),
+            };
+            verify_managed_commands(scope, &destination, managed.clone(), stopping.clone())
+                .unwrap();
+            let config_index = if scope == ServiceScope::System {
+                11
+            } else {
+                10
+            };
+            for (index, replacement) in [
+                (2, "/opt/distrobox-enter"),
+                (4, "other-box"),
+                (7, "--chdir=/other"),
+                (8, "/opt/lianli-daemon"),
+                (config_index, "/other/config.json"),
+            ] {
+                let mut altered = managed.clone();
+                altered.data[0].1[index] = replacement.into();
+                assert!(
+                    verify_managed_commands(scope, &destination, altered, stopping.clone())
+                        .is_err()
+                );
             }
             assert_eq!(
                 match_scoped_recipe(scope, managed, stopping)

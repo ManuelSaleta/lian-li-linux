@@ -225,21 +225,17 @@ pub fn inspect(context: &InstallationContext) -> ServiceReport {
             let output = route.query(&[scope, "show", "--all", "--property", PROPERTIES, name])?;
             ensure!(output.status.success(), "{}", command_error(&output));
             let mut state = parse_unit(&output.stdout, name)?;
-            if state.graceful_shutdown == Some(false)
-                && output.stdout.lines().any(|line| {
-                    line.strip_prefix("ExecStop=")
-                        .is_some_and(|value| !value.is_empty())
-                })
-            {
+            if output.stdout.lines().any(|line| {
+                line.strip_prefix("ExecStop=")
+                    .is_some_and(|value| !value.is_empty())
+            }) {
                 let service_scope = if name == USER_UNIT {
                     lianli_shared::services::ServiceScope::User
                 } else {
                     lianli_shared::services::ServiceScope::System
                 };
                 if let Some(box_name) = crate::distrobox_service::inspect(route, service_scope)? {
-                    state = parse_unit_with_stop(&output.stdout, name, true)?;
-                    state.distrobox_name =
-                        (state.graceful_shutdown == Some(true)).then_some(box_name);
+                    state = parse_distrobox_unit(&output.stdout, name, box_name)?;
                 }
             }
             Ok(state)
@@ -579,6 +575,12 @@ fn parse_unit(text: &str, name: &str) -> Result<UnitState> {
     parse_unit_with_stop(text, name, false)
 }
 
+fn parse_distrobox_unit(text: &str, name: &str, box_name: String) -> Result<UnitState> {
+    let mut unit = parse_unit_with_stop(text, name, true)?;
+    unit.distrobox_name = Some(box_name);
+    Ok(unit)
+}
+
 fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<UnitState> {
     let mut properties = HashMap::new();
     let mut nonempty_stop_hooks = std::collections::HashSet::new();
@@ -666,6 +668,17 @@ fn parse_unit_with_stop(text: &str, name: &str, verified_stop: bool) -> Result<U
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fedora_abort_policy_does_not_erase_a_verified_box_identity() {
+        let unit = parse_distrobox_unit(
+            "Id=lianli-daemon.service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nKillSignal=15\nRestartKillSignal=15\nTimeoutStopFailureMode=abort\nExecStop=verified guarded stop\n",
+            USER_UNIT,
+            "lianli".into(),
+        ).unwrap();
+        assert_eq!(unit.distrobox_name.as_deref(), Some("lianli"));
+        assert_eq!(unit.graceful_shutdown, Some(false));
+    }
 
     #[test]
     fn repeated_stop_commands_preserve_shutdown_validation() {
